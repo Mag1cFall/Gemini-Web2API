@@ -42,6 +42,18 @@ class ChatCompletionResponse(BaseModel):
     choices: List[ChatCompletionChoice]
     usage: Usage = Field(default_factory=Usage)
 
+# --- Pydantic Models for /v1/models ---
+
+class ModelCard(BaseModel):
+    id: str
+    object: str = "model"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    owned_by: str = "Google"
+
+class ModelList(BaseModel):
+    object: str = "list"
+    data: List[ModelCard] = []
+
 # --- Pydantic Models for Streaming ---
 
 class DeltaMessage(BaseModel):
@@ -92,7 +104,15 @@ async def startup_event():
         print(f"FATAL: Failed to initialize Gemini Client: {e}")
         print("Your cookies in .env might be expired. Please run get_cookies.py to refresh them.")
 
-# --- API Endpoint ---
+# --- API Endpoints ---
+
+@app.get("/v1/models", response_model=ModelList)
+async def list_models():
+    """
+    Handler for OpenAI-compatible model listing.
+    """
+    model_cards = [ModelCard(id=model.value[0]) for model in Model if model != Model.UNSPECIFIED]
+    return ModelList(data=model_cards)
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, authorization: Optional[str] = Header(None)):
