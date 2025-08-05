@@ -240,4 +240,4 @@ def read_root():
 
 if __name__ == "__main__":
     print("Starting Gemini to OpenAI Adapter server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8007)
