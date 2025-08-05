@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gemini-webapi"
 authors = [
-    {name = "UZQueen"},
+    {name = "Mag1cFall"},
 ]
 description = "✨ An elegant async Python wrapper for Google Gemini web app"
 readme = "README.md"
@@ -28,8 +28,8 @@ dependencies = [
 version = "0.1.0"
 
 [project.urls]
-Repository = "https://github.com/HanaokaYuzu/Gemini-API"
-Issues = "https://github.com/HanaokaYuzu/Gemini-API/issues"
+Repository = "https://github.com/Mag1cFall/Gemini-Web2API.git"
+Issues = "https://github.com/Mag1cFall/Gemini-Web2API/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
