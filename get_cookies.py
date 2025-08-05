@@ -27,14 +27,14 @@ def find_firefox_profile_path():
             profile_dir = os.path.join(profiles_path, profile)
             if os.path.isdir(profile_dir) and "cookies.sqlite" in os.listdir(profile_dir):
                 print(f"Found Firefox profile: {profile_dir}")
-                return profile_dir
+                return profile_dir.replace('\\', '/')
 
     # Fallback to any profile with a cookie database
     for profile in os.listdir(profiles_path):
         profile_dir = os.path.join(profiles_path, profile)
         if os.path.isdir(profile_dir) and "cookies.sqlite" in os.listdir(profile_dir):
             print(f"Found Firefox profile (fallback): {profile_dir}")
-            return profile_dir
+            return profile_dir.replace('\\', '/')
             
     return None
 
