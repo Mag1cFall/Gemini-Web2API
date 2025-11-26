@@ -18,4 +18,5 @@ Thumbs.db
 # Go
 go.work
 
-legacy_python/
+# env
+.env
