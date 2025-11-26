@@ -46,6 +46,7 @@ func main() {
 	// gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
+	r.Use(adapter.CORSMiddleware())
 	r.Use(adapter.AuthMiddleware())
 
 	r.POST("/v1/chat/completions", adapter.ChatCompletionHandler(client))

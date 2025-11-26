@@ -39,5 +39,5 @@ func (c *Client) UploadFile(data []byte, filename string) (string, error) {
 		return "", err
 	}
 
-	return string(body), nil
+	return strings.TrimSpace(string(body)), nil
 }

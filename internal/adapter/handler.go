@@ -34,6 +34,21 @@ type ChatRequest struct {
 	Model    string        `json:"model"`
 }
 
+func CORSMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	}
+}
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requiredKey := os.Getenv("PROXY_API_KEY")
@@ -165,77 +180,58 @@ func ChatCompletionHandler(client *gemini.Client) gin.HandlerFunc {
 		}
 		defer respBody.Close()
 
+		id := fmt.Sprintf("chatcmpl-%d", time.Now().Unix())
+		created := time.Now().Unix()
+
+		// Handle non-streaming request (stream: false)
+		if !req.Stream {
+			var fullText strings.Builder
+			var fullThinking strings.Builder
+
+			parseGeminiResponse(respBody, func(text, thought string) {
+				fullText.WriteString(text)
+				fullThinking.WriteString(thought)
+			})
+
+			resp := map[string]interface{}{
+				"id":      id,
+				"object":  "chat.completion",
+				"created": created,
+				"model":   req.Model,
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"message": map[string]interface{}{
+							"role":              "assistant",
+							"content":           fullText.String(),
+							"reasoning_content": fullThinking.String(),
+						},
+						"finish_reason": "stop",
+					},
+				},
+			}
+			c.JSON(http.StatusOK, resp)
+			return
+		}
+
+		// Handle streaming request (stream: true)
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Transfer-Encoding", "chunked")
 
-		scanner := bufio.NewScanner(respBody)
-		buf := make([]byte, 0, 1024*1024)
-		scanner.Buffer(buf, 10*1024*1024)
-
-		id := fmt.Sprintf("chatcmpl-%d", time.Now().Unix())
-		created := time.Now().Unix()
+		// Send initial Role packet (Required by Cline and others)
+		sendSSERole(c.Writer, id, created, req.Model)
 
 		c.Stream(func(w io.Writer) bool {
-			for scanner.Scan() {
-				line := scanner.Text()
-				if strings.HasPrefix(line, ")]}'") {
-					line = line[4:]
+			parseGeminiResponse(respBody, func(text, thought string) {
+				if thought != "" {
+					sendSSEThinking(w, id, created, req.Model, thought)
 				}
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
+				if text != "" {
+					sendSSE(w, id, created, req.Model, text)
 				}
-
-				outer := gjson.Parse(line)
-				if !outer.IsArray() {
-					continue
-				}
-
-				outer.ForEach(func(key, value gjson.Result) bool {
-					dataStr := value.Get("2").String()
-					if dataStr == "" {
-						return true
-					}
-
-					inner := gjson.Parse(dataStr)
-
-					candidates := inner.Get("4")
-					if candidates.IsArray() {
-						candidates.ForEach(func(_, candidate gjson.Result) bool {
-
-							text := candidate.Get("1.0").String()
-
-							thoughts := candidate.Get("37.0.0").String()
-
-							if thoughts == "" && text != "" {
-								matches := thinkingBlockRegex.FindStringSubmatch(text)
-								if len(matches) < 2 {
-									matches = chineseThinkingRegex.FindStringSubmatch(text)
-								}
-
-								if len(matches) >= 2 {
-									thoughts = strings.TrimSpace(matches[1])
-									text = strings.Replace(text, matches[0], "", 1)
-									text = strings.TrimSpace(text)
-								}
-							}
-
-							if thoughts != "" {
-								sendSSEThinking(w, id, created, req.Model, thoughts)
-							}
-
-							if text != "" {
-								sendSSE(w, id, created, req.Model, text)
-							}
-
-							return true
-						})
-					}
-					return true
-				})
-			}
+			})
 			return false
 		})
 
@@ -243,6 +239,94 @@ func ChatCompletionHandler(client *gemini.Client) gin.HandlerFunc {
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		w.(http.Flusher).Flush()
 	}
+}
+
+// Extract common parsing logic
+func parseGeminiResponse(reader io.Reader, onChunk func(text, thought string)) {
+	scanner := bufio.NewScanner(reader)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, ")]}'") {
+			line = line[4:]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		outer := gjson.Parse(line)
+		if !outer.IsArray() {
+			continue
+		}
+
+		outer.ForEach(func(key, value gjson.Result) bool {
+			dataStr := value.Get("2").String()
+			if dataStr == "" {
+				return true
+			}
+
+			inner := gjson.Parse(dataStr)
+
+			candidates := inner.Get("4")
+			if candidates.IsArray() {
+				candidates.ForEach(func(_, candidate gjson.Result) bool {
+					text := candidate.Get("1.0").String()
+					thoughts := candidate.Get("37.0.0").String()
+
+					// Fix: Gemini Web often escapes special characters in code blocks or XML tags
+					// e.g. \<read\_file\> instead of <read_file>
+					// This reverses the Markdown escaping to restore raw tool calls/code.
+					text = strings.ReplaceAll(text, `\<`, `<`)
+					text = strings.ReplaceAll(text, `\>`, `>`)
+					text = strings.ReplaceAll(text, `\_`, `_`)
+					// Also fix brackets which might break JSON or array definitions in text
+					text = strings.ReplaceAll(text, `\[`, `[`)
+					text = strings.ReplaceAll(text, `\]`, `]`)
+
+					if thoughts == "" && text != "" {
+						matches := thinkingBlockRegex.FindStringSubmatch(text)
+						if len(matches) < 2 {
+							matches = chineseThinkingRegex.FindStringSubmatch(text)
+						}
+
+						if len(matches) >= 2 {
+							thoughts = strings.TrimSpace(matches[1])
+							text = strings.Replace(text, matches[0], "", 1)
+							text = strings.TrimSpace(text)
+						}
+					}
+
+					onChunk(text, thoughts)
+					return true
+				})
+			}
+			return true
+		})
+	}
+}
+
+func sendSSERole(w io.Writer, id string, created int64, model string) {
+	resp := map[string]interface{}{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"delta": map[string]string{
+					"role": "assistant",
+				},
+				"finish_reason": nil,
+			},
+		},
+	}
+	bytes, _ := json.Marshal(resp)
+	fmt.Fprintf(w, "data: %s\n\n", bytes)
+	w.(http.Flusher).Flush()
 }
 
 func sendSSE(w io.Writer, id string, created int64, model, content string) {

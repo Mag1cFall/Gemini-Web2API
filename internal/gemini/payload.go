@@ -40,6 +40,7 @@ func BuildGeneratePayload(prompt string, reqID int, files []FileData, meta *Chat
 			item := `[]`
 			urlArr := `[]`
 			urlArr, _ = sjson.Set(urlArr, "0", f.URL)
+			urlArr, _ = sjson.Set(urlArr, "1", 1)
 
 			item, _ = sjson.SetRaw(item, "0", urlArr)
 			item, _ = sjson.Set(item, "1", f.FileName)
