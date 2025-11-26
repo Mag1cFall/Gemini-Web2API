@@ -1,49 +1,29 @@
 @echo off
-:: Section to request Administrator privileges
->nul 2>&1 "%SYSTEMROOT%\system32\cacls.exe" "%SYSTEMROOT%\system32\config\system"
-if '%errorlevel%' NEQ '0' (
-    echo Requesting administrative privileges...
-    goto UACPrompt
-) else ( goto gotAdmin )
-
-:UACPrompt
-    echo Set UAC = CreateObject^("Shell.Application"^) > "%temp%\getadmin.vbs"
-    echo UAC.ShellExecute "%~s0", "", "", "runas", 1 >> "%temp%\getadmin.vbs"
-    "%temp%\getadmin.vbs"
-    exit /B
-
-:gotAdmin
-    if exist "%temp%\getadmin.vbs" ( del "%temp%\getadmin.vbs" )
-    pushd "%CD%"
-    CD /D "%~dp0"
-:: End of Administrator request section
-
-:: Change directory to the script's location
-cd /d "%~dp0"
-
-echo Creating virtual environment...
-python -m venv .venv
-
-echo Activating virtual environment...
-call .venv\Scripts\activate
-
-echo Installing the gemini-webapi package in editable mode first...
-pip install -e .
-
-echo Installing dependencies from requirements.txt...
-pip install -r requirements.txt
-
-echo.
-echo Running cookie retrieval script...
-python get_cookies.py
+echo ==========================================
+echo      Gemini-Web2API (Go Version)
+echo ==========================================
 echo.
 
-echo ==================================================
-echo Setup complete.
+:: 1. Check if exe exists, if not or if code changed, rebuild
+if not exist Gemini-Web2API.exe (
+    echo Executable not found. Building...
+    go build -ldflags="-s -w" -o Gemini-Web2API.exe cmd/server/main.go
+    if %errorlevel% neq 0 (
+        echo Build failed! Please check your Go installation.
+        pause
+        exit /b
+    )
+    echo Build successful!
+)
+
+:: 2. Run the executable
+echo Starting server...
+echo It will automatically attempt to load cookies from your browser (Firefox/Chrome/Edge).
 echo.
-echo Your API keys should be in a file named .env
-echo To run the server in the future, just run this script again.
-echo ==================================================
-echo.
-echo Starting server now...
-python openai_adapter.py
+Gemini-Web2API.exe
+
+if %errorlevel% neq 0 (
+    echo.
+    echo Server exited with error.
+    pause
+)
