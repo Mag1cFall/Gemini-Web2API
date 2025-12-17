@@ -3,12 +3,50 @@ package browser
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/browserutils/kooky"
-	_ "github.com/browserutils/kooky/browser/firefox"
+	"github.com/browserutils/kooky/browser/firefox"
 )
+
+func findFirefoxCookiesDB() string {
+	appData := os.Getenv("APPDATA")
+	if appData == "" {
+		return ""
+	}
+	profilesDir := filepath.Join(appData, "Mozilla", "Firefox", "Profiles")
+	entries, err := os.ReadDir(profilesDir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			cookiesPath := filepath.Join(profilesDir, entry.Name(), "cookies.sqlite")
+			if _, err := os.Stat(cookiesPath); err == nil {
+				return cookiesPath
+			}
+		}
+	}
+	return ""
+}
+
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+	_, err = io.Copy(dstFile, srcFile)
+	return err
+}
 
 func LoadCookies() (map[string]string, error) {
 	cookies := make(map[string]string)
@@ -26,7 +64,24 @@ func LoadCookies() (map[string]string, error) {
 
 	fmt.Println("Attempting to read cookies from Firefox...")
 
-	foundCookies, err := kooky.ReadCookies(context.Background(), kooky.Domain("google.com"))
+	var foundCookies []*kooky.Cookie
+	var err error
+
+	cookiesDB := findFirefoxCookiesDB()
+	if cookiesDB != "" {
+		fmt.Printf("Found Firefox cookies at: %s\n", cookiesDB)
+		tmpFile := filepath.Join(os.TempDir(), "gemini_cookies_tmp.sqlite")
+		if copyErr := copyFile(cookiesDB, tmpFile); copyErr != nil {
+			fmt.Printf("Warning: Could not copy cookies file: %v\n", copyErr)
+			foundCookies, err = firefox.ReadCookies(context.Background(), cookiesDB)
+		} else {
+			defer os.Remove(tmpFile)
+			foundCookies, err = firefox.ReadCookies(context.Background(), tmpFile)
+		}
+	} else {
+		foundCookies, err = kooky.ReadCookies(context.Background())
+	}
+
 	if err != nil {
 		fmt.Printf("Warning: Firefox lookup had issues: %v\n", err)
 		if os.PathSeparator == '\\' {
@@ -36,7 +91,9 @@ func LoadCookies() (map[string]string, error) {
 
 	for _, c := range foundCookies {
 		if c.Name == "__Secure-1PSID" || c.Name == "__Secure-1PSIDTS" {
-			cookies[c.Name] = c.Value
+			if strings.Contains(c.Domain, "google.com") {
+				cookies[c.Name] = c.Value
+			}
 		}
 	}
 
