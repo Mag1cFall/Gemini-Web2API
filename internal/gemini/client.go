@@ -23,9 +23,9 @@ const (
 // ModelHeaders maps model names to their specific required headers.
 // You can add new models here by inspecting the 'x-goog-ext-525001261-jspb' header in browser DevTools.
 var ModelHeaders = map[string]string{
-	"gemini-2.5-flash":      `[1,null,null,null,"71c2d248d3b102ff"]`,
-	"gemini-3-pro-preview":  `[1,null,null,null,"e6fa609c3fa255c0"]`,
-	"gemini-3-pro-thinking": `[1,null,null,null,"e051ce1aa80aa576"]`,
+	"gemini-2.5-flash":       `[1,null,null,null,"71c2d248d3b102ff"]`,
+	"gemini-3-pro-preview":   `[1,null,null,null,"e6fa609c3fa255c0"]`,
+	"gemini-3-flash-preview": `[1,null,null,null,"e051ce1aa80aa576"]`,
 }
 
 type Client struct {

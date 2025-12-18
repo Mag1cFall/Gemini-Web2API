@@ -90,7 +90,7 @@ func ListModelsHandler(c *gin.Context) {
 	models := []ModelCard{
 		{ID: "gemini-2.5-flash", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
 		{ID: "gemini-3-pro-preview", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
-		{ID: "gemini-3-pro-thinking", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
+		{ID: "gemini-3-flash-preview", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
 	}
 
 	c.JSON(http.StatusOK, gin.H{
