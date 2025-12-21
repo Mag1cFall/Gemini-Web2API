@@ -51,15 +51,19 @@ func copyFile(src, dst string) error {
 func LoadCookies() (map[string]string, error) {
 	cookies := make(map[string]string)
 
-	p1 := os.Getenv("__Secure-1PSID")
-	p2 := os.Getenv("__Secure-1PSIDTS")
-
-	if p1 != "" {
-		cookies["__Secure-1PSID"] = p1
-		if p2 != "" {
-			cookies["__Secure-1PSIDTS"] = p2
+	if content, err := os.ReadFile(".env"); err == nil {
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "__Secure-1PSID=") {
+				cookies["__Secure-1PSID"] = strings.TrimPrefix(line, "__Secure-1PSID=")
+			} else if strings.HasPrefix(line, "__Secure-1PSIDTS=") {
+				cookies["__Secure-1PSIDTS"] = strings.TrimPrefix(line, "__Secure-1PSIDTS=")
+			}
 		}
-		return cookies, nil
+		if val, ok := cookies["__Secure-1PSID"]; ok && val != "" {
+			return cookies, nil
+		}
 	}
 
 	fmt.Println("Attempting to read cookies from Firefox...")
