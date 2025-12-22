@@ -174,6 +174,8 @@ func ChatCompletionHandler(client *gemini.Client) gin.HandlerFunc {
 			finalPrompt = "Hello"
 		}
 
+		gemini.RandomDelay()
+
 		respBody, err := client.StreamGenerateContent(finalPrompt, req.Model, files, nil)
 		if err != nil {
 			log.Printf("Gemini request failed: %v", err)

@@ -10,14 +10,12 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 )
 
 const (
 	EndpointGoogle   = "https://www.google.com"
 	EndpointInit     = "https://gemini.google.com/app"
 	EndpointGenerate = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-	UserAgent        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 // ModelHeaders maps model names to their specific required headers.
@@ -39,15 +37,10 @@ type Client struct {
 }
 
 func NewClient(cookies map[string]string) (*Client, error) {
-	jar := tls_client.NewCookieJar()
+	profile := GetRandomProfile()
+	log.Printf("Using browser profile: %s on %v", profile.Browser, profile.OS)
 
-	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(300),
-		tls_client.WithClientProfile(profiles.Chrome_120),
-		tls_client.WithNotFollowRedirects(),
-		tls_client.WithCookieJar(jar),
-	}
-
+	options := GetClientOptions(profile)
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 	if err != nil {
 		return nil, err
@@ -74,7 +67,7 @@ func NewClient(cookies map[string]string) (*Client, error) {
 
 func (c *Client) Init() error {
 	req, _ := http.NewRequest(http.MethodGet, EndpointInit, nil)
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", GetCurrentUserAgent())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 
 	resp, err := c.httpClient.Do(req)
@@ -146,7 +139,7 @@ func (c *Client) StreamGenerateContent(prompt string, model string, files []File
 	req.URL.RawQuery = q.Encode()
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", GetCurrentUserAgent())
 	req.Header.Set("Origin", "https://gemini.google.com")
 	req.Header.Set("Referer", "https://gemini.google.com/")
 	req.Header.Set("X-Same-Domain", "1")
