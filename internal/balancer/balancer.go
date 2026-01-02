@@ -55,3 +55,28 @@ func (p *AccountPool) Size() int {
 	defer p.mu.RUnlock()
 	return len(p.entries)
 }
+
+func (p *AccountPool) ReplaceAccounts(newAccountIDs []string, changedClients map[string]*gemini.Client) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	oldEntries := make(map[string]*gemini.Client)
+	for _, entry := range p.entries {
+		oldEntries[entry.AccountID] = entry.Client
+	}
+
+	p.entries = make([]AccountEntry, 0, len(newAccountIDs))
+	for _, accountID := range newAccountIDs {
+		if newClient, changed := changedClients[accountID]; changed {
+			p.entries = append(p.entries, AccountEntry{
+				Client:    newClient,
+				AccountID: accountID,
+			})
+		} else if oldClient, existed := oldEntries[accountID]; existed {
+			p.entries = append(p.entries, AccountEntry{
+				Client:    oldClient,
+				AccountID: accountID,
+			})
+		}
+	}
+}

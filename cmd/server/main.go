@@ -87,11 +87,14 @@ func loadAccountsAsync() {
 	}
 
 	var toInit []int
+	var toKeep []string
 	for i, accountID := range accountIDs {
 		oldHash, existed := oldCookies[accountID]
 		newHash := newCookies[accountID]
 		if !existed || oldHash != newHash {
 			toInit = append(toInit, i)
+		} else {
+			toKeep = append(toKeep, accountID)
 		}
 	}
 
@@ -100,7 +103,7 @@ func loadAccountsAsync() {
 		return
 	}
 
-	log.Printf("Detected %d account(s) with cookie changes, initializing...", len(toInit))
+	log.Printf("Detected %d account(s) with cookie changes, %d unchanged", len(toInit), len(toKeep))
 
 	type accountResult struct {
 		client    *gemini.Client
@@ -167,10 +170,12 @@ func loadAccountsAsync() {
 	wg.Wait()
 	close(results)
 
-	pool.Clear()
+	changedAccounts := make(map[string]*gemini.Client)
 	for result := range results {
-		pool.Add(result.client, result.accountID)
+		changedAccounts[result.accountID] = result.client
 	}
+
+	pool.ReplaceAccounts(accountIDs, changedAccounts)
 
 	cookiesMu.Lock()
 	accountCookies = newCookies
