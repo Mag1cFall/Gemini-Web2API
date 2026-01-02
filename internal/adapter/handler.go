@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"gemini-web2api/internal/balancer"
 	"gemini-web2api/internal/gemini"
 	"io"
 	"log"
@@ -79,6 +80,28 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+func LoggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+
+		accountID, exists := c.Get("account_id")
+		if exists {
+			displayID, ok := accountID.(string)
+			if !ok || displayID == "" {
+				displayID = "default"
+			}
+			log.Printf("[Account '%s'] %s %s - %d - %v",
+				displayID,
+				c.Request.Method,
+				c.Request.URL.Path,
+				c.Writer.Status(),
+				time.Since(start),
+			)
+		}
+	}
+}
+
 func ListModelsHandler(c *gin.Context) {
 	type ModelCard struct {
 		ID      string `json:"id"`
@@ -100,8 +123,16 @@ func ListModelsHandler(c *gin.Context) {
 	})
 }
 
-func ChatCompletionHandler(client *gemini.Client) gin.HandlerFunc {
+func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		client, accountID := pool.Next()
+		if client == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "No available accounts"})
+			return
+		}
+
+		c.Set("account_id", accountID)
+
 		var req ChatRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

@@ -110,6 +110,110 @@ func LoadCookies() (map[string]string, error) {
 	return cookies, nil
 }
 
+func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error) {
+	var results []map[string]string
+	var usedIDs []string
+
+	content, err := os.ReadFile(".env")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read .env file: %v", err)
+	}
+
+	envMap := make(map[string]string)
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			envMap[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+
+	if len(accountIDs) == 0 || (len(accountIDs) == 1 && accountIDs[0] == "") {
+		accountIDs = []string{}
+		if envMap["__Secure-1PSID"] != "" {
+			accountIDs = append(accountIDs, "")
+		}
+		for key := range envMap {
+			if strings.HasPrefix(key, "__Secure-1PSID_") && key != "__Secure-1PSID" {
+				suffix := strings.TrimPrefix(key, "__Secure-1PSID_")
+				accountIDs = append(accountIDs, suffix)
+			}
+		}
+		if len(accountIDs) == 0 {
+			return nil, nil, fmt.Errorf("no accounts configured in .env")
+		}
+		fmt.Printf("Auto-detected accounts: %v\n", accountIDs)
+	}
+
+	for _, id := range accountIDs {
+		var psidKey, psidtsKey string
+		if id == "" {
+			psidKey = "__Secure-1PSID"
+			psidtsKey = "__Secure-1PSIDTS"
+		} else {
+			psidKey = fmt.Sprintf("__Secure-1PSID_%s", id)
+			psidtsKey = fmt.Sprintf("__Secure-1PSIDTS_%s", id)
+		}
+
+		psid := envMap[psidKey]
+		psidts := envMap[psidtsKey]
+
+		if psid == "" {
+			displayID := id
+			if displayID == "" {
+				displayID = "default"
+			}
+			fmt.Printf("Warning: Account '%s' missing %s, skipped\n", displayID, psidKey)
+			continue
+		}
+
+		cookies := map[string]string{
+			"__Secure-1PSID":   psid,
+			"__Secure-1PSIDTS": psidts,
+		}
+		results = append(results, cookies)
+		usedIDs = append(usedIDs, id)
+		displayID := id
+		if displayID == "" {
+			displayID = "default"
+		}
+		fmt.Printf("Loaded account '%s' cookies\n", displayID)
+	}
+
+	if len(results) == 0 {
+		return nil, nil, fmt.Errorf("no valid accounts found")
+	}
+
+	return results, usedIDs, nil
+}
+
+func ParseAccountIDs(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return []string{""}
+	}
+
+	s = strings.Trim(s, "[]{}")
+	parts := strings.Split(s, ",")
+
+	var ids []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			ids = append(ids, p)
+		}
+	}
+
+	if len(ids) == 0 {
+		return []string{""}
+	}
+	return ids
+}
+
 func saveToEnv(cookies map[string]string) {
 	content, err := os.ReadFile(".env")
 	envMap := make(map[string]string)

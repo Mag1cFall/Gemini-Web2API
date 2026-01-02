@@ -38,7 +38,6 @@ type Client struct {
 
 func NewClient(cookies map[string]string) (*Client, error) {
 	profile := GetRandomProfile()
-	log.Printf("Using browser profile: %s on %v", profile.Browser, profile.OS)
 
 	options := GetClientOptions(profile)
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)

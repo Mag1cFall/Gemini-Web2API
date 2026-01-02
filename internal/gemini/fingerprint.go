@@ -57,7 +57,6 @@ func selectRandomProfile() {
 	idx := rng.Intn(len(profileConfigs))
 	currentProfile = profileConfigs[idx]
 	currentUserAgent = generateUserAgentForProfile(currentProfile)
-	log.Printf("Selected profile: %s on %v -> %s", currentProfile.Browser, currentProfile.OS, currentUserAgent)
 }
 
 func generateUserAgentForProfile(config ProfileConfig) string {
@@ -120,6 +119,6 @@ func GetClientOptions(profile ProfileConfig) []tls_client.HttpClientOption {
 }
 
 func RandomDelay() {
-	delay := time.Duration(1000+rng.Intn(1000)) * time.Millisecond
+	delay := time.Duration(100+rng.Intn(200)) * time.Millisecond
 	time.Sleep(delay)
 }
