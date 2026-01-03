@@ -25,6 +25,13 @@ var (
 
 func main() {
 
+	if len(os.Args) > 1 && os.Args[1] == "--fetch-cookies" {
+		if err := browser.RunFetchCookies(); err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		return
+	}
+
 	_ = godotenv.Load()
 
 	pool = balancer.NewAccountPool()

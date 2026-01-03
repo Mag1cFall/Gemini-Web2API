@@ -48,23 +48,8 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func LoadCookies() (map[string]string, error) {
+func loadCookiesFromBrowser() (map[string]string, error) {
 	cookies := make(map[string]string)
-
-	if content, err := os.ReadFile(".env"); err == nil {
-		lines := strings.Split(string(content), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "__Secure-1PSID=") {
-				cookies["__Secure-1PSID"] = strings.TrimPrefix(line, "__Secure-1PSID=")
-			} else if strings.HasPrefix(line, "__Secure-1PSIDTS=") {
-				cookies["__Secure-1PSIDTS"] = strings.TrimPrefix(line, "__Secure-1PSIDTS=")
-			}
-		}
-		if val, ok := cookies["__Secure-1PSID"]; ok && val != "" {
-			return cookies, nil
-		}
-	}
 
 	fmt.Println("Attempting to read cookies from Firefox...")
 
@@ -83,13 +68,15 @@ func LoadCookies() (map[string]string, error) {
 			foundCookies, err = firefox.ReadCookies(context.Background(), tmpFile)
 		}
 	} else {
+		fmt.Println("Firefox profile not found, trying all browsers...")
 		foundCookies, err = kooky.ReadCookies(context.Background())
 	}
 
 	if err != nil {
-		fmt.Printf("Warning: Firefox lookup had issues: %v\n", err)
+		fmt.Printf("Warning: Browser cookie lookup had issues: %v\n", err)
 		if os.PathSeparator == '\\' {
-			fmt.Println("Tip: Ensure Firefox is installed and you have visited google.com recently.")
+			fmt.Println("Tip: Ensure Firefox/Chrome/Edge is installed and you have visited google.com recently.")
+			fmt.Println("Tip: Make sure the browser is closed when running this program.")
 		}
 	}
 
@@ -102,10 +89,8 @@ func LoadCookies() (map[string]string, error) {
 	}
 
 	if val, ok := cookies["__Secure-1PSID"]; !ok || val == "" {
-		return nil, fmt.Errorf("cookie '__Secure-1PSID' not found in env or Firefox. Please create a .env file")
+		return nil, fmt.Errorf("cookie '__Secure-1PSID' not found in browser. Please ensure you are logged into Google in your browser")
 	}
-
-	saveToEnv(cookies)
 
 	return cookies, nil
 }
@@ -114,12 +99,23 @@ func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error
 	var results []map[string]string
 	var usedIDs []string
 
+	envMap := make(map[string]string)
+
 	content, err := os.ReadFile(".env")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read .env file: %v", err)
+		fmt.Println(".env file not found, attempting to auto-detect cookies from browser...")
+		cookies, browserErr := loadCookiesFromBrowser()
+		if browserErr != nil {
+			createEnvTemplate()
+			return nil, nil, fmt.Errorf("failed to auto-detect cookies: %v. A template .env file has been created", browserErr)
+		}
+		saveToEnv(cookies)
+		results = append(results, cookies)
+		usedIDs = append(usedIDs, "")
+		fmt.Println("Auto-detected cookies from browser and saved to .env")
+		return results, usedIDs, nil
 	}
 
-	envMap := make(map[string]string)
 	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -143,11 +139,22 @@ func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error
 				accountIDs = append(accountIDs, suffix)
 			}
 		}
-		if len(accountIDs) == 0 {
-			return nil, nil, fmt.Errorf("no accounts configured in .env")
-		}
-		fmt.Printf("Auto-detected accounts: %v\n", accountIDs)
 	}
+
+	if len(accountIDs) == 0 {
+		fmt.Println("No accounts configured in .env, attempting to auto-detect cookies from browser...")
+		cookies, browserErr := loadCookiesFromBrowser()
+		if browserErr != nil {
+			return nil, nil, fmt.Errorf("no accounts in .env and failed to auto-detect: %v", browserErr)
+		}
+		saveToEnv(cookies)
+		results = append(results, cookies)
+		usedIDs = append(usedIDs, "")
+		fmt.Println("Auto-detected cookies from browser and saved to .env")
+		return results, usedIDs, nil
+	}
+
+	fmt.Printf("Auto-detected accounts: %v\n", accountIDs)
 
 	for _, id := range accountIDs {
 		var psidKey, psidtsKey string
@@ -185,10 +192,20 @@ func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error
 	}
 
 	if len(results) == 0 {
-		return nil, nil, fmt.Errorf("no valid accounts found")
+		return nil, nil, fmt.Errorf("no valid accounts found in .env")
 	}
 
 	return results, usedIDs, nil
+}
+
+func createEnvTemplate() {
+	template := "__Secure-1PSID=\n__Secure-1PSIDTS=\nACCOUNTS=\nPROXY_API_KEY=\nPORT=8007\n"
+	err := os.WriteFile(".env", []byte(template), 0644)
+	if err != nil {
+		fmt.Printf("Warning: Failed to create .env template: %v\n", err)
+	} else {
+		fmt.Println("Created .env template file.")
+	}
 }
 
 func ParseAccountIDs(s string) []string {
