@@ -72,6 +72,12 @@ func BuildGeneratePayload(prompt string, reqID int, files []FileData, meta *Chat
 		inner, _ = sjson.Set(inner, "2", nil)
 	}
 
+	// Pad to index 7 and set streaming flag
+	for i := 3; i < 7; i++ {
+		inner, _ = sjson.Set(inner, fmt.Sprintf("%d", i), nil)
+	}
+	inner, _ = sjson.Set(inner, "7", 1) // Enable Snapshot Streaming
+
 	outer := `[null, "", null, null]`
 	outer, _ = sjson.Set(outer, "1", inner)
 

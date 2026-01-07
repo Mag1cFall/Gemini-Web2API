@@ -294,6 +294,8 @@ func parseGeminiResponse(reader io.Reader, onChunk func(text, thought string)) {
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 10*1024*1024)
 
+	var lastText, lastThoughts string
+
 	for scanner.Scan() {
 		line := strings.TrimPrefix(scanner.Text(), ")]}'")
 		line = strings.TrimSpace(line)
@@ -346,7 +348,28 @@ func parseGeminiResponse(reader io.Reader, onChunk func(text, thought string)) {
 						}
 					}
 
-					onChunk(text, thoughts)
+					// Send only the new/delta content (snapshot streaming returns full content each time)
+					deltaText := ""
+					deltaThoughts := ""
+
+					if len(text) > len(lastText) && strings.HasPrefix(text, lastText) {
+						deltaText = text[len(lastText):]
+					} else if text != lastText {
+						deltaText = text
+					}
+
+					if len(thoughts) > len(lastThoughts) && strings.HasPrefix(thoughts, lastThoughts) {
+						deltaThoughts = thoughts[len(lastThoughts):]
+					} else if thoughts != lastThoughts {
+						deltaThoughts = thoughts
+					}
+
+					lastText = text
+					lastThoughts = thoughts
+
+					if deltaText != "" || deltaThoughts != "" {
+						onChunk(deltaText, deltaThoughts)
+					}
 					return true
 				})
 			}
