@@ -20,3 +20,6 @@ go.work
 
 # env
 .env
+
+# Reference files
+reference*/

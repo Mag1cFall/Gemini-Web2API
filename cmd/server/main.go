@@ -10,6 +10,7 @@ import (
 	"gemini-web2api/internal/adapter"
 	"gemini-web2api/internal/balancer"
 	"gemini-web2api/internal/browser"
+	"gemini-web2api/internal/config"
 	"gemini-web2api/internal/gemini"
 
 	"github.com/fsnotify/fsnotify"
@@ -34,6 +35,8 @@ func main() {
 
 	_ = godotenv.Load()
 
+	config.LoadModelMapping()
+
 	pool = balancer.NewAccountPool()
 	accountCookies = make(map[string]string)
 
@@ -47,12 +50,20 @@ func main() {
 	r.Use(adapter.AuthMiddleware())
 	r.Use(adapter.LoggerMiddleware())
 
+	// OpenAI Protocol
 	r.POST("/v1/chat/completions", adapter.ChatCompletionHandler(pool))
+	r.POST("/v1/images/generations", adapter.ImageGenerationHandler(pool))
 	r.GET("/v1/models", adapter.ListModelsHandler)
+
+	// Claude Protocol
+	r.POST("/v1/messages", adapter.ClaudeMessagesHandler(pool))
+	r.POST("/v1/messages/count_tokens", adapter.ClaudeCountTokensHandler(pool))
+	r.GET("/v1/models/claude", adapter.ClaudeListModelsHandler)
+
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status":   "Gemini-Web2API (Go) is running",
-			"docs":     "POST /v1/chat/completions",
+			"docs":     "POST /v1/chat/completions (OpenAI) | POST /v1/messages (Claude)",
 			"accounts": pool.Size(),
 		})
 	})

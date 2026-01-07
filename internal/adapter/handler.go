@@ -115,12 +115,18 @@ func ListModelsHandler(c *gin.Context) {
 		{ID: "gemini-3-pro-preview", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
 		{ID: "gemini-3-flash-preview", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
 		{ID: "gemini-3-flash-preview-no-thinking", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
+		{ID: "gemini-2.5-flash-image", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
+		{ID: "gemini-3-pro-image-preview", Object: "model", Created: time.Now().Unix(), OwnedBy: "Google"},
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data":   models,
 	})
+}
+
+func isImageModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "image")
 }
 
 func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
@@ -136,6 +142,12 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		var req ChatRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Check if this is an image model request
+		if isImageModel(req.Model) {
+			handleImageChatRequest(c, client, req)
 			return
 		}
 
@@ -318,6 +330,9 @@ func parseGeminiResponse(reader io.Reader, onChunk func(text, thought string)) {
 					text = strings.ReplaceAll(text, `\[`, `[`)
 					text = strings.ReplaceAll(text, `\]`, `]`)
 
+					// Filter out image generation placeholder URLs
+					text = filterImagePlaceholders(text)
+
 					if thoughts == "" && text != "" {
 						matches := thinkingBlockRegex.FindStringSubmatch(text)
 						if len(matches) < 2 {
@@ -402,4 +417,314 @@ func sendSSEThinking(w io.Writer, id string, created int64, model, thinking stri
 	bytes, _ := json.Marshal(resp)
 	fmt.Fprintf(w, "data: %s\n\n", bytes)
 	w.(http.Flusher).Flush()
+}
+
+var imagePlaceholderRegex = regexp.MustCompile(`\s*https?://googleusercontent\.com/image_generation_content/\d+\s*`)
+
+func filterImagePlaceholders(text string) string {
+	return imagePlaceholderRegex.ReplaceAllString(text, "")
+}
+
+func parseGeminiResponseFromBytes(content []byte, onChunk func(text, thought string, imgURL string)) {
+	var allParts []gjson.Result
+
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimPrefix(line, ")]}'")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		outer := gjson.Parse(line)
+		if !outer.IsArray() {
+			continue
+		}
+
+		outer.ForEach(func(_, part gjson.Result) bool {
+			allParts = append(allParts, part)
+			return true
+		})
+	}
+
+	if len(allParts) == 0 {
+		return
+	}
+
+	bodyIndex := -1
+	var body gjson.Result
+
+	for i, part := range allParts {
+		dataStr := part.Get("2").String()
+		if dataStr == "" {
+			continue
+		}
+		inner := gjson.Parse(dataStr)
+		if inner.Get("4").Exists() {
+			bodyIndex = i
+			body = inner
+			break
+		}
+	}
+
+	if bodyIndex < 0 || !body.Exists() {
+		return
+	}
+
+	candidateArr := body.Get("4").Array()
+	for candIdx, candidate := range candidateArr {
+		text := candidate.Get("1.0").String()
+		thoughts := candidate.Get("37.0.0").String()
+
+		text = strings.ReplaceAll(text, `\<`, `<`)
+		text = strings.ReplaceAll(text, `\>`, `>`)
+		text = strings.ReplaceAll(text, `\_`, `_`)
+		text = strings.ReplaceAll(text, `\[`, `[`)
+		text = strings.ReplaceAll(text, `\]`, `]`)
+		text = filterImagePlaceholders(text)
+
+		var imgURL string
+
+		if candidate.Get("12.7.0").Exists() {
+			for i := bodyIndex; i < len(allParts); i++ {
+				imgDataStr := allParts[i].Get("2").String()
+				if imgDataStr == "" {
+					continue
+				}
+				imgInner := gjson.Parse(imgDataStr)
+				imgCandidate := imgInner.Get(fmt.Sprintf("4.%d", candIdx))
+				if !imgCandidate.Get("12.7.0").Exists() {
+					continue
+				}
+
+				if finishedText := imgCandidate.Get("1.0").String(); finishedText != "" {
+					text = filterImagePlaceholders(finishedText)
+					text = strings.ReplaceAll(text, `\<`, `<`)
+					text = strings.ReplaceAll(text, `\>`, `>`)
+					text = strings.ReplaceAll(text, `\_`, `_`)
+					text = strings.ReplaceAll(text, `\[`, `[`)
+					text = strings.ReplaceAll(text, `\]`, `]`)
+				}
+
+				imgCandidate.Get("12.7.0").ForEach(func(_, genImg gjson.Result) bool {
+					url := genImg.Get("0.3.3").String()
+					if url != "" && !strings.HasPrefix(url, "http://googleusercontent.com/image_generation_content") {
+						imgURL = url
+					}
+					return true
+				})
+
+				if imgURL != "" {
+					break
+				}
+			}
+		}
+
+		onChunk(text, thoughts, imgURL)
+	}
+}
+
+func downloadImageAsBase64(url string, cookies map[string]string) string {
+	client := &http.Client{Timeout: 60 * time.Second}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("[Images] Failed to create request: %v", err)
+		return ""
+	}
+
+	for k, v := range cookies {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[Images] Failed to download image: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		log.Printf("[Images] Image download returned status %d", resp.StatusCode)
+		return ""
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil || len(data) == 0 {
+		log.Printf("[Images] Failed to read image data: %v", err)
+		return ""
+	}
+
+	log.Printf("[Images] Downloaded image: %d bytes", len(data))
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+func extractImageURLsFromResponse(reader io.Reader) []string {
+	var urls []string
+	var allParts []gjson.Result
+
+	content, _ := io.ReadAll(reader)
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimPrefix(line, ")]}'")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		outer := gjson.Parse(line)
+		if !outer.IsArray() {
+			continue
+		}
+
+		outer.ForEach(func(_, part gjson.Result) bool {
+			allParts = append(allParts, part)
+			return true
+		})
+	}
+
+	if len(allParts) == 0 {
+		return urls
+	}
+
+	bodyIndex := -1
+	for i, part := range allParts {
+		dataStr := part.Get("2").String()
+		if dataStr == "" {
+			continue
+		}
+		inner := gjson.Parse(dataStr)
+		if inner.Get("4").Exists() {
+			bodyIndex = i
+			break
+		}
+	}
+
+	if bodyIndex < 0 {
+		return urls
+	}
+
+	for i := bodyIndex; i < len(allParts); i++ {
+		imgDataStr := allParts[i].Get("2").String()
+		if imgDataStr == "" {
+			continue
+		}
+		imgInner := gjson.Parse(imgDataStr)
+		imgCandidate := imgInner.Get("4.0")
+		if !imgCandidate.Get("12.7.0").Exists() {
+			continue
+		}
+
+		imgCandidate.Get("12.7.0").ForEach(func(_, genImg gjson.Result) bool {
+			url := genImg.Get("0.3.3").String()
+			if url != "" && !strings.HasPrefix(url, "http://googleusercontent.com/image_generation_content") {
+				urls = append(urls, url)
+			}
+			return true
+		})
+
+		if len(urls) > 0 {
+			break
+		}
+	}
+
+	return urls
+}
+
+func handleImageChatRequest(c *gin.Context, client *gemini.Client, req ChatRequest) {
+	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	created := time.Now().Unix()
+
+	// Extract prompt from last user message
+	var prompt string
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if strings.EqualFold(req.Messages[i].Role, "user") {
+			switch content := req.Messages[i].Content.(type) {
+			case string:
+				prompt = content
+			case []interface{}:
+				for _, part := range content {
+					if m, ok := part.(map[string]interface{}); ok {
+						if text, ok := m["text"].(string); ok {
+							prompt = text
+							break
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+
+	if prompt == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No prompt found in messages"})
+		return
+	}
+
+	respBody, err := client.StreamGenerateContent(fmt.Sprintf("Generate an image of %s", prompt), req.Model, nil, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer respBody.Close()
+
+	imageURLs := extractImageURLsFromResponse(respBody)
+
+	if len(imageURLs) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"message": "No images generated",
+			"type":    "server_error",
+		}})
+		return
+	}
+
+	// Download images using gemini client
+	var content strings.Builder
+	for i, imgURL := range imageURLs {
+		fullURL := imgURL
+		if !strings.Contains(fullURL, "=s") {
+			fullURL = imgURL + "=s2048"
+		}
+		data, err := client.FetchImage(fullURL)
+		if err != nil {
+			log.Printf("[Images] Failed to fetch image: %v", err)
+			continue
+		}
+		b64 := base64.StdEncoding.EncodeToString(data)
+		content.WriteString(fmt.Sprintf("![Generated Image %d](data:image/png;base64,%s)\n\n", i+1, b64))
+	}
+
+	if content.Len() == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"message": "Failed to download images",
+			"type":    "server_error",
+		}})
+		return
+	}
+
+	if req.Stream {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+
+		sendSSERole(c.Writer, id, created, req.Model)
+		sendSSE(c.Writer, id, created, req.Model, content.String())
+		fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+		c.Writer.(http.Flusher).Flush()
+	} else {
+		c.JSON(http.StatusOK, gin.H{
+			"id":      id,
+			"object":  "chat.completion",
+			"created": created,
+			"model":   req.Model,
+			"choices": []gin.H{
+				{
+					"index": 0,
+					"message": gin.H{
+						"role":    "assistant",
+						"content": content.String(),
+					},
+					"finish_reason": "stop",
+				},
+			},
+		})
+	}
 }

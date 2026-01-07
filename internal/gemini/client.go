@@ -25,6 +25,8 @@ var ModelHeaders = map[string]string{
 	"gemini-3-pro-preview":               `[1,null,null,null,"e6fa609c3fa255c0"]`,
 	"gemini-3-flash-preview":             `[1,null,null,null,"e051ce1aa80aa576"]`,
 	"gemini-3-flash-preview-no-thinking": `[1,null,null,null,"56fdd199312815e2"]`,
+	"gemini-2.5-flash-image":             `[1,null,null,null,"56fdd199312815e2",null,null,0,[4],null,null,2]`,
+	"gemini-3-pro-image-preview":         `[1,null,null,null,"e051ce1aa80aa576",null,null,0,[4],null,null,2]`,
 }
 
 type Client struct {
@@ -161,4 +163,52 @@ func (c *Client) StreamGenerateContent(prompt string, model string, files []File
 	}
 
 	return resp.Body, nil
+}
+
+func (c *Client) FetchImage(imageURL string) ([]byte, error) {
+	maxRedirects := 5
+	currentURL := imageURL
+
+	for i := 0; i < maxRedirects; i++ {
+		u, _ := url.Parse(currentURL)
+		var cookieList []*http.Cookie
+		for k, v := range c.Cookies {
+			cookieList = append(cookieList, &http.Cookie{
+				Name:   k,
+				Value:  v,
+				Domain: u.Host,
+				Path:   "/",
+			})
+		}
+		c.httpClient.SetCookies(u, cookieList)
+
+		req, _ := http.NewRequest(http.MethodGet, currentURL, nil)
+		req.Header.Set("User-Agent", GetCurrentUserAgent())
+		req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			location := resp.Header.Get("Location")
+			resp.Body.Close()
+			if location == "" {
+				return nil, fmt.Errorf("redirect with no Location header")
+			}
+			currentURL = location
+			continue
+		}
+
+		defer resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("image fetch failed with status: %d", resp.StatusCode)
+		}
+
+		return io.ReadAll(resp.Body)
+	}
+
+	return nil, fmt.Errorf("too many redirects")
 }
