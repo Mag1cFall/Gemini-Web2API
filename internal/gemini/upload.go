@@ -1,9 +1,10 @@
 package gemini
 
 import (
+	"bytes"
 	"fmt"
 	"io"
-	"strings"
+	"mime/multipart"
 
 	http "github.com/bogdanfinn/fhttp"
 )
@@ -14,13 +15,29 @@ const (
 )
 
 func (c *Client) UploadFile(data []byte, filename string) (string, error) {
-	req, err := http.NewRequest(http.MethodPost, EndpointUpload, strings.NewReader(string(data)))
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return "", fmt.Errorf("failed to create form file: %v", err)
+	}
+
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("failed to write file data: %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("failed to close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, EndpointUpload, &buf)
 	if err != nil {
 		return "", err
 	}
 
 	req.Header.Set("Push-ID", UploadPushID)
-	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("User-Agent", GetCurrentUserAgent())
 	req.Header.Set("Origin", "https://gemini.google.com")
 
@@ -39,5 +56,5 @@ func (c *Client) UploadFile(data []byte, filename string) (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(string(body)), nil
+	return string(body), nil
 }

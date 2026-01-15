@@ -3,6 +3,7 @@ package gemini
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/tidwall/sjson"
@@ -72,11 +73,15 @@ func BuildGeneratePayload(prompt string, reqID int, files []FileData, meta *Chat
 		inner, _ = sjson.Set(inner, "2", nil)
 	}
 
-	// Pad to index 7 and set streaming flag
+	// Pad to index 7
 	for i := 3; i < 7; i++ {
 		inner, _ = sjson.Set(inner, fmt.Sprintf("%d", i), nil)
 	}
-	inner, _ = sjson.Set(inner, "7", 1) // Enable Snapshot Streaming
+	// Snapshot Streaming disabled by default (causes issues with incremental updates)
+	// Set SNAPSHOT_STREAMING=1 in .env to enable
+	if os.Getenv("SNAPSHOT_STREAMING") == "1" {
+		inner, _ = sjson.Set(inner, "7", 1)
+	}
 
 	outer := `[null, "", null, null]`
 	outer, _ = sjson.Set(outer, "1", inner)

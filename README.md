@@ -136,6 +136,7 @@ internal/
 | `PORT` | 服务端口 | 8007 |
 | `PROXY_API_KEY` | API 密钥 | (空=无认证) |
 | `MODEL_MAPPING` | 模型映射 | (空) |
+| `SNAPSHOT_STREAMING` | 启用快照流式（实验性） | 0 |
 
 ## 注意
 

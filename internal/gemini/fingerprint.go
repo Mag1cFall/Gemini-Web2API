@@ -110,7 +110,7 @@ func GetCurrentUserAgent() string {
 
 func GetClientOptions(profile ProfileConfig) []tls_client.HttpClientOption {
 	return []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(300),
+		tls_client.WithTimeoutSeconds(120),
 		tls_client.WithClientProfile(profile.Profile),
 		tls_client.WithNotFollowRedirects(),
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),

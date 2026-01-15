@@ -19,11 +19,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-var (
-	thinkingBlockRegex   = regexp.MustCompile(`(?s)<details>\s*<summary>\s*Thinking Process\s*</summary>\s*(.*?)\s*</details>`)
-	chineseThinkingRegex = regexp.MustCompile(`(?s)<details>\s*<summary>\s*思考过程\s*</summary>\s*(.*?)\s*</details>`)
-)
-
 type ChatMessage struct {
 	Role    string      `json:"role"`
 	Content interface{} `json:"content"`
@@ -319,53 +314,42 @@ func parseGeminiResponse(reader io.Reader, onChunk func(text, thought string)) {
 			candidates := inner.Get("4")
 			if candidates.IsArray() {
 				candidates.ForEach(func(_, candidate gjson.Result) bool {
-					text := candidate.Get("1.0").String()
-					thoughts := candidate.Get("37.0.0").String()
+					rawText := candidate.Get("1.0").String()
+					rawThoughts := candidate.Get("37.0.0").String()
 
-					// Fix: Gemini Web often escapes special characters in code blocks or XML tags
-					// e.g. \<read\_file\> instead of <read_file>
-					// This reverses the Markdown escaping to restore raw tool calls/code.
-					text = strings.ReplaceAll(text, `\<`, `<`)
-					text = strings.ReplaceAll(text, `\>`, `>`)
-					text = strings.ReplaceAll(text, `\_`, `_`)
-					// Also fix brackets which might break JSON or array definitions in text
-					text = strings.ReplaceAll(text, `\[`, `[`)
-					text = strings.ReplaceAll(text, `\]`, `]`)
-
-					// Filter out image generation placeholder URLs
-					text = filterImagePlaceholders(text)
-
-					if thoughts == "" && text != "" {
-						matches := thinkingBlockRegex.FindStringSubmatch(text)
-						if len(matches) < 2 {
-							matches = chineseThinkingRegex.FindStringSubmatch(text)
-						}
-
-						if len(matches) >= 2 {
-							thoughts = strings.TrimSpace(matches[1])
-							text = strings.Replace(text, matches[0], "", 1)
-							text = strings.TrimSpace(text)
-						}
-					}
-
-					// Send only the new/delta content (snapshot streaming returns full content each time)
 					deltaText := ""
 					deltaThoughts := ""
 
-					if len(text) > len(lastText) && strings.HasPrefix(text, lastText) {
-						deltaText = text[len(lastText):]
-					} else if text != lastText {
-						deltaText = text
+					rawRunes := []rune(rawText)
+					lastRunes := []rune(lastText)
+					if len(rawRunes) > len(lastRunes) {
+						deltaText = string(rawRunes[len(lastRunes):])
+						lastText = rawText
+					} else if len(lastRunes) == 0 && len(rawRunes) > 0 {
+						deltaText = rawText
+						lastText = rawText
 					}
 
-					if len(thoughts) > len(lastThoughts) && strings.HasPrefix(thoughts, lastThoughts) {
-						deltaThoughts = thoughts[len(lastThoughts):]
-					} else if thoughts != lastThoughts {
-						deltaThoughts = thoughts
+					rawThoughtRunes := []rune(rawThoughts)
+					lastThoughtRunes := []rune(lastThoughts)
+					if len(rawThoughtRunes) > len(lastThoughtRunes) {
+						deltaThoughts = string(rawThoughtRunes[len(lastThoughtRunes):])
+						lastThoughts = rawThoughts
+					} else if len(lastThoughtRunes) == 0 && len(rawThoughtRunes) > 0 {
+						deltaThoughts = rawThoughts
+						lastThoughts = rawThoughts
 					}
 
-					lastText = text
-					lastThoughts = thoughts
+					if deltaText == "" && deltaThoughts == "" {
+						return true
+					}
+
+					deltaText = strings.ReplaceAll(deltaText, `\<`, `<`)
+					deltaText = strings.ReplaceAll(deltaText, `\>`, `>`)
+					deltaText = strings.ReplaceAll(deltaText, `\_`, `_`)
+					deltaText = strings.ReplaceAll(deltaText, `\[`, `[`)
+					deltaText = strings.ReplaceAll(deltaText, `\]`, `]`)
+					deltaText = filterImagePlaceholders(deltaText)
 
 					if deltaText != "" || deltaThoughts != "" {
 						onChunk(deltaText, deltaThoughts)
