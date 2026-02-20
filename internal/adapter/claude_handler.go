@@ -151,8 +151,8 @@ func ClaudeListModelsHandler(c *gin.Context) {
 			"created_at":   time.Now().Format(time.RFC3339),
 		},
 		{
-			"id":           "gemini-3-pro-preview",
-			"display_name": "Gemini 3 Pro Preview",
+			"id":           "gemini-3.1-pro-preview",
+			"display_name": "Gemini 3.1 Pro Preview",
 			"created_at":   time.Now().Format(time.RFC3339),
 		},
 		{

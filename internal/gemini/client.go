@@ -22,7 +22,7 @@ const (
 // You can add new models here by inspecting the 'x-goog-ext-525001261-jspb' header in browser DevTools.
 var ModelHeaders = map[string]string{
 	"gemini-2.5-flash":                   `[1,null,null,null,"71c2d248d3b102ff"]`,
-	"gemini-3-pro-preview":               `[1,null,null,null,"e6fa609c3fa255c0"]`,
+	"gemini-3.1-pro-preview":             `[1,null,null,null,"e6fa609c3fa255c0"]`,
 	"gemini-3-flash-preview":             `[1,null,null,null,"e051ce1aa80aa576"]`,
 	"gemini-3-flash-preview-no-thinking": `[1,null,null,null,"56fdd199312815e2"]`,
 	"gemini-2.5-flash-image":             `[1,null,null,null,"56fdd199312815e2",null,null,0,[4],null,null,2]`,
@@ -105,7 +105,7 @@ func (c *Client) Init() error {
 
 	if c.VersionBL == "" {
 		log.Println("Warning: Could not extract 'bl' version, using fallback.")
-		c.VersionBL = "boq_assistant-bard-web-server_20240319.09_p0"
+		c.VersionBL = "boq_assistant-bard-web-server_20260218.05_p0"
 	} else {
 		log.Printf("Extracted BL Version: %s", c.VersionBL)
 	}
