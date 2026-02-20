@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 
@@ -70,6 +71,12 @@ func (c *Client) Init() error {
 	req, _ := http.NewRequest(http.MethodGet, EndpointInit, nil)
 	req.Header.Set("User-Agent", GetCurrentUserAgent())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", getLangHeader())
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -103,8 +110,21 @@ func (c *Client) Init() error {
 		}
 	}
 
+	// 直接匹配 BL 字串格式
 	if c.VersionBL == "" {
-		log.Println("Warning: Could not extract 'bl' version, using fallback.")
+		reBL3 := regexp.MustCompile(`boq_assistant-bard-web-server_[a-zA-Z0-9._]+`)
+		matchBL3 := reBL3.FindString(bodyString)
+		if matchBL3 != "" {
+			c.VersionBL = matchBL3
+		}
+	}
+
+	if c.VersionBL == "" {
+		snippet := bodyString
+		if len(snippet) > 500 {
+			snippet = snippet[:500]
+		}
+		log.Printf("Warning: Could not extract 'bl' version, using fallback. Response preview: %s", snippet)
 		c.VersionBL = "boq_assistant-bard-web-server_20260218.05_p0"
 	} else {
 		log.Printf("Extracted BL Version: %s", c.VersionBL)
@@ -144,6 +164,10 @@ func (c *Client) StreamGenerateContent(prompt string, model string, files []File
 	req.Header.Set("Origin", "https://gemini.google.com")
 	req.Header.Set("Referer", "https://gemini.google.com/")
 	req.Header.Set("X-Same-Domain", "1")
+	req.Header.Set("Accept-Language", getLangHeader())
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 
 	if headerVal, ok := ModelHeaders[model]; ok {
 		req.Header.Set("x-goog-ext-525001261-jspb", headerVal)
@@ -211,4 +235,17 @@ func (c *Client) FetchImage(imageURL string) ([]byte, error) {
 	}
 
 	return nil, fmt.Errorf("too many redirects")
+}
+
+func GetLanguage() string {
+	lang := os.Getenv("LANGUAGE")
+	if lang == "" {
+		lang = "en"
+	}
+	return lang
+}
+
+func getLangHeader() string {
+	lang := GetLanguage()
+	return lang + ",en;q=0.9"
 }

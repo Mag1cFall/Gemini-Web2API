@@ -61,7 +61,11 @@ func BuildGeneratePayload(prompt string, reqID int, files []FileData, meta *Chat
 
 	inner := `[]`
 	inner, _ = sjson.SetRaw(inner, "0", msgStruct)
-	inner, _ = sjson.Set(inner, "1", nil)
+
+	// 語言字段，匹配瀏覽器 f.req 格式
+	langArr := `[]`
+	langArr, _ = sjson.Set(langArr, "0", GetLanguage())
+	inner, _ = sjson.SetRaw(inner, "1", langArr)
 
 	if meta != nil {
 		metaArr := `[]`
