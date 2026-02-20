@@ -18,7 +18,7 @@
 | 模型名 | 说明 |
 |--------|------|
 | `gemini-2.5-flash` | 快速模型 |
-| `gemini-3-pro-preview` | Pro 预览版 |
+| `gemini-3.1-pro-preview` | Pro 预览版 |
 | `gemini-3-flash-preview` | Flash 预览版 |
 | `gemini-3-flash-preview-no-thinking` | Flash 无思考模式 |
 | `gemini-2.5-flash-image` | Nano Banana 生图 |
@@ -50,6 +50,7 @@ go build -o Gemini-Web2API.exe ./cmd/server
 # 3. 选择配置文件（输入 1,2,3 或 ALL）
 ```
 详见 [internal/browser/README.md](internal/browser/README.md)
+新版Chrome可能不适用此方法，或者说绝大部分Chrome。
 
 **方式三：手动配置**
 ```bash
@@ -136,6 +137,7 @@ internal/
 | `PORT` | 服务端口 | 8007 |
 | `PROXY_API_KEY` | API 密钥 | (空=无认证) |
 | `MODEL_MAPPING` | 模型映射 | (空) |
+| `LANGUAGE` | 语言（Accept-Language / payload） | en |
 | `SNAPSHOT_STREAMING` | 启用快照流式（实验性） | 0 |
 
 ## 注意
