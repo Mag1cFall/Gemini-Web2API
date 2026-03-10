@@ -37,12 +37,14 @@ type Client struct {
 	VersionBL  string
 	FSID       string
 	ReqID      int
+	AccountID  string
+	ProxyURL   string
 }
 
-func NewClient(cookies map[string]string) (*Client, error) {
+func NewClient(cookies map[string]string, proxyURL string) (*Client, error) {
 	profile := GetRandomProfile()
 
-	options := GetClientOptions(profile)
+	options := GetClientOptions(profile, proxyURL)
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 	if err != nil {
 		return nil, err
@@ -64,6 +66,7 @@ func NewClient(cookies map[string]string) (*Client, error) {
 		httpClient: client,
 		Cookies:    cookies,
 		ReqID:      GenerateReqID(),
+		ProxyURL:   strings.TrimSpace(proxyURL),
 	}, nil
 }
 
@@ -80,12 +83,12 @@ func (c *Client) Init() error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to visit init page: %v", err)
+		return fmt.Errorf("account '%s' failed to visit init page: %v", c.displayAccountID(), err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("init page returned status: %d", resp.StatusCode)
+		return fmt.Errorf("account '%s' init page returned status: %d", c.displayAccountID(), resp.StatusCode)
 	}
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
@@ -94,7 +97,7 @@ func (c *Client) Init() error {
 	reSN := regexp.MustCompile(`"SNlM0e":"(.*?)"`)
 	matchSN := reSN.FindStringSubmatch(bodyString)
 	if len(matchSN) < 2 {
-		return fmt.Errorf("SNlM0e token not found. Cookies might be invalid")
+		return fmt.Errorf("account '%s' SNlM0e token not found. Cookies might be invalid", c.displayAccountID())
 	}
 	c.SNlM0e = matchSN[1]
 
@@ -140,6 +143,45 @@ func (c *Client) Init() error {
 }
 
 func (c *Client) StreamGenerateContent(prompt string, model string, files []FileData, meta *ChatMetadata) (io.ReadCloser, error) {
+	resp, err := c.doGenerateContentRequest(prompt, model, files, meta)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusForbidden {
+		preview := readBodyPreview(resp.Body)
+		resp.Body.Close()
+		log.Printf("账号 '%s' 请求返回 403，准备重新初始化后重试。响应预览: %s", c.displayAccountID(), preview)
+
+		if err := c.Init(); err != nil {
+			return nil, err
+		}
+
+		resp, err = c.doGenerateContentRequest(prompt, model, files, meta)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode == http.StatusForbidden {
+			preview = readBodyPreview(resp.Body)
+			resp.Body.Close()
+			log.Printf("账号 '%s' 重新初始化后仍然返回 403。响应预览: %s", c.displayAccountID(), preview)
+			return nil, fmt.Errorf("Account authentication failed (403). Cookie may be expired. Please update cookies in .env")
+		}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		preview := readBodyPreview(resp.Body)
+		statusCode := resp.StatusCode
+		resp.Body.Close()
+		log.Printf("账号 '%s' 请求失败，状态码 %d，响应预览: %s", c.displayAccountID(), statusCode, preview)
+		return nil, fmt.Errorf("generate request failed with status: %d", statusCode)
+	}
+
+	return resp.Body, nil
+}
+
+func (c *Client) doGenerateContentRequest(prompt string, model string, files []FileData, meta *ChatMetadata) (*http.Response, error) {
 	payload := BuildGeneratePayload(prompt, c.ReqID, files, meta)
 	c.ReqID++
 
@@ -181,12 +223,7 @@ func (c *Client) StreamGenerateContent(prompt string, model string, files []File
 		return nil, err
 	}
 
-	if resp.StatusCode != 200 {
-		resp.Body.Close()
-		return nil, fmt.Errorf("generate request failed with status: %d", resp.StatusCode)
-	}
-
-	return resp.Body, nil
+	return resp, nil
 }
 
 func (c *Client) FetchImage(imageURL string) ([]byte, error) {
@@ -248,4 +285,34 @@ func GetLanguage() string {
 func getLangHeader() string {
 	lang := GetLanguage()
 	return lang + ",en;q=0.9"
+}
+
+func (c *Client) displayAccountID() string {
+	if strings.TrimSpace(c.AccountID) == "" {
+		return "default"
+	}
+	return c.AccountID
+}
+
+func readBodyPreview(body io.ReadCloser) string {
+	if body == nil {
+		return ""
+	}
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return fmt.Sprintf("读取响应失败: %v", err)
+	}
+
+	preview := strings.TrimSpace(string(data))
+	runes := []rune(preview)
+	if len(runes) > 500 {
+		preview = string(runes[:500])
+	}
+
+	if preview == "" {
+		return "<empty>"
+	}
+
+	return preview
 }

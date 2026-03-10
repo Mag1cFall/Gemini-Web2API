@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/browserutils/kooky"
@@ -95,9 +96,10 @@ func loadCookiesFromBrowser() (map[string]string, error) {
 	return cookies, nil
 }
 
-func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error) {
+func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, []string, error) {
 	var results []map[string]string
 	var usedIDs []string
+	var proxyURLs []string
 
 	envMap := make(map[string]string)
 
@@ -107,13 +109,14 @@ func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error
 		cookies, browserErr := loadCookiesFromBrowser()
 		if browserErr != nil {
 			createEnvTemplate()
-			return nil, nil, fmt.Errorf("failed to auto-detect cookies: %v. A template .env file has been created", browserErr)
+			return nil, nil, nil, fmt.Errorf("failed to auto-detect cookies: %v. A template .env file has been created", browserErr)
 		}
 		saveToEnv(cookies)
 		results = append(results, cookies)
 		usedIDs = append(usedIDs, "")
+		proxyURLs = append(proxyURLs, strings.TrimSpace(os.Getenv("PROXY")))
 		fmt.Println("Auto-detected cookies from browser and saved to .env")
-		return results, usedIDs, nil
+		return results, usedIDs, proxyURLs, nil
 	}
 
 	lines := strings.Split(string(content), "\n")
@@ -133,25 +136,29 @@ func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error
 		if envMap["__Secure-1PSID"] != "" {
 			accountIDs = append(accountIDs, "")
 		}
+		var extraIDs []string
 		for key := range envMap {
 			if strings.HasPrefix(key, "__Secure-1PSID_") && key != "__Secure-1PSID" {
 				suffix := strings.TrimPrefix(key, "__Secure-1PSID_")
-				accountIDs = append(accountIDs, suffix)
+				extraIDs = append(extraIDs, suffix)
 			}
 		}
+		slices.Sort(extraIDs)
+		accountIDs = append(accountIDs, extraIDs...)
 	}
 
 	if len(accountIDs) == 0 {
 		fmt.Println("No accounts configured in .env, attempting to auto-detect cookies from browser...")
 		cookies, browserErr := loadCookiesFromBrowser()
 		if browserErr != nil {
-			return nil, nil, fmt.Errorf("no accounts in .env and failed to auto-detect: %v", browserErr)
+			return nil, nil, nil, fmt.Errorf("no accounts in .env and failed to auto-detect: %v", browserErr)
 		}
 		saveToEnv(cookies)
 		results = append(results, cookies)
 		usedIDs = append(usedIDs, "")
+		proxyURLs = append(proxyURLs, strings.TrimSpace(envMap["PROXY"]))
 		fmt.Println("Auto-detected cookies from browser and saved to .env")
-		return results, usedIDs, nil
+		return results, usedIDs, proxyURLs, nil
 	}
 
 	fmt.Printf("Auto-detected accounts: %v\n", accountIDs)
@@ -182,8 +189,10 @@ func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error
 			"__Secure-1PSID":   psid,
 			"__Secure-1PSIDTS": psidts,
 		}
+		proxyURL := resolveProxyURL(envMap, id)
 		results = append(results, cookies)
 		usedIDs = append(usedIDs, id)
+		proxyURLs = append(proxyURLs, proxyURL)
 		displayID := id
 		if displayID == "" {
 			displayID = "default"
@@ -192,14 +201,14 @@ func LoadMultiCookies(accountIDs []string) ([]map[string]string, []string, error
 	}
 
 	if len(results) == 0 {
-		return nil, nil, fmt.Errorf("no valid accounts found in .env")
+		return nil, nil, nil, fmt.Errorf("no valid accounts found in .env")
 	}
 
-	return results, usedIDs, nil
+	return results, usedIDs, proxyURLs, nil
 }
 
 func createEnvTemplate() {
-	template := "__Secure-1PSID=\n__Secure-1PSIDTS=\nACCOUNTS=\nPROXY_API_KEY=\nPORT=8007\n"
+	template := "__Secure-1PSID=\n__Secure-1PSIDTS=\nACCOUNTS=\nPROXY=\nPROXY_API_KEY=\nPORT=8007\n"
 	err := os.WriteFile(".env", []byte(template), 0644)
 	if err != nil {
 		fmt.Printf("Warning: Failed to create .env template: %v\n", err)
@@ -286,4 +295,18 @@ func saveToEnv(cookies map[string]string) {
 
 	_ = os.WriteFile(".env", []byte(finalContent), 0644)
 	fmt.Println("Cookies saved to .env file.")
+}
+
+func resolveProxyURL(envMap map[string]string, accountID string) string {
+	proxyURL := strings.TrimSpace(envMap["PROXY"])
+	if accountID == "" {
+		return proxyURL
+	}
+
+	accountProxyKey := fmt.Sprintf("PROXY_%s", accountID)
+	if accountProxy := strings.TrimSpace(envMap[accountProxyKey]); accountProxy != "" {
+		return accountProxy
+	}
+
+	return proxyURL
 }

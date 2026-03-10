@@ -47,31 +47,49 @@ func CORSMiddleware() gin.HandlerFunc {
 }
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		requiredKey := os.Getenv("PROXY_API_KEY")
+		requiredKey := strings.TrimSpace(os.Getenv("PROXY_API_KEY"))
 
 		if requiredKey == "" {
 			c.Next()
 			return
 		}
 
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization header is missing"})
+		queryKey := strings.TrimSpace(c.Query("key"))
+		headerKey := strings.TrimSpace(c.GetHeader("x-goog-api-key"))
+		authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+
+		if queryKey != "" && queryKey == requiredKey {
+			c.Next()
+			return
+		}
+		if headerKey != "" && headerKey == requiredKey {
+			c.Next()
 			return
 		}
 
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid Authorization header format"})
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				token := strings.TrimSpace(parts[1])
+				if token == requiredKey {
+					c.Next()
+					return
+				}
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API Key"})
+				return
+			}
+			if queryKey == "" && headerKey == "" {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid Authorization header format"})
+				return
+			}
+		}
+
+		if queryKey == "" && headerKey == "" && authHeader == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "API Key is missing"})
 			return
 		}
 
-		if parts[1] != requiredKey {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API Key"})
-			return
-		}
-
-		c.Next()
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API Key"})
 	}
 }
 

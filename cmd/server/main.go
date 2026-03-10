@@ -20,7 +20,7 @@ import (
 
 var (
 	pool           *balancer.AccountPool
-	accountCookies map[string]string
+	accountConfigs map[string]string
 	cookiesMu      sync.RWMutex
 )
 
@@ -38,7 +38,7 @@ func main() {
 	config.LoadModelMapping()
 
 	pool = balancer.NewAccountPool()
-	accountCookies = make(map[string]string)
+	accountConfigs = make(map[string]string)
 
 	go loadAccountsAsync()
 
@@ -60,11 +60,15 @@ func main() {
 	r.POST("/v1/messages/count_tokens", adapter.ClaudeCountTokensHandler(pool))
 	r.GET("/v1/models/claude", adapter.ClaudeListModelsHandler)
 
+	r.POST("/v1beta/models/*action", adapter.GeminiRouterHandler(pool))
+	r.GET("/v1beta/models", adapter.GeminiListModelsHandler)
+
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(200, gin.H{
-			"status":   "Gemini-Web2API (Go) is running",
-			"docs":     "POST /v1/chat/completions (OpenAI) | POST /v1/messages (Claude)",
-			"accounts": pool.Size(),
+			"status":    "Gemini-Web2API (Go) is running",
+			"docs":      "POST /v1/chat/completions (OpenAI) | POST /v1/messages (Claude) | POST /v1beta/models/{model}:generateContent (Gemini)",
+			"protocols": []string{"openai", "claude", "gemini"},
+			"accounts":  pool.Size(),
 		})
 	})
 
@@ -79,36 +83,40 @@ func main() {
 	}
 }
 
-func cookieHash(cookies map[string]string) string {
-	return cookies["__Secure-1PSID"] + "|" + cookies["__Secure-1PSIDTS"]
+func accountConfigHash(cookies map[string]string, proxyURL string) string {
+	return cookies["__Secure-1PSID"] + "|" + cookies["__Secure-1PSIDTS"] + "|" + proxyURL
 }
 
 func loadAccountsAsync() {
 	log.Println("Loading accounts in background...")
 
-	allCookies, accountIDs, err := browser.LoadMultiCookies(browser.ParseAccountIDs(os.Getenv("ACCOUNTS")))
+	allCookies, accountIDs, proxyURLs, err := browser.LoadMultiCookies(browser.ParseAccountIDs(os.Getenv("ACCOUNTS")))
 	if err != nil {
 		log.Printf("Failed to load cookies: %v", err)
 		return
 	}
 
 	cookiesMu.RLock()
-	oldCookies := make(map[string]string)
-	for k, v := range accountCookies {
-		oldCookies[k] = v
+	oldConfigs := make(map[string]string)
+	for k, v := range accountConfigs {
+		oldConfigs[k] = v
 	}
 	cookiesMu.RUnlock()
 
-	newCookies := make(map[string]string)
+	newConfigs := make(map[string]string)
 	for i, cookies := range allCookies {
-		newCookies[accountIDs[i]] = cookieHash(cookies)
+		proxyURL := ""
+		if i < len(proxyURLs) {
+			proxyURL = proxyURLs[i]
+		}
+		newConfigs[accountIDs[i]] = accountConfigHash(cookies, proxyURL)
 	}
 
 	var toInit []int
 	var toKeep []string
 	for i, accountID := range accountIDs {
-		oldHash, existed := oldCookies[accountID]
-		newHash := newCookies[accountID]
+		oldHash, existed := oldConfigs[accountID]
+		newHash := newConfigs[accountID]
 		if !existed || oldHash != newHash {
 			toInit = append(toInit, i)
 		} else {
@@ -124,8 +132,7 @@ func loadAccountsAsync() {
 	log.Printf("Detected %d account(s) with cookie changes, %d unchanged", len(toInit), len(toKeep))
 
 	type accountResult struct {
-		client    *gemini.Client
-		accountID string
+		entry balancer.AccountEntry
 	}
 	results := make(chan accountResult, len(toInit))
 
@@ -133,12 +140,15 @@ func loadAccountsAsync() {
 
 	for _, idx := range toInit {
 		wg.Add(1)
-		go func(i int, c map[string]string) {
+		go func(i int, c map[string]string, proxyURL string) {
 			defer wg.Done()
 
 			displayID := accountIDs[i]
 			if displayID == "" {
 				displayID = "default"
+			}
+			if proxyURL != "" {
+				log.Printf("账号 '%s' 使用代理: %s", displayID, proxyURL)
 			}
 
 			const maxRetries = 3
@@ -150,11 +160,12 @@ func loadAccountsAsync() {
 
 				go func() {
 					var err error
-					client, err = gemini.NewClient(c)
+					client, err = gemini.NewClient(c, proxyURL)
 					if err != nil {
 						done <- err
 						return
 					}
+					client.AccountID = accountIDs[i]
 					done <- client.Init()
 				}()
 
@@ -162,7 +173,7 @@ func loadAccountsAsync() {
 				case err := <-done:
 					cancel()
 					if err == nil {
-						results <- accountResult{client: client, accountID: accountIDs[i]}
+						results <- accountResult{entry: balancer.AccountEntry{Client: client, AccountID: accountIDs[i], ProxyURL: proxyURL}}
 						log.Printf("Account '%s': ready", displayID)
 						return
 					}
@@ -182,21 +193,21 @@ func loadAccountsAsync() {
 					}
 				}
 			}
-		}(idx, allCookies[idx])
+		}(idx, allCookies[idx], proxyURLs[idx])
 	}
 
 	wg.Wait()
 	close(results)
 
-	changedAccounts := make(map[string]*gemini.Client)
+	changedAccounts := make(map[string]balancer.AccountEntry)
 	for result := range results {
-		changedAccounts[result.accountID] = result.client
+		changedAccounts[result.entry.AccountID] = result.entry
 	}
 
 	pool.ReplaceAccounts(accountIDs, changedAccounts)
 
 	cookiesMu.Lock()
-	accountCookies = newCookies
+	accountConfigs = newConfigs
 	cookiesMu.Unlock()
 
 	log.Printf("Total %d account(s) available for load balancing", pool.Size())

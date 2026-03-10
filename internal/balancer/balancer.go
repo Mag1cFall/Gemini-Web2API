@@ -9,6 +9,7 @@ import (
 type AccountEntry struct {
 	Client    *gemini.Client
 	AccountID string
+	ProxyURL  string
 }
 
 type AccountPool struct {
@@ -30,12 +31,13 @@ func (p *AccountPool) Clear() {
 	atomic.StoreUint64(&p.index, 0)
 }
 
-func (p *AccountPool) Add(client *gemini.Client, accountID string) {
+func (p *AccountPool) Add(client *gemini.Client, accountID string, proxyURL string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.entries = append(p.entries, AccountEntry{
 		Client:    client,
 		AccountID: accountID,
+		ProxyURL:  proxyURL,
 	})
 }
 
@@ -56,27 +58,21 @@ func (p *AccountPool) Size() int {
 	return len(p.entries)
 }
 
-func (p *AccountPool) ReplaceAccounts(newAccountIDs []string, changedClients map[string]*gemini.Client) {
+func (p *AccountPool) ReplaceAccounts(newAccountIDs []string, changedEntries map[string]AccountEntry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	oldEntries := make(map[string]*gemini.Client)
+	oldEntries := make(map[string]AccountEntry)
 	for _, entry := range p.entries {
-		oldEntries[entry.AccountID] = entry.Client
+		oldEntries[entry.AccountID] = entry
 	}
 
 	p.entries = make([]AccountEntry, 0, len(newAccountIDs))
 	for _, accountID := range newAccountIDs {
-		if newClient, changed := changedClients[accountID]; changed {
-			p.entries = append(p.entries, AccountEntry{
-				Client:    newClient,
-				AccountID: accountID,
-			})
-		} else if oldClient, existed := oldEntries[accountID]; existed {
-			p.entries = append(p.entries, AccountEntry{
-				Client:    oldClient,
-				AccountID: accountID,
-			})
+		if newEntry, changed := changedEntries[accountID]; changed {
+			p.entries = append(p.entries, newEntry)
+		} else if oldEntry, existed := oldEntries[accountID]; existed {
+			p.entries = append(p.entries, oldEntry)
 		}
 	}
 }

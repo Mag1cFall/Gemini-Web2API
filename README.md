@@ -1,17 +1,20 @@
 # Gemini-Web2API (Go Version)
 
-将 Google Gemini Web 网页版转换为 OpenAI/Claude 兼容的 API 格式。
+将 Google Gemini Web 网页版转换为 OpenAI/Claude/Gemini 兼容的 API 格式。
 
 ## 特性
 
 - **OpenAI 兼容**: `/v1/chat/completions`, `/v1/models`, `/v1/images/generations`
 - **Claude 兼容**: `/v1/messages`, `/v1/messages/count_tokens`
+- **Gemini 原生协议**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`
 - **流式输出**: SSE (Server-Sent Events) 打字机效果
 - **思考过程**: 支持提取模型思考过程 (`reasoning_content`)
 - **图片生成**: 支持 Nano Banana / Nano Banana Pro 生图
 - **图片上传**: 支持多模态图片输入
 - **多账户负载均衡**: 支持配置多个 Google 账户
+- **HTTP 代理**: 支持全局代理和每账号独立代理 (HTTP/SOCKS5)
 - **模型映射**: 支持将 Claude/OpenAI 模型名映射到 Gemini 模型
+- **403 自动重试**: Cookie 过期时自动重新初始化并重试
 
 ## 支持的模型
 
@@ -88,6 +91,14 @@ POST /v1/messages/count_tokens
 GET  /v1/models/claude
 ```
 
+### Gemini 原生协议
+```
+POST /v1beta/models/{model}:generateContent
+POST /v1beta/models/{model}:streamGenerateContent
+GET  /v1beta/models
+```
+认证支持 `Authorization: Bearer xxx`、`?key=xxx`、`x-goog-api-key` 三种方式。
+
 ## 使用示例
 
 ### 聊天
@@ -122,7 +133,7 @@ curl http://127.0.0.1:8007/v1/images/generations \
 ```
 cmd/server/         # 程序入口
 internal/
-  adapter/          # OpenAI/Claude 协议适配
+  adapter/          # OpenAI/Claude/Gemini 协议适配
   balancer/         # 多账户负载均衡
   browser/          # Cookie 获取
   claude/           # Claude 协议类型
@@ -136,6 +147,8 @@ internal/
 |------|------|--------|
 | `PORT` | 服务端口 | 8007 |
 | `PROXY_API_KEY` | API 密钥 | (空=无认证) |
+| `PROXY` | 全局代理 (http/socks5) | (空) |
+| `PROXY_{id}` | 单账号代理，覆盖全局 | (空) |
 | `MODEL_MAPPING` | 模型映射 | (空) |
 | `LANGUAGE` | 语言（Accept-Language / payload） | en |
 | `SNAPSHOT_STREAMING` | 启用快照流式（实验性） | 0 |

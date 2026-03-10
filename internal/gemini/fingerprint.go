@@ -3,6 +3,7 @@ package gemini
 import (
 	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -108,14 +109,20 @@ func GetCurrentUserAgent() string {
 	return currentUserAgent
 }
 
-func GetClientOptions(profile ProfileConfig) []tls_client.HttpClientOption {
-	return []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(120),
+func GetClientOptions(profile ProfileConfig, proxyURL string) []tls_client.HttpClientOption {
+	options := []tls_client.HttpClientOption{
+		tls_client.WithTimeoutSeconds(600),
 		tls_client.WithClientProfile(profile.Profile),
 		tls_client.WithNotFollowRedirects(),
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),
 		tls_client.WithRandomTLSExtensionOrder(),
 	}
+
+	if strings.TrimSpace(proxyURL) != "" {
+		options = append(options, tls_client.WithProxyUrl(strings.TrimSpace(proxyURL)))
+	}
+
+	return options
 }
 
 func RandomDelay() {
