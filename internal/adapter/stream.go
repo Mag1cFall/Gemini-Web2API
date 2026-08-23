@@ -43,6 +43,9 @@ func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) e
 	buffered := &p.bufferText
 	emitted := &p.emittedText
 	if event.Kind == gemini.EventThought {
+		if !p.emittedText {
+			p.bufferText = true
+		}
 		buffered = &p.bufferThought
 		emitted = &p.emittedThought
 	}

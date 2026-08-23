@@ -66,14 +66,19 @@ func TestStreamProjectionRejectsRewriteAfterOutput(t *testing.T) {
 
 func TestStreamProjectionTracksTextAndThoughtSeparately(t *testing.T) {
 	projection := newStreamProjection(ToolBridge{})
-	if err := projection.project(gemini.Event{Kind: gemini.EventThought, Operation: gemini.SnapshotAppend, Delta: "think"}, func(gemini.Event) error { return nil }, nil); err != nil {
+	var emitted []gemini.EventKind
+	emit := func(event gemini.Event) error {
+		emitted = append(emitted, event.Kind)
+		return nil
+	}
+	if err := projection.project(gemini.Event{Kind: gemini.EventThought, Operation: gemini.SnapshotAppend, Delta: "think"}, emit, nil); err != nil {
 		t.Fatalf("输出思考失败: %v", err)
 	}
-	if err := projection.project(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotReplace, Snapshot: "answer"}, func(gemini.Event) error { return nil }, nil); err != nil {
-		t.Fatalf("未输出文本时的首次改写不应失败: %v", err)
+	if err := projection.project(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: "answer"}, emit, nil); err != nil {
+		t.Fatalf("思考后的正文缓冲失败: %v", err)
 	}
-	if !projection.bufferText || projection.errorSent {
-		t.Fatalf("文本与思考状态相互污染: buffered=%v errorSent=%v", projection.bufferText, projection.errorSent)
+	if !projection.bufferText || projection.errorSent || len(emitted) != 1 || emitted[0] != gemini.EventThought {
+		t.Fatalf("思考与正文顺序错误: buffered=%v errorSent=%v events=%v", projection.bufferText, projection.errorSent, emitted)
 	}
 }
 

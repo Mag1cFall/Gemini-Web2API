@@ -84,6 +84,11 @@ func TestFrameDecoderSnapshots(t *testing.T) {
 	if len(thoughtEvents) != 2 || thoughtEvents[1].Operation != SnapshotReplace || thoughtEvents[1].Delta != "ot" {
 		t.Fatalf("thought events = %+v", thoughtEvents)
 	}
+	firstThought := eventKindIndex(events, EventThought)
+	firstText := eventKindIndex(events, EventText)
+	if firstThought < 0 || firstText < 0 || firstThought >= firstText {
+		t.Fatalf("event order = thought:%d text:%d", firstThought, firstText)
+	}
 	done := eventsOfKind(events, EventDone)
 	if len(done) != 1 || done[0].FinishReason != FinishStop {
 		t.Fatalf("done events = %+v", done)
@@ -137,4 +142,13 @@ func eventsOfKind(events []Event, kind EventKind) []Event {
 		}
 	}
 	return result
+}
+
+func eventKindIndex(events []Event, kind EventKind) int {
+	for index, event := range events {
+		if event.Kind == kind {
+			return index
+		}
+	}
+	return -1
 }

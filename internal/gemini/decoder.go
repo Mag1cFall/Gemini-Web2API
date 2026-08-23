@@ -133,18 +133,18 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 			}
 		}
 
-		text, _ := stringPath(candidate, 1, 0)
-		text = normalizeSnapshot(text)
-		if event, changed := diffSnapshot(EventText, candidateIndex, d.texts[candidateIndex], text); changed {
-			d.texts[candidateIndex] = text
-			if err := emit(event); err != nil {
-				return err
-			}
-		}
 		thought, _ := stringPath(candidate, 37, 0, 0)
 		thought = normalizeSnapshot(thought)
 		if event, changed := diffSnapshot(EventThought, candidateIndex, d.thoughts[candidateIndex], thought); changed {
 			d.thoughts[candidateIndex] = thought
+			if err := emit(event); err != nil {
+				return err
+			}
+		}
+		text, _ := stringPath(candidate, 1, 0)
+		text = normalizeSnapshot(text)
+		if event, changed := diffSnapshot(EventText, candidateIndex, d.texts[candidateIndex], text); changed {
+			d.texts[candidateIndex] = text
 			if err := emit(event); err != nil {
 				return err
 			}
