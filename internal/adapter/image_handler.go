@@ -3,322 +3,221 @@ package adapter
 import (
 	"encoding/base64"
 	"fmt"
-	"gemini-web2api/internal/balancer"
-	"gemini-web2api/internal/gemini"
 	"io"
-	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
+// ImageGenerationRequest 表示 OpenAI 图片生成请求
 type ImageGenerationRequest struct {
 	Prompt         string `json:"prompt"`
-	Model          string `json:"model"`
-	N              int    `json:"n"`
-	Size           string `json:"size"`
-	ResponseFormat string `json:"response_format"`
-	Quality        string `json:"quality"`
-	Style          string `json:"style"`
+	Model          string `json:"model,omitempty"`
+	N              int    `json:"n,omitempty"`
+	Size           string `json:"size,omitempty"`
+	ResponseFormat string `json:"response_format,omitempty"`
+	Quality        string `json:"quality,omitempty"`
+	Style          string `json:"style,omitempty"`
 }
 
-var aspectRatioMap = map[string]string{
-	"1024x1024": "1:1",
-	"512x512":   "1:1",
-	"256x256":   "1:1",
-	"1024x768":  "4:3",
-	"1280x960":  "4:3",
-	"768x1024":  "3:4",
-	"960x1280":  "3:4",
-	"1792x1024": "16:9",
-	"1920x1080": "16:9",
-	"1024x1792": "9:16",
-	"1080x1920": "9:16",
-	"1792x768":  "21:9",
-	"2560x1080": "21:9",
+type imageInput struct {
+	data     []byte
+	filename string
 }
 
-func sizeToAspectRatio(size string) string {
-	if ratio, ok := aspectRatioMap[size]; ok {
-		return ratio
-	}
-	return "1:1"
-}
-
+// ImageGenerationHandler 处理 OpenAI 图片生成
 func ImageGenerationHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		client, accountID := pool.Next()
-		if client == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "No available accounts"})
+		var request ImageGenerationRequest
+		err := decodeRequest(c, &request)
+		if err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		handleImageRequest(c, pool, request, nil)
+	}
+}
+
+// ImageEditHandler 处理 OpenAI 图片编辑
+func ImageEditHandler(pool *balancer.AccountPool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if c.Request.MultipartForm != nil {
+			defer c.Request.MultipartForm.RemoveAll()
+		}
+		if len(c.Request.MultipartForm.File["mask"]) != 0 {
+			writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "mask is not supported by Gemini Web image editing")
 			return
 		}
 
-		c.Set("account_id", accountID)
-
-		var req ImageGenerationRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
+		request := ImageGenerationRequest{
+			Prompt:         c.PostForm("prompt"),
+			Model:          c.PostForm("model"),
+			Size:           c.PostForm("size"),
+			ResponseFormat: c.PostForm("response_format"),
+			Quality:        c.PostForm("quality"),
+			Style:          c.PostForm("style"),
 		}
-
-		if req.Prompt == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Missing 'prompt' field"})
-			return
-		}
-
-		if req.N <= 0 {
-			req.N = 1
-		}
-		if req.N > 4 {
-			req.N = 4
-		}
-		if req.Model == "" {
-			req.Model = "gemini-2.5-flash-image"
-		}
-		if req.Size == "" {
-			req.Size = "1024x1024"
-		}
-		if req.ResponseFormat == "" {
-			req.ResponseFormat = "b64_json"
-		}
-
-		log.Printf("[Images] Request | Model: %s | Prompt: %.50s... | N: %d | Size: %s",
-			req.Model, req.Prompt, req.N, req.Size)
-
-		finalPrompt := fmt.Sprintf("Generate an image of %s", req.Prompt)
-		if req.Quality == "hd" {
-			finalPrompt += " (high quality, highly detailed, 4k resolution, hdr)"
-		}
-		if req.Style == "vivid" {
-			finalPrompt += " (vivid colors, dramatic lighting, rich details)"
-		} else if req.Style == "natural" {
-			finalPrompt += " (natural lighting, realistic, photorealistic)"
-		}
-
-		gemini.RandomDelay()
-
-		var images []gin.H
-		var errors []string
-
-		for i := 0; i < req.N; i++ {
-			respBody, err := client.StreamGenerateContent(finalPrompt, req.Model, nil, nil)
+		if rawN := strings.TrimSpace(c.PostForm("n")); rawN != "" {
+			n, err := strconv.Atoi(rawN)
 			if err != nil {
-				log.Printf("[Images] Request %d failed: %v", i, err)
-				errors = append(errors, err.Error())
+				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "n must be an integer")
+				return
+			}
+			request.N = n
+		}
+
+		headers := c.Request.MultipartForm.File["image"]
+		if len(headers) == 0 {
+			headers = c.Request.MultipartForm.File["image[]"]
+		}
+		inputs := make([]imageInput, 0, len(headers))
+		for index, header := range headers {
+			file, err := header.Open()
+			if err != nil {
+				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+				return
+			}
+			data, readErr := io.ReadAll(file)
+			file.Close()
+			if readErr != nil {
+				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", readErr.Error())
+				return
+			}
+			filename := strings.TrimSpace(header.Filename)
+			if filename == "" {
+				filename = fmt.Sprintf("image_%d.bin", index)
+			}
+			inputs = append(inputs, imageInput{data: data, filename: filename})
+		}
+		if len(inputs) == 0 {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "image is required")
+			return
+		}
+		handleImageRequest(c, pool, request, inputs)
+	}
+}
+
+func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request ImageGenerationRequest, inputs []imageInput) {
+	if strings.TrimSpace(request.Prompt) == "" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "prompt is required")
+		return
+	}
+	if request.Model == "" {
+		request.Model = defaultImageModel(pool)
+	}
+	if request.Model == "" {
+		writeOpenAIError(c, http.StatusBadRequest, "model_not_found", "No image model is available")
+		return
+	}
+	knownModel, readyModel := modelStatus(pool, request.Model)
+	if !knownModel {
+		writeOpenAIError(c, http.StatusNotFound, "model_not_found", fmt.Sprintf("model %q is unavailable", request.Model))
+		return
+	}
+	if !readyModel {
+		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+		return
+	}
+	if request.N == 0 {
+		request.N = 1
+	}
+	if request.N < 1 || request.N > 4 {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "n must be between 1 and 4")
+		return
+	}
+	if request.ResponseFormat == "" {
+		request.ResponseFormat = "b64_json"
+	}
+	if request.ResponseFormat != "b64_json" && request.ResponseFormat != "url" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "response_format must be b64_json or url")
+		return
+	}
+	setUnsupportedParameters(c, nonEmptyImageParameters(request))
+
+	prompt := request.Prompt
+	if request.Quality != "" {
+		prompt += "\nQuality: " + request.Quality
+	}
+	if request.Style != "" {
+		prompt += "\nStyle: " + request.Style
+	}
+	if request.Size != "" {
+		prompt += "\nCanvas size: " + request.Size
+	}
+	images := make([]gin.H, 0, request.N)
+	for index := 0; index < request.N && len(images) < request.N; index++ {
+		responseID := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), index)
+		result, accountID, err := runGeneration(
+			c.Request.Context(), pool, "", false, request.Model, responseID, true, gemini.ThinkingStandard,
+			func(client *gemini.Client, _ bool) (string, []gemini.FileData, error) {
+				files := make([]gemini.FileData, 0, len(inputs))
+				for _, input := range inputs {
+					fileID, err := client.UploadFile(c.Request.Context(), input.data, input.filename)
+					if err != nil {
+						return "", nil, err
+					}
+					files = append(files, gemini.FileData{URL: fileID, FileName: input.filename})
+				}
+				return prompt, files, nil
+			}, nil,
+		)
+		c.Set("account_id", accountID)
+		if err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
+			return
+		}
+		for _, image := range result.Accumulator.Primary().Images {
+			if len(images) == request.N {
+				break
+			}
+			data, err := result.Client.FetchMedia(c.Request.Context(), image.URL)
+			if err != nil {
+				writeOpenAIError(c, upstreamStatus(err), "image_download_error", err.Error())
+				return
+			}
+			if request.ResponseFormat == "url" {
+				mimeType := http.DetectContentType(data)
+				images = append(images, gin.H{"url": fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))})
 				continue
 			}
-
-			extracted := extractImagesFromResponse(respBody, req.ResponseFormat, client.Cookies)
-			respBody.Close()
-
-			if len(extracted) > 0 {
-				images = append(images, extracted...)
-				log.Printf("[Images] Request %d succeeded, got %d images", i, len(extracted))
-			} else {
-				errors = append(errors, "No images generated")
-			}
+			images = append(images, gin.H{"b64_json": base64.StdEncoding.EncodeToString(data)})
 		}
-
-		if len(images) == 0 {
-			errMsg := "Failed to generate images"
-			if len(errors) > 0 {
-				errMsg = strings.Join(errors, "; ")
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": gin.H{
-					"message": errMsg,
-					"type":    "server_error",
-				},
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"created": time.Now().Unix(),
-			"data":    images,
-		})
 	}
+	if len(images) == 0 {
+		writeOpenAIError(c, http.StatusBadGateway, "image_generation_error", "Upstream returned no generated images")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"created": time.Now().Unix(), "data": images})
 }
 
-func extractImagesFromResponse(reader io.Reader, format string, cookies map[string]string) []gin.H {
-	var images []gin.H
-
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		log.Printf("[Images] Failed to read response: %v", err)
-		return images
-	}
-
-	var allParts []gjson.Result
-
-	for _, line := range strings.Split(string(content), "\n") {
-		line = strings.TrimPrefix(line, ")]}'")
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		outer := gjson.Parse(line)
-		if !outer.IsArray() {
-			continue
-		}
-
-		outer.ForEach(func(_, part gjson.Result) bool {
-			allParts = append(allParts, part)
-			return true
-		})
-	}
-
-	if len(allParts) == 0 {
-		log.Printf("[Images] No parts found in response")
-		return images
-	}
-
-	bodyIndex := -1
-	var body gjson.Result
-
-	for i, part := range allParts {
-		dataStr := part.Get("2").String()
-		if dataStr == "" {
-			continue
-		}
-		inner := gjson.Parse(dataStr)
-		if inner.Get("4").Exists() {
-			bodyIndex = i
-			body = inner
-			break
+func defaultImageModel(pool *balancer.AccountPool) string {
+	for _, model := range availableModels(pool) {
+		if model.Default {
+			return model.ID
 		}
 	}
-
-	if bodyIndex < 0 || !body.Exists() {
-		log.Printf("[Images] No body found in response")
-		return images
-	}
-
-	for i := bodyIndex; i < len(allParts); i++ {
-		imgDataStr := allParts[i].Get("2").String()
-		if imgDataStr == "" {
-			continue
-		}
-		imgInner := gjson.Parse(imgDataStr)
-		imgCandidate := imgInner.Get("4.0")
-		if !imgCandidate.Get("12.7.0").Exists() {
-			continue
-		}
-
-		imgCandidate.Get("12.7.0").ForEach(func(idx gjson.Result, genImg gjson.Result) bool {
-			url := genImg.Get("0.3.3").String()
-			if url == "" {
-				return true
-			}
-
-			if strings.HasPrefix(url, "http://googleusercontent.com/image_generation_content") {
-				return true
-			}
-
-			fullSizeURL := url
-			if !strings.Contains(url, "=s") {
-				fullSizeURL = url + "=s2048"
-			}
-
-			log.Printf("[Images] Found image %d URL: %s...", idx.Int(), fullSizeURL[:minInt(len(fullSizeURL), 60)])
-
-			if format == "url" {
-				images = append(images, gin.H{"url": fullSizeURL})
-			} else {
-				data := fetchImageWithCookies(fullSizeURL, cookies)
-				if data != "" {
-					images = append(images, gin.H{"b64_json": data})
-				}
-			}
-			return true
-		})
-
-		if len(images) > 0 {
-			break
-		}
-	}
-
-	return images
+	return ""
 }
 
-func getNestedValue(data interface{}, path []int) interface{} {
-	current := data
-	for _, idx := range path {
-		arr, ok := current.([]interface{})
-		if !ok || idx >= len(arr) {
-			return nil
-		}
-		current = arr[idx]
+func nonEmptyImageParameters(request ImageGenerationRequest) []string {
+	var result []string
+	if request.Size != "" {
+		result = append(result, "size")
 	}
-	return current
-}
-
-func getNestedValueStr(data interface{}, path []int) string {
-	val := getNestedValue(data, path)
-	if val == nil {
-		return ""
+	if request.Quality != "" {
+		result = append(result, "quality")
 	}
-	str, ok := val.(string)
-	if !ok {
-		return ""
+	if request.Style != "" {
+		result = append(result, "style")
 	}
-	return str
-}
-
-func fetchImageWithCookies(url string, cookies map[string]string) string {
-	client := &http.Client{
-		Timeout: 60 * time.Second,
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		log.Printf("[Images] Failed to create request: %v", err)
-		return ""
-	}
-
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-
-	var cookieParts []string
-	for k, v := range cookies {
-		cookieParts = append(cookieParts, k+"="+v)
-	}
-	if len(cookieParts) > 0 {
-		req.Header.Set("Cookie", strings.Join(cookieParts, "; "))
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[Images] Failed to fetch image: %v", err)
-		return ""
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		log.Printf("[Images] Image fetch returned status %d for URL: %s", resp.StatusCode, url[:minInt(len(url), 80)])
-		return ""
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("[Images] Failed to read image data: %v", err)
-		return ""
-	}
-
-	if len(data) == 0 {
-		return ""
-	}
-
-	return base64.StdEncoding.EncodeToString(data)
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return result
 }

@@ -17,6 +17,7 @@
 *.zip binary
 *.gz binary
 *.tar binary
+*.bin binary
 
 # Go 相关
 *.go text eol=lf

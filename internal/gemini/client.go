@@ -1,318 +1,401 @@
 package gemini
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
-	"os"
-	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 )
 
 const (
-	EndpointGoogle   = "https://www.google.com"
-	EndpointInit     = "https://gemini.google.com/app"
-	EndpointGenerate = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+	endpointInit     = "https://gemini.google.com/app"
+	endpointBatch    = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
+	endpointGenerate = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
 )
 
-// ModelHeaders maps model names to their specific required headers.
-// You can add new models here by inspecting the 'x-goog-ext-525001261-jspb' header in browser DevTools.
-var ModelHeaders = map[string]string{
-	"gemini-2.5-flash":                   `[1,null,null,null,"71c2d248d3b102ff"]`,
-	"gemini-3.1-pro-preview":             `[1,null,null,null,"e6fa609c3fa255c0"]`,
-	"gemini-3-flash-preview":             `[1,null,null,null,"e051ce1aa80aa576"]`,
-	"gemini-3-flash-preview-no-thinking": `[1,null,null,null,"56fdd199312815e2"]`,
-	"gemini-2.5-flash-image":             `[1,null,null,null,"56fdd199312815e2",null,null,0,[4],null,null,2]`,
-	"gemini-3-pro-image-preview":         `[1,null,null,null,"e051ce1aa80aa576",null,null,0,[4],null,null,2]`,
-}
-
+// Client 表示与单一账号身份绑定的 Gemini Web 协议客户端
 type Client struct {
-	httpClient tls_client.HttpClient
-	Cookies    map[string]string
-	SNlM0e     string
-	VersionBL  string
-	FSID       string
-	ReqID      int
-	AccountID  string
-	ProxyURL   string
+	httpClient  tls_client.HttpClient
+	accountID   string
+	fingerprint Fingerprint
+	clientID    string
+	saveHistory bool
+	reqID       atomic.Int64
+	requestMu   sync.Mutex
+
+	bootstrapMu sync.RWMutex
+	bootstrap   *Bootstrap
+
+	cookieMu sync.Mutex
+	cookies  map[string]Cookie
+	save     func([]Cookie) error
 }
 
-func NewClient(cookies map[string]string, proxyURL string) (*Client, error) {
-	profile := GetRandomProfile()
+// AcquireRequest 独占同一账号的完整上游请求链
+func (c *Client) AcquireRequest() func() {
+	c.requestMu.Lock()
+	return c.requestMu.Unlock
+}
 
-	options := GetClientOptions(profile, proxyURL)
-	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+// NewClient 创建固定 Cookie、代理和指纹的账号客户端
+func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client, error) {
+	fingerprint, profile, err := normalizeFingerprint(source.Fingerprint)
 	if err != nil {
 		return nil, err
 	}
-
-	u, _ := url.Parse("https://gemini.google.com")
-	var cookieList []*http.Cookie
-	for k, v := range cookies {
-		cookieList = append(cookieList, &http.Cookie{
-			Name:   k,
-			Value:  v,
-			Domain: ".google.com",
-			Path:   "/",
-		})
+	httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), getClientOptions(profile, proxyURL)...)
+	if err != nil {
+		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
-	client.SetCookies(u, cookieList)
-
-	return &Client{
-		httpClient: client,
-		Cookies:    cookies,
-		ReqID:      GenerateReqID(),
-		ProxyURL:   strings.TrimSpace(proxyURL),
-	}, nil
+	clientID, err := newProtocolID()
+	if err != nil {
+		return nil, err
+	}
+	client := &Client{
+		httpClient:  httpClient,
+		accountID:   source.ID,
+		fingerprint: fingerprint,
+		clientID:    clientID,
+		saveHistory: saveHistory,
+		cookies:     make(map[string]Cookie, len(source.Cookies)),
+		save:        source.Save,
+	}
+	reqID, err := initialReqID()
+	if err != nil {
+		return nil, err
+	}
+	client.reqID.Store(reqID)
+	if err := client.installCookies(source.Cookies); err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
-func (c *Client) Init() error {
-	req, _ := http.NewRequest(http.MethodGet, EndpointInit, nil)
-	req.Header.Set("User-Agent", GetCurrentUserAgent())
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", getLangHeader())
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-
+// Init 刷新首页动态参数并获取当前账号模型目录
+func (c *Client) Init(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointInit, nil)
+	if err != nil {
+		return err
+	}
+	c.applyNavigationHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("account '%s' failed to visit init page: %v", c.displayAccountID(), err)
+		return fmt.Errorf("account %q bootstrap request: %w", c.displayAccountID(), err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("account '%s' init page returned status: %d", c.displayAccountID(), resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		return httpStatusError(resp.StatusCode, "bootstrap")
 	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	bodyString := string(bodyBytes)
-
-	reSN := regexp.MustCompile(`"SNlM0e":"(.*?)"`)
-	matchSN := reSN.FindStringSubmatch(bodyString)
-	if len(matchSN) < 2 {
-		return fmt.Errorf("account '%s' SNlM0e token not found. Cookies might be invalid", c.displayAccountID())
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read bootstrap page: %w", err)
 	}
-	c.SNlM0e = matchSN[1]
-
-	reBL := regexp.MustCompile(`"bl":"(.*?)"`)
-	matchBL := reBL.FindStringSubmatch(bodyString)
-	if len(matchBL) >= 2 {
-		c.VersionBL = matchBL[1]
-	} else {
-		reBL2 := regexp.MustCompile(`data-bl="(.*?)"`)
-		matchBL2 := reBL2.FindStringSubmatch(bodyString)
-		if len(matchBL2) >= 2 {
-			c.VersionBL = matchBL2[1]
+	bootstrap, err := parseBootstrap(string(body))
+	if err != nil {
+		if strings.Contains(string(body), "accounts.google.com") {
+			return fmt.Errorf("account %q is not signed in", c.displayAccountID())
 		}
+		return fmt.Errorf("account %q: %w", c.displayAccountID(), err)
 	}
-
-	// 直接匹配 BL 字串格式
-	if c.VersionBL == "" {
-		reBL3 := regexp.MustCompile(`boq_assistant-bard-web-server_[a-zA-Z0-9._]+`)
-		matchBL3 := reBL3.FindString(bodyString)
-		if matchBL3 != "" {
-			c.VersionBL = matchBL3
-		}
+	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
+		return err
 	}
-
-	if c.VersionBL == "" {
-		snippet := bodyString
-		if len(snippet) > 500 {
-			snippet = snippet[:500]
-		}
-		log.Printf("Warning: Could not extract 'bl' version, using fallback. Response preview: %s", snippet)
-		c.VersionBL = "boq_assistant-bard-web-server_20260218.05_p0"
-	} else {
-		log.Printf("Extracted BL Version: %s", c.VersionBL)
+	catalog, err := c.fetchModelCatalog(ctx, bootstrap)
+	if err != nil {
+		return fmt.Errorf("account %q: %w", c.displayAccountID(), err)
 	}
-
-	reSID := regexp.MustCompile(`"f.sid":"(.*?)"`)
-	matchSID := reSID.FindStringSubmatch(bodyString)
-	if len(matchSID) >= 2 {
-		c.FSID = matchSID[1]
-	}
-
+	bootstrap.Catalog = catalog
+	c.bootstrapMu.Lock()
+	c.bootstrap = &bootstrap
+	c.bootstrapMu.Unlock()
 	return nil
 }
 
-func (c *Client) StreamGenerateContent(prompt string, model string, files []FileData, meta *ChatMetadata) (io.ReadCloser, error) {
-	resp, err := c.doGenerateContentRequest(prompt, model, files, meta)
+// Stream 执行一次生成并只输出规范事件
+func (c *Client) Stream(ctx context.Context, request GenerateRequest, emit func(Event) error) error {
+	bootstrap, err := c.bootstrapSnapshot()
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	if resp.StatusCode == http.StatusForbidden {
-		preview := readBodyPreview(resp.Body)
-		resp.Body.Close()
-		log.Printf("账号 '%s' 请求返回 403，准备重新初始化后重试。响应预览: %s", c.displayAccountID(), preview)
-
-		if err := c.Init(); err != nil {
-			return nil, err
-		}
-
-		resp, err = c.doGenerateContentRequest(prompt, model, files, meta)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode == http.StatusForbidden {
-			preview = readBodyPreview(resp.Body)
-			resp.Body.Close()
-			log.Printf("账号 '%s' 重新初始化后仍然返回 403。响应预览: %s", c.displayAccountID(), preview)
-			return nil, fmt.Errorf("Account authentication failed (403). Cookie may be expired. Please update cookies in .env")
-		}
+	model, err := c.resolveRequestModel(bootstrap.Catalog, request.Model)
+	if err != nil {
+		return err
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		preview := readBodyPreview(resp.Body)
-		statusCode := resp.StatusCode
-		resp.Body.Close()
-		log.Printf("账号 '%s' 请求失败，状态码 %d，响应预览: %s", c.displayAccountID(), statusCode, preview)
-		return nil, fmt.Errorf("generate request failed with status: %d", statusCode)
+	request.ModelMode = model.Mode
+	streamRequestID, err := newProtocolID()
+	if err != nil {
+		return err
 	}
-
-	return resp.Body, nil
-}
-
-func (c *Client) doGenerateContentRequest(prompt string, model string, files []FileData, meta *ChatMetadata) (*http.Response, error) {
-	payload := BuildGeneratePayload(prompt, c.ReqID, files, meta)
-	c.ReqID++
-
-	form := url.Values{}
-	form.Set("f.req", payload)
-	form.Set("at", c.SNlM0e)
-	data := form.Encode()
-
-	req, _ := http.NewRequest(http.MethodPost, EndpointGenerate, strings.NewReader(data))
-
-	q := req.URL.Query()
-	q.Add("bl", c.VersionBL)
-	q.Add("_reqid", fmt.Sprintf("%d", c.ReqID))
-	q.Add("rt", "c")
-	if c.FSID != "" {
-		q.Add("f.sid", c.FSID)
+	modelHeader, err := buildModelHeader(model.Hash, model.Mode, request.ThinkingMode, c.clientID)
+	if err != nil {
+		return err
 	}
-	req.URL.RawQuery = q.Encode()
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
-	req.Header.Set("User-Agent", GetCurrentUserAgent())
-	req.Header.Set("Origin", "https://gemini.google.com")
-	req.Header.Set("Referer", "https://gemini.google.com/")
-	req.Header.Set("X-Same-Domain", "1")
-	req.Header.Set("Accept-Language", getLangHeader())
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-
-	if headerVal, ok := ModelHeaders[model]; ok {
-		req.Header.Set("x-goog-ext-525001261-jspb", headerVal)
-	} else {
-		log.Printf("Warning: Unknown model '%s', using default header (gemini-2.5-flash).", model)
-		req.Header.Set("x-goog-ext-525001261-jspb", ModelHeaders["gemini-2.5-flash"])
+	payload, err := buildGeneratePayload(request, c.fingerprint.languageCode(), streamRequestID, !c.saveHistory)
+	if err != nil {
+		return err
 	}
+	form := url.Values{"f.req": {payload}, "at": {bootstrap.SNlM0e}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointGenerate, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	reqID := c.nextReqID()
+	query := req.URL.Query()
+	query.Set("bl", bootstrap.BL)
+	query.Set("f.sid", bootstrap.FSID)
+	query.Set("hl", c.fingerprint.languageCode())
+	query.Set("_reqid", fmt.Sprintf("%d", reqID))
+	query.Set("rt", "c")
+	req.URL.RawQuery = query.Encode()
+	c.applyXHRHeaders(req)
+	req.Header.Set("x-goog-ext-525001261-jspb", modelHeader)
+	requestHeader, _ := json.Marshal([]any{streamRequestID, 1})
+	req.Header.Set("x-goog-ext-525005358-jspb", string(requestHeader))
+	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
+	req.Header.Set("x-goog-ext-73010990-jspb", "[0,0,0]")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("account %q generate request: %w", c.displayAccountID(), err)
 	}
-
-	return resp, nil
+	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
+		resp.Body.Close()
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		protocolErr := httpStatusError(resp.StatusCode, "generate")
+		if err := emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError}); err != nil {
+			return err
+		}
+		return protocolErr
+	}
+	return NewFrameDecoder().Decode(resp.Body, request.Conversation, emit)
 }
 
-func (c *Client) FetchImage(imageURL string) ([]byte, error) {
-	maxRedirects := 5
-	currentURL := imageURL
+// Models 返回当前账号初始化得到的模型目录
+func (c *Client) Models() []Model {
+	bootstrap, err := c.bootstrapSnapshot()
+	if err != nil {
+		return nil
+	}
+	return bootstrap.Catalog.List()
+}
 
-	for i := 0; i < maxRedirects; i++ {
-		u, _ := url.Parse(currentURL)
-		var cookieList []*http.Cookie
-		for k, v := range c.Cookies {
-			cookieList = append(cookieList, &http.Cookie{
-				Name:   k,
-				Value:  v,
-				Domain: u.Host,
-				Path:   "/",
-			})
+// ResolveModel 在当前账号模型目录中解析公开 ID
+func (c *Client) ResolveModel(id string) (Model, error) {
+	bootstrap, err := c.bootstrapSnapshot()
+	if err != nil {
+		return Model{}, err
+	}
+	return bootstrap.Catalog.Resolve(id)
+}
+
+func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (ModelCatalog, error) {
+	encodedRequest, err := json.Marshal([]any{[]any{[]any{"otAQ7b", "[]", nil, "generic"}}})
+	if err != nil {
+		return ModelCatalog{}, err
+	}
+	form := url.Values{"f.req": {string(encodedRequest)}, "at": {bootstrap.SNlM0e}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointBatch, strings.NewReader(form.Encode()))
+	if err != nil {
+		return ModelCatalog{}, err
+	}
+	query := req.URL.Query()
+	query.Set("rpcids", "otAQ7b")
+	query.Set("source-path", "/app")
+	query.Set("bl", bootstrap.BL)
+	query.Set("f.sid", bootstrap.FSID)
+	query.Set("hl", c.fingerprint.languageCode())
+	query.Set("_reqid", fmt.Sprintf("%d", c.nextReqID()))
+	query.Set("rt", "c")
+	req.URL.RawQuery = query.Encode()
+	c.applyXHRHeaders(req)
+	genericHeader, _ := json.Marshal([]any{1, nil, nil, nil, nil, nil, nil, nil, []int{4, 5, 6, 8}, nil, nil, nil, nil, nil, nil, nil, c.clientID})
+	req.Header.Set("x-goog-ext-525001261-jspb", string(genericHeader))
+	req.Header.Set("x-goog-ext-73010989-jspb", "[]")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ModelCatalog{}, fmt.Errorf("model catalog request: %w", err)
+	}
+	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
+		resp.Body.Close()
+		return ModelCatalog{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ModelCatalog{}, httpStatusError(resp.StatusCode, "model catalog")
+	}
+
+	var catalog ModelCatalog
+	found := false
+	err = scanProtocolRecords(resp.Body, func(record []any) error {
+		tag, _ := stringAt(record, 0)
+		rpcID, _ := stringAt(record, 1)
+		if tag != "wrb.fr" || rpcID != "otAQ7b" {
+			return nil
 		}
-		c.httpClient.SetCookies(u, cookieList)
-
-		req, _ := http.NewRequest(http.MethodGet, currentURL, nil)
-		req.Header.Set("User-Agent", GetCurrentUserAgent())
-		req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-
-		resp, err := c.httpClient.Do(req)
+		encoded, _ := stringAt(record, 2)
+		var payload []any
+		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
+			return fmt.Errorf("decode model catalog payload: %w", err)
+		}
+		parsed, err := parseModelCatalog(payload, c.clientID)
 		if err != nil {
-			return nil, err
+			return err
 		}
+		catalog = parsed
+		found = true
+		return nil
+	})
+	if err != nil {
+		return ModelCatalog{}, err
+	}
+	if !found {
+		return ModelCatalog{}, fmt.Errorf("model catalog response has no otAQ7b payload")
+	}
+	return catalog, nil
+}
 
-		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-			location := resp.Header.Get("Location")
-			resp.Body.Close()
-			if location == "" {
-				return nil, fmt.Errorf("redirect with no Location header")
+func (c *Client) resolveRequestModel(catalog ModelCatalog, id string) (Model, error) {
+	if strings.TrimSpace(id) == "" {
+		return catalog.Default()
+	}
+	return catalog.Resolve(id)
+}
+
+func (c *Client) bootstrapSnapshot() (Bootstrap, error) {
+	c.bootstrapMu.RLock()
+	defer c.bootstrapMu.RUnlock()
+	if c.bootstrap == nil {
+		return Bootstrap{}, fmt.Errorf("account %q is not initialized", c.displayAccountID())
+	}
+	return *c.bootstrap, nil
+}
+
+func (c *Client) applyNavigationHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", c.fingerprint.UserAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", c.fingerprint.Language)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	c.applyClientHints(req)
+	c.applyHeaderOrder(req, true)
+}
+
+func (c *Client) applyXHRHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", c.fingerprint.UserAgent)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", c.fingerprint.Language)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+	req.Header.Set("Origin", "https://gemini.google.com")
+	req.Header.Set("Referer", "https://gemini.google.com/")
+	req.Header.Set("X-Same-Domain", "1")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	c.applyClientHints(req)
+	c.applyHeaderOrder(req, false)
+}
+
+func (c *Client) applyClientHints(req *http.Request) {
+	for name, value := range c.fingerprint.clientHints() {
+		req.Header.Set(name, value)
+	}
+}
+
+func (c *Client) applyHeaderOrder(req *http.Request, navigation bool) {
+	req.Header[http.PHeaderOrderKey] = []string{":method", ":authority", ":scheme", ":path"}
+	if c.fingerprint.Browser == "Firefox" {
+		if navigation {
+			req.Header[http.HeaderOrderKey] = []string{
+				"user-agent", "accept", "accept-language", "accept-encoding",
+				"upgrade-insecure-requests", "sec-fetch-dest", "sec-fetch-mode",
+				"sec-fetch-site", "sec-fetch-user", "cookie",
 			}
-			currentURL = location
-			continue
+			return
 		}
-
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("image fetch failed with status: %d", resp.StatusCode)
+		req.Header[http.HeaderOrderKey] = []string{
+			"user-agent", "accept", "accept-language", "accept-encoding",
+			"content-type", "origin", "x-goog-ext-525001261-jspb",
+			"x-goog-ext-525005358-jspb", "x-goog-ext-73010989-jspb",
+			"x-goog-ext-73010990-jspb", "x-same-domain", "sec-fetch-dest",
+			"sec-fetch-mode", "sec-fetch-site", "referer", "cookie",
 		}
-
-		return io.ReadAll(resp.Body)
+		return
 	}
-
-	return nil, fmt.Errorf("too many redirects")
+	if navigation {
+		req.Header[http.HeaderOrderKey] = []string{
+			"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+			"upgrade-insecure-requests", "user-agent", "accept",
+			"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user",
+			"sec-fetch-dest", "accept-encoding", "accept-language", "cookie",
+		}
+		return
+	}
+	req.Header[http.HeaderOrderKey] = []string{
+		"content-type", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+		"user-agent", "accept", "origin", "x-goog-ext-525001261-jspb",
+		"x-goog-ext-525005358-jspb", "x-goog-ext-73010989-jspb",
+		"x-goog-ext-73010990-jspb", "x-same-domain", "sec-fetch-site",
+		"sec-fetch-mode", "sec-fetch-dest", "referer", "accept-encoding",
+		"accept-language", "cookie",
+	}
 }
 
-func GetLanguage() string {
-	lang := os.Getenv("LANGUAGE")
-	if lang == "" {
-		lang = "en"
-	}
-	return lang
-}
-
-func getLangHeader() string {
-	lang := GetLanguage()
-	return lang + ",en;q=0.9"
+func (c *Client) nextReqID() int64 {
+	return c.reqID.Add(1)
 }
 
 func (c *Client) displayAccountID() string {
-	if strings.TrimSpace(c.AccountID) == "" {
+	if strings.TrimSpace(c.accountID) == "" {
 		return "default"
 	}
-	return c.AccountID
+	return c.accountID
 }
 
-func readBodyPreview(body io.ReadCloser) string {
-	if body == nil {
-		return ""
+func newProtocolID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("create protocol id: %w", err)
 	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	return strings.ToUpper(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		binary.BigEndian.Uint32(value[0:4]),
+		binary.BigEndian.Uint16(value[4:6]),
+		binary.BigEndian.Uint16(value[6:8]),
+		binary.BigEndian.Uint16(value[8:10]),
+		value[10:16],
+	)), nil
+}
 
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return fmt.Sprintf("读取响应失败: %v", err)
+func initialReqID() (int64, error) {
+	var value [4]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return 0, fmt.Errorf("create initial request id: %w", err)
 	}
+	return int64(100000 + binary.BigEndian.Uint32(value[:])%900000), nil
+}
 
-	preview := strings.TrimSpace(string(data))
-	runes := []rune(preview)
-	if len(runes) > 500 {
-		preview = string(runes[:500])
+func httpStatusError(status int, operation string) *ProtocolError {
+	return &ProtocolError{
+		HTTPStatus: status,
+		Code:       status,
+		Message:    fmt.Sprintf("gemini %s returned HTTP %d", operation, status),
+		Retryable:  status == 400 || status == 401 || status == 403 || status == 429 || status >= 500,
 	}
-
-	if preview == "" {
-		return "<empty>"
-	}
-
-	return preview
 }

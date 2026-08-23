@@ -21,5 +21,8 @@ go.work
 # env
 .env
 
+# Authentication states
+/auth/
+
 # Reference files
 reference*/

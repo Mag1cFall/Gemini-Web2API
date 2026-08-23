@@ -1,99 +1,64 @@
 package gemini
 
 import (
+	"encoding/json"
 	"fmt"
-	"math/rand"
-	"os"
-	"time"
-
-	"github.com/tidwall/sjson"
 )
 
-type FileData struct {
-	URL      string
-	FileName string
-}
+// buildGeneratePayload 从当前 97 槽协议清单构造请求
+func buildGeneratePayload(request GenerateRequest, language, requestID string, temporaryChat bool) (string, error) {
+	inner := make([]any, 97)
 
-type ChatMetadata struct {
-	CID  string
-	RID  string
-	RCID string
-}
-
-// BuildGeneratePayload constructs the 'f.req' parameter.
-// Python logic:
-// json.dumps([
-//
-//	None,
-//	json.dumps([
-//	    [prompt, 0, null, image_list, ...],
-//	    None,
-//	    chat_metadata
-//	]),
-//	None,
-//	None
-//
-// ])
-func BuildGeneratePayload(prompt string, reqID int, files []FileData, meta *ChatMetadata) string {
-	imagesJSON := `[]`
-	if len(files) > 0 {
-		for i, f := range files {
-			item := `[]`
-			urlArr := `[]`
-			urlArr, _ = sjson.Set(urlArr, "0", f.URL)
-			urlArr, _ = sjson.Set(urlArr, "1", 1)
-
-			item, _ = sjson.SetRaw(item, "0", urlArr)
-			item, _ = sjson.Set(item, "1", f.FileName)
-
-			imagesJSON, _ = sjson.SetRaw(imagesJSON, fmt.Sprintf("%d", i), item)
+	attachments := any(nil)
+	if len(request.Files) > 0 {
+		values := make([]any, 0, len(request.Files))
+		for _, file := range request.Files {
+			values = append(values, []any{[]any{file.URL, 1}, file.FileName})
 		}
+		attachments = values
+	}
+	inner[0] = []any{request.Prompt, 0, nil, attachments, nil, nil, 0}
+	inner[1] = []any{language}
+	conversation := ConversationSnapshot{}
+	if request.Conversation != nil {
+		conversation = request.Conversation.Snapshot()
+	}
+	inner[2] = []any{conversation.CID, conversation.RID, conversation.RCID, nil, nil, nil, nil, nil, nil, ""}
+	inner[6] = []any{0}
+	inner[7] = 1
+	inner[10] = 1
+	inner[11] = 0
+	inner[17] = []any{[]any{0}}
+	inner[18] = 0
+	inner[27] = 1
+	inner[30] = []any{4}
+	inner[41] = []any{1}
+	if request.ImageGeneration {
+		inner[49] = 14
+	}
+	inner[53] = 0
+	inner[59] = requestID
+	inner[61] = []any{}
+	inner[68] = 1
+	inner[79] = request.ModelMode
+	inner[80] = int(request.ThinkingMode) + 1
+	inner[91] = 0
+	inner[96] = 1
+	if temporaryChat {
+		inner[6] = []any{1}
+		inner[45] = 1
+		inner[67] = 0
+		inner[68] = 2
+		inner[96] = 0
 	}
 
-	msgStruct := `[]`
-	msgStruct, _ = sjson.Set(msgStruct, "0", prompt)
-	msgStruct, _ = sjson.Set(msgStruct, "1", 0)
-	msgStruct, _ = sjson.Set(msgStruct, "2", nil)
-	msgStruct, _ = sjson.SetRaw(msgStruct, "3", imagesJSON)
-	msgStruct, _ = sjson.Set(msgStruct, "4", nil)
-	msgStruct, _ = sjson.Set(msgStruct, "5", nil)
-	msgStruct, _ = sjson.Set(msgStruct, "6", nil)
-
-	inner := `[]`
-	inner, _ = sjson.SetRaw(inner, "0", msgStruct)
-
-	// 語言字段，匹配瀏覽器 f.req 格式
-	langArr := `[]`
-	langArr, _ = sjson.Set(langArr, "0", GetLanguage())
-	inner, _ = sjson.SetRaw(inner, "1", langArr)
-
-	if meta != nil {
-		metaArr := `[]`
-		metaArr, _ = sjson.Set(metaArr, "0", meta.CID)
-		metaArr, _ = sjson.Set(metaArr, "1", meta.RID)
-		metaArr, _ = sjson.Set(metaArr, "2", meta.RCID)
-		inner, _ = sjson.SetRaw(inner, "2", metaArr)
-	} else {
-		inner, _ = sjson.Set(inner, "2", nil)
+	encodedInner, err := json.Marshal(inner)
+	if err != nil {
+		return "", fmt.Errorf("encode protocol envelope: %w", err)
 	}
-
-	// Pad to index 7
-	for i := 3; i < 7; i++ {
-		inner, _ = sjson.Set(inner, fmt.Sprintf("%d", i), nil)
+	outer, err := json.Marshal([]any{nil, string(encodedInner)})
+	if err != nil {
+		return "", fmt.Errorf("encode f.req: %w", err)
 	}
-	// Snapshot Streaming disabled by default (causes issues with incremental updates)
-	// Set SNAPSHOT_STREAMING=1 in .env to enable
-	if os.Getenv("SNAPSHOT_STREAMING") == "1" {
-		inner, _ = sjson.Set(inner, "7", 1)
-	}
-
-	outer := `[null, "", null, null]`
-	outer, _ = sjson.Set(outer, "1", inner)
-
-	return outer
-}
-
-func GenerateReqID() int {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	return r.Intn(100000) + 100000
+	return string(outer), nil
 }
