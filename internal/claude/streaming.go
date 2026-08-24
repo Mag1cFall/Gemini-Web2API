@@ -50,6 +50,13 @@ func (p *StreamProcessor) SetConversationID(conversationID string) {
 	p.state.ConversationID = conversationID
 }
 
+// SetModel 设置校验后的实际模型
+func (p *StreamProcessor) SetModel(model string) {
+	if !p.state.MessageStartSent && model != "" {
+		p.state.Model = model
+	}
+}
+
 // MessageID 返回当前 Claude 消息标识
 func (p *StreamProcessor) MessageID() string {
 	return p.state.MessageID
@@ -59,6 +66,9 @@ func (p *StreamProcessor) MessageID() string {
 func (p *StreamProcessor) ProcessEvent(event gemini.Event) error {
 	if event.Usage != nil {
 		p.state.Usage = event.Usage
+		if event.Kind == gemini.EventMetadata {
+			return p.ensureStarted()
+		}
 	}
 
 	switch event.Kind {
@@ -66,12 +76,16 @@ func (p *StreamProcessor) ProcessEvent(event gemini.Event) error {
 		return p.emitContent("text", event)
 	case gemini.EventThought:
 		return p.emitContent("thinking", event)
-	case gemini.EventImage:
-		if event.Image != nil && event.Image.URL != "" {
+	case gemini.EventMedia:
+		if event.Media != nil && event.Media.URL != "" {
+			text := fmt.Sprintf("[%s](%s)", event.Media.Title, event.Media.URL)
+			if event.Media.Type == gemini.MediaGeneratedImage {
+				text = fmt.Sprintf("![%s](%s)", event.Media.Alt, event.Media.URL)
+			}
 			return p.emitContent("text", gemini.Event{
 				Kind:      gemini.EventText,
 				Operation: gemini.SnapshotAppend,
-				Delta:     fmt.Sprintf("![%s](%s)", event.Image.Alt, event.Image.URL),
+				Delta:     text,
 			})
 		}
 	case gemini.EventError:
@@ -181,6 +195,7 @@ func (p *StreamProcessor) emitContent(blockType string, event gemini.Event) erro
 		block := map[string]interface{}{"type": blockType}
 		if blockType == "thinking" {
 			block["thinking"] = ""
+			block["signature"] = ""
 		} else {
 			block["text"] = ""
 		}

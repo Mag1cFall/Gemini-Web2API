@@ -1,5 +1,7 @@
 # Gemini-Web2API (Go Version)
 
+[简体中文](README.md) | [English](README.en.md)
+
 将 Google Gemini Web 网页版转换为 OpenAI、Claude 和 Gemini 兼容 API。
 
 ## 特性
@@ -16,17 +18,35 @@
 
 ## 支持的模型
 
-服务启动时通过 Gemini Web 原生模型目录接口读取每个账号当前可用的模型，不维护静态模型表。运行后访问 `/v1/models` 获取可用模型 ID。服务按 Gemini tokenizer 返回输入、可见输出和思考摘要的 token usage；账号用量通过 `/v1/accounts/usage` 查看。
+| 模型 ID | 名称 | 输入窗口 / 能力 | 默认 |
+| --- | --- | ---: | --- |
+| `gemini-3.7-flash` | 3.7 Flash | 32,768–1,048,576 | 是 |
+| `gemini-3.1-flash-image` | Nano Banana 2 | 图片生成与编辑 |  |
+| `gemini-3.1-pro` | 3.1 Pro | 32,768–1,048,576 |  |
+| `gemini-3.5-flash-lite` | 3.5 Flash-Lite | 32,768–1,048,576 |  |
+| `gemini-3.6-flash` | 3.6 Flash | 32,768 |  |
+
+服务启动时将 Gemini Web 动态聊天模型目录与 `gemini-3.1-flash-image` 图片能力 ID 合并，运行后以 `/v1/models` 为准。图片 ID 可用于对话生图和 `/v1/images/*`。上下文窗口、模型权限和配额由 Gemini 网页账号的套餐与地区决定。服务按 Gemini tokenizer 返回文本输入、可见输出和思考摘要的 token usage；账号用量通过 `/v1/accounts/usage` 查看。
 
 ## 快速开始
 
-### 1. 编译
+### Windows 一键启动
+
+双击根目录的 `start.bat`，或在 cmd、PowerShell、Git Bash 中运行它。有 Go 时脚本每次编译当前源码；没有 Go 时使用同目录的 Release 可执行文件。空参数启动会在缺少账号时进入交互式 setup，带参数调用则将参数直接传给程序。
+
+```powershell
+.\start.bat
+.\start.bat --help
+.\start.bat setup --email "name@example.com"
+```
+
+### 手动启动
+
+先编译程序：
 
 ```bash
 go build -o gemini-web2api.exe ./cmd/gemini-web2api
 ```
-
-### 2. 配置账号
 
 Windows 首次使用时，直接运行交互式配置：
 
@@ -42,17 +62,23 @@ Windows 首次使用时，直接运行交互式配置：
 .\gemini-web2api.exe setup --email "name@example.com"
 ```
 
-`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。日常启动只需运行：
+也可以粘贴浏览器请求头中 `Cookie` 字段的一行值；这种状态在现有 Cookie 有效期内使用，不具备设备绑定续签能力：
+
+```powershell
+.\gemini-web2api.exe setup --cookie "SAPISID=...; __Secure-1PSID=..." --id account-name
+```
+
+`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。Chrome 导入还会保存浏览器退出后续签所需的设备绑定材料。日常启动只需运行：
 
 ```powershell
 .\gemini-web2api.exe
 ```
 
-默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以直接使用已经生成的 `auth` 目录。
+默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以在现有 Cookie 有效期内使用已经生成的 `auth` 目录；设备绑定续签仍需在原 Windows 设备执行。
 
-### 3. 可选配置
+### 可选配置
 
-程序启动时自动读取当前目录的 `.env`。默认配置可以直接使用；需要调整时复制 `.env.example` 为 `.env`。
+程序启动时自动读取当前目录的 `.env`，setup 与日常服务使用同一个 `PROXY`。默认配置可以直接使用；需要调整时复制 `.env.example` 为 `.env`。
 
 ```dotenv
 # 默认使用 Gemini Temporary Chat，不写入官网历史记录
@@ -153,3 +179,5 @@ internal/
 ## 注意
 
 Gemini Web 内部协议可能随官网更新，模型 ID 以服务启动后返回的动态目录为准。欢迎提 Issue 和 PR。
+
+开发与贡献见 [docs/development.md](docs/development.md)，认证、请求载荷和流式解码原理见 [docs/protocol.md](docs/protocol.md)。

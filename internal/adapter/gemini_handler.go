@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 	"github.com/gin-gonic/gin"
@@ -40,15 +41,31 @@ type GeminiFunctionResponse struct {
 	Response map[string]interface{} `json:"response"`
 }
 
+// GeminiExecutableCode 表示 Gemini 已执行代码
+type GeminiExecutableCode struct {
+	ID       string `json:"id,omitempty"`
+	Language string `json:"language"`
+	Code     string `json:"code"`
+}
+
+// GeminiCodeExecutionResult 表示 Gemini 代码执行结果
+type GeminiCodeExecutionResult struct {
+	ID      string `json:"id,omitempty"`
+	Outcome string `json:"outcome"`
+	Output  string `json:"output"`
+}
+
 // GeminiPart 表示 Gemini 内容段
 type GeminiPart struct {
-	Text             string                  `json:"text,omitempty"`
-	Thought          bool                    `json:"thought,omitempty"`
-	ThoughtSignature string                  `json:"thoughtSignature,omitempty"`
-	InlineData       *GeminiInlineData       `json:"inlineData,omitempty"`
-	FileData         *GeminiFileData         `json:"fileData,omitempty"`
-	FunctionCall     *GeminiFunctionCall     `json:"functionCall,omitempty"`
-	FunctionResponse *GeminiFunctionResponse `json:"functionResponse,omitempty"`
+	Text             string                     `json:"text,omitempty"`
+	Thought          bool                       `json:"thought,omitempty"`
+	ThoughtSignature string                     `json:"thoughtSignature,omitempty"`
+	InlineData       *GeminiInlineData          `json:"inlineData,omitempty"`
+	FileData         *GeminiFileData            `json:"fileData,omitempty"`
+	FunctionCall     *GeminiFunctionCall        `json:"functionCall,omitempty"`
+	FunctionResponse *GeminiFunctionResponse    `json:"functionResponse,omitempty"`
+	ExecutableCode   *GeminiExecutableCode      `json:"executableCode,omitempty"`
+	CodeResult       *GeminiCodeExecutionResult `json:"codeExecutionResult,omitempty"`
 }
 
 // GeminiContent 表示 Gemini 消息
@@ -106,7 +123,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeGeminiError(c, http.StatusServiceUnavailable, "UNAVAILABLE", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, err := geminiRequestThinkingMode(request)
+		thinkingMode, includeThoughts, err := geminiRequestThinkingSettings(request)
 		if err != nil {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 			return
@@ -124,18 +141,20 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 
 		if streaming {
 			setSSEHeaders(c)
-			projection := newStreamProjection(bridge)
+			projection := newStreamProjection(bridge, includeThoughts)
+			streamModel := config.MapModel(model)
 			result, accountID, err := runGeneration(
 				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, false, thinkingMode,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildGeminiPrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
 					return projection.project(event, func(event gemini.Event) error {
-						return writeGeminiDelta(c.Writer, responseID, event)
+						return writeGeminiDelta(c.Writer, responseID, streamModel, event)
 					}, func(err error) error {
 						return writeGeminiStreamError(c.Writer, http.StatusBadGateway, "INTERNAL", err)
 					})
 				},
+				projection.hasVisibleOutput,
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
@@ -144,7 +163,11 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				}
 				return
 			}
-			response, err := buildGeminiResponse(model, result, bridge)
+			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+				_ = writeGeminiStreamError(c.Writer, http.StatusBadGateway, "INTERNAL", err)
+				return
+			}
+			response, err := buildGeminiResponse(result, bridge, includeThoughts)
 			if err != nil {
 				_ = writeGeminiStreamError(c.Writer, http.StatusBadGateway, "INTERNAL", err)
 				return
@@ -157,7 +180,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, false, thinkingMode,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildGeminiPrompt(c, client, request, continuation, bridge)
-			}, nil,
+			}, nil, nil,
 		)
 		c.Set("account_id", accountID)
 		if err != nil {
@@ -165,7 +188,11 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
-		response, err := buildGeminiResponse(model, result, bridge)
+		if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+			writeGeminiError(c, http.StatusBadGateway, "INTERNAL", err.Error())
+			return
+		}
+		response, err := buildGeminiResponse(result, bridge, includeThoughts)
 		if err != nil {
 			writeGeminiError(c, http.StatusBadGateway, "INTERNAL", err.Error())
 			return
@@ -210,6 +237,8 @@ func GeminiListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			data = append(data, gin.H{
 				"name": "models/" + model.ID, "displayName": model.DisplayName, "description": model.Description,
 				"supportedGenerationMethods": model.Capabilities, "default": model.Default,
+				"inputTokenLimit": model.MaxInputTokenLimit, "minInputTokenLimit": model.MinInputTokenLimit,
+				"availableAccountCount": model.AccountCount,
 			})
 		}
 		c.JSON(http.StatusOK, gin.H{"models": data})
@@ -259,7 +288,11 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 	var builder strings.Builder
 	var files []gemini.FileData
 	for _, part := range parts {
-		builder.WriteString(part.Text)
+		if part.Thought {
+			appendTranscriptObject(&builder, map[string]interface{}{"type": "thinking", "thinking": part.Text, "signature": part.ThoughtSignature})
+		} else {
+			builder.WriteString(part.Text)
+		}
 		if part.FunctionCall != nil {
 			arguments, _ := json.Marshal(part.FunctionCall.Args)
 			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_use", "id": part.FunctionCall.ID, "name": part.FunctionCall.Name, "signature": part.ThoughtSignature, "arguments": json.RawMessage(arguments)})
@@ -268,8 +301,22 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 			response, _ := json.Marshal(part.FunctionResponse.Response)
 			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_result", "id": part.FunctionResponse.ID, "name": part.FunctionResponse.Name, "response": json.RawMessage(response)})
 		}
+		if part.ExecutableCode != nil {
+			appendTranscriptObject(&builder, map[string]interface{}{
+				"type": "code_execution", "id": part.ExecutableCode.ID, "language": part.ExecutableCode.Language, "code": part.ExecutableCode.Code,
+			})
+		}
+		if part.CodeResult != nil {
+			appendTranscriptObject(&builder, map[string]interface{}{
+				"type": "code_execution_result", "id": part.CodeResult.ID, "outcome": part.CodeResult.Outcome, "output": part.CodeResult.Output,
+			})
+		}
 		if part.InlineData != nil {
-			raw, _ := json.Marshal([]gin.H{{"type": "image", "source": gin.H{"type": "base64", "media_type": part.InlineData.MimeType, "data": part.InlineData.Data}}})
+			partType := "document"
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(part.InlineData.MimeType)), "image/") {
+				partType = "image"
+			}
+			raw, _ := json.Marshal([]gin.H{{"type": partType, "source": gin.H{"type": "base64", "media_type": part.InlineData.MimeType, "data": part.InlineData.Data}}})
 			label, attachments, err := decodeMessageContent(c.Request.Context(), raw, client)
 			if err != nil {
 				return "", nil, err
@@ -328,13 +375,16 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 		for _, group := range groups {
 			for field := range group {
 				switch field {
-				case "functionDeclarations", "googleSearch", "googleSearchRetrieval":
+				case "functionDeclarations", "googleSearch", "googleSearchRetrieval", "codeExecution":
 				default:
 					return bridge, nil, fmt.Errorf("不支持的 Gemini 工具组 %q", field)
 				}
 			}
 			if len(group["googleSearch"]) > 0 || len(group["googleSearchRetrieval"]) > 0 {
-				return bridge, nil, fmt.Errorf("Gemini Web search 工具尚未映射")
+				bridge.WebSearch = true
+			}
+			if len(group["codeExecution"]) > 0 {
+				bridge.CodeExecution = true
 			}
 			var declarations []struct {
 				Name                       string          `json:"name"`
@@ -415,35 +465,47 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 	return bridge, unsupported, nil
 }
 
-func buildGeminiResponse(model string, result generationResult, bridge ToolBridge) (gin.H, error) {
+func buildGeminiResponse(result generationResult, bridge ToolBridge, includeThoughts bool) (gin.H, error) {
 	primary := result.Accumulator.Primary()
+	if err := validateHostedOutput(primary, bridge); err != nil {
+		return nil, err
+	}
 	content, calls, err := bridge.Parse(primary.Text)
 	if err != nil {
 		return nil, err
 	}
 	calls = assignToolCallIDs(calls, result.ResponseID)
 	parts := make([]gin.H, 0)
-	if primary.Thought != "" {
+	if includeThoughts && primary.Thought != "" {
 		parts = append(parts, gin.H{"text": primary.Thought, "thought": true})
 	}
-	if content != "" {
-		parts = append(parts, gin.H{"text": content})
-	}
+	parts = append(parts, geminiStructuredParts(content, primary)...)
 	for index, call := range calls {
 		var arguments map[string]interface{}
 		_ = json.Unmarshal(call.Arguments, &arguments)
-		parts = append(parts, gin.H{
-			"functionCall":     gin.H{"id": call.ID, "name": call.Name, "args": arguments},
-			"thoughtSignature": thinkingSignature(result.ResponseID, index+1),
-		})
+		part := gin.H{"functionCall": gin.H{"id": call.ID, "name": call.Name, "args": arguments}}
+		if index == 0 {
+			part["thoughtSignature"] = thinkingSignature(result.ResponseID, 0)
+		}
+		parts = append(parts, part)
 	}
-	for _, image := range primary.Images {
-		parts = append(parts, gin.H{"fileData": gin.H{"fileUri": image.URL}})
+	if len(calls) == 0 && len(parts) > 0 {
+		parts[len(parts)-1]["thoughtSignature"] = thinkingSignature(result.ResponseID, 0)
 	}
 	finish := "STOP"
+	candidate := gin.H{"content": gin.H{"role": "model", "parts": parts}, "finishReason": finish, "index": 0}
+	if len(primary.Citations) > 0 {
+		citations := make([]gin.H, 0, len(primary.Citations))
+		for _, citation := range primary.Citations {
+			citations = append(citations, gin.H{
+				"uri": citation.URL, "startIndex": citation.Start, "endIndex": citation.End,
+			})
+		}
+		candidate["citationMetadata"] = gin.H{"citationSources": citations}
+	}
 	response := gin.H{
-		"candidates":   []gin.H{{"content": gin.H{"role": "model", "parts": parts}, "finishReason": finish, "index": 0}},
-		"modelVersion": result.ProviderModel, "responseId": result.ResponseID, "conversationId": result.ConversationID,
+		"candidates":   []gin.H{candidate},
+		"modelVersion": result.Model, "responseId": result.ResponseID, "conversationId": result.ConversationID,
 	}
 	if result.Accumulator.Usage != nil {
 		response["usageMetadata"] = geminiUsage(result.Accumulator.Usage)
@@ -451,14 +513,78 @@ func buildGeminiResponse(model string, result generationResult, bridge ToolBridg
 	return response, nil
 }
 
-func writeGeminiDelta(w http.ResponseWriter, responseID string, event gemini.Event) error {
+func geminiStructuredParts(text string, output CandidateOutput) []gin.H {
+	if hasGeneratedImage(output) && strings.TrimSpace(text) == "" {
+		text = ""
+	}
+	runes := []rune(text)
+	parts := make([]gin.H, 0, len(output.Codes)+len(output.Media)+1)
+	cursor := 0
+	emittedResults := make(map[int]struct{})
+	for _, insert := range candidateInserts(output) {
+		offset := insert.offset
+		if offset < 0 || offset > len(runes) {
+			offset = len(runes)
+		}
+		if offset > cursor {
+			parts = append(parts, gin.H{"text": string(runes[cursor:offset])})
+			cursor = offset
+		}
+		if insert.code != nil {
+			if insert.code.Type == gemini.CodeReference {
+				parts = append(parts, geminiCodePart(*insert.code))
+			} else if _, ok := emittedResults[insert.code.Index]; !ok {
+				emittedResults[insert.code.Index] = struct{}{}
+				parts = append(parts, geminiCodeResultPart(output.Codes, insert.code.Index))
+			}
+		} else if insert.media != nil {
+			mimeType, data, ok := splitDataURL(insert.media.URL)
+			if ok {
+				parts = append(parts, gin.H{"inlineData": gin.H{"mimeType": mimeType, "data": data}})
+			}
+		}
+	}
+	if cursor < len(runes) {
+		parts = append(parts, gin.H{"text": string(runes[cursor:])})
+	}
+	return parts
+}
+
+func geminiCodeResultPart(codes []CodeOutput, index int) gin.H {
+	outcome := "OUTCOME_OK"
+	var output strings.Builder
+	for _, code := range codes {
+		if code.Index != index || code.Type == gemini.CodeReference || code.Content == "" {
+			continue
+		}
+		if output.Len() > 0 {
+			output.WriteByte('\n')
+		}
+		if code.Type == gemini.CodeStderr {
+			outcome = "OUTCOME_FAILED"
+			output.WriteString("stderr:\n")
+		}
+		output.WriteString(code.Content)
+	}
+	return gin.H{"codeExecutionResult": gin.H{"outcome": outcome, "output": output.String()}}
+}
+
+func geminiCodePart(code CodeOutput) gin.H {
+	language := strings.ToUpper(strings.TrimSpace(code.Language))
+	if language != "PYTHON" {
+		language = "LANGUAGE_UNSPECIFIED"
+	}
+	return gin.H{"executableCode": gin.H{"language": language, "code": code.Content}}
+}
+
+func writeGeminiDelta(w http.ResponseWriter, responseID string, model string, event gemini.Event) error {
 	part := gin.H{"text": event.Delta}
 	if event.Kind == gemini.EventThought {
 		part["thought"] = true
 	}
 	return writeSSEJSON(w, gin.H{
 		"candidates": []gin.H{{"content": gin.H{"role": "model", "parts": []gin.H{part}}, "index": 0}},
-		"responseId": responseID,
+		"responseId": responseID, "modelVersion": model,
 	})
 }
 
@@ -472,14 +598,37 @@ func projectGeminiStreamTail(response gin.H, projection *streamProjection) gin.H
 		content, _ := candidate["content"].(gin.H)
 		parts, _ := content["parts"].([]gin.H)
 		filtered := make([]gin.H, 0, len(parts))
+		remainingTextRunes := projection.textRunes
 		for _, part := range parts {
 			_, hasText := part["text"]
 			thought, _ := part["thought"].(bool)
 			if hasText && thought && !projection.bufferThought {
-				continue
+				if _, signed := part["thoughtSignature"]; !signed {
+					continue
+				}
+				part["text"] = ""
 			}
-			if hasText && !thought && !projection.bufferText {
-				continue
+			if hasText && !thought {
+				if !projection.bufferText {
+					if _, signed := part["thoughtSignature"]; !signed {
+						continue
+					}
+					part["text"] = ""
+					filtered = append(filtered, part)
+					continue
+				}
+				text, _ := part["text"].(string)
+				runes := []rune(text)
+				if remainingTextRunes >= len(runes) {
+					remainingTextRunes -= len(runes)
+					continue
+				}
+				text = string(runes[remainingTextRunes:])
+				remainingTextRunes = 0
+				if text == "" {
+					continue
+				}
+				part["text"] = text
 			}
 			filtered = append(filtered, part)
 		}
@@ -489,11 +638,11 @@ func projectGeminiStreamTail(response gin.H, projection *streamProjection) gin.H
 }
 
 func geminiUsage(usage *gemini.Usage) gin.H {
-	result := gin.H{"promptTokenCount": usage.PromptTokens, "candidatesTokenCount": usage.CompletionTokens, "totalTokenCount": usage.TotalTokens}
-	if usage.ThoughtTokens > 0 {
-		result["thoughtsTokenCount"] = usage.ThoughtTokens
+	return gin.H{
+		"promptTokenCount": usage.PromptTokens, "candidatesTokenCount": usage.CompletionTokens,
+		"thoughtsTokenCount": usage.ThoughtTokens,
+		"totalTokenCount":    usage.PromptTokens + usage.CompletionTokens + usage.ThoughtTokens,
 	}
-	return result
 }
 
 func mimeTypeToExt(mimeType string) string {
@@ -508,7 +657,36 @@ func mimeTypeToExt(mimeType string) string {
 		return ".gif"
 	case "application/pdf":
 		return ".pdf"
+	case "audio/wav", "audio/x-wav":
+		return ".wav"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "audio/flac":
+		return ".flac"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "video/quicktime":
+		return ".mov"
 	default:
 		return ".bin"
 	}
+}
+
+func splitDataURL(value string) (string, string, bool) {
+	if !strings.HasPrefix(value, "data:") {
+		return "", "", false
+	}
+	metadata, data, ok := strings.Cut(strings.TrimPrefix(value, "data:"), ",")
+	if !ok {
+		return "", "", false
+	}
+	mimeType := strings.TrimSuffix(metadata, ";base64")
+	if mimeType == metadata {
+		return "", "", false
+	}
+	return mimeType, data, true
 }

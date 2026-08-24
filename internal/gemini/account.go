@@ -1,5 +1,7 @@
 package gemini
 
+import "context"
+
 // Cookie 表示可无损写回认证状态的 Cookie
 type Cookie struct {
 	Name     string `json:"name"`
@@ -18,4 +20,5 @@ type AccountSource struct {
 	Cookies     []Cookie
 	Fingerprint Fingerprint
 	Save        func([]Cookie) error
+	Refresh     func(context.Context) ([]Cookie, error)
 }

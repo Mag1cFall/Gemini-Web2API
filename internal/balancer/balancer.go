@@ -11,7 +11,6 @@ import (
 type accountEntry struct {
 	Client           *gemini.Client
 	AccountID        string
-	Models           map[string]struct{}
 	LastUsed         time.Time
 	CooldownUntil    time.Time
 	ConsecutiveFails int
@@ -76,18 +75,13 @@ func NewAccountPool(cooldown time.Duration, sessionTTL time.Duration) *AccountPo
 }
 
 // Add 添加一个已经完成协议初始化的账号
-func (p *AccountPool) Add(client *gemini.Client, accountID string, models []gemini.Model) {
+func (p *AccountPool) Add(client *gemini.Client, accountID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	modelIDs := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		modelIDs[model.ID] = struct{}{}
-	}
 	p.entries = append(p.entries, accountEntry{
 		Client:    client,
 		AccountID: accountID,
-		Models:    modelIDs,
 	})
 }
 
@@ -104,6 +98,11 @@ func (p *AccountPool) AddUnavailable(accountID string) {
 
 // NextForModel 为新请求选择真正支持目标模型的健康账号
 func (p *AccountPool) NextForModel(sessionKey string, modelID string) (*gemini.Client, string) {
+	return p.NextForModelExcluding(sessionKey, modelID, nil)
+}
+
+// NextForModelExcluding 为无会话重试选择未排除的同能力账号
+func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (*gemini.Client, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -122,7 +121,7 @@ func (p *AccountPool) NextForModel(sessionKey string, modelID string) (*gemini.C
 		}
 	}
 
-	entry := p.nextAvailable(now, modelID)
+	entry := p.nextAvailable(now, modelID, excludedAccountIDs)
 	if entry == nil {
 		return nil, ""
 	}
@@ -207,7 +206,7 @@ func (p *AccountPool) HasModel(modelID string) bool {
 	defer p.mu.Unlock()
 
 	for _, entry := range p.entries {
-		if _, ok := entry.Models[modelID]; ok && !entry.Unavailable {
+		if !entry.Unavailable && entry.supportsModel(modelID) {
 			return true
 		}
 	}
@@ -310,15 +309,30 @@ func timePointer(value time.Time) *time.Time {
 	return &copy
 }
 
-func (p *AccountPool) nextAvailable(now time.Time, modelID string) *accountEntry {
+func (p *AccountPool) nextAvailable(now time.Time, modelID string, excludedAccountIDs map[string]struct{}) *accountEntry {
 	if len(p.entries) == 0 {
+		return nil
+	}
+
+	eligible := func(entry *accountEntry) bool {
+		_, excluded := excludedAccountIDs[entry.AccountID]
+		return !excluded && entry.Client != nil && !entry.Unavailable && !now.Before(entry.CooldownUntil) && entry.supportsModel(modelID)
+	}
+	maxContextWindow := -1
+	for i := range p.entries {
+		entry := &p.entries[i]
+		if eligible(entry) && entry.Client.ContextWindow() > maxContextWindow {
+			maxContextWindow = entry.Client.ContextWindow()
+		}
+	}
+	if maxContextWindow < 0 {
 		return nil
 	}
 
 	for offset := uint64(0); offset < uint64(len(p.entries)); offset++ {
 		idx := (p.index + offset) % uint64(len(p.entries))
 		entry := &p.entries[idx]
-		if entry.Client != nil && !entry.Unavailable && !now.Before(entry.CooldownUntil) && entry.supportsModel(modelID) {
+		if eligible(entry) && entry.Client.ContextWindow() == maxContextWindow {
 			p.index = idx + 1
 			return entry
 		}
@@ -330,8 +344,11 @@ func (e *accountEntry) supportsModel(modelID string) bool {
 	if modelID == "" {
 		return true
 	}
-	_, ok := e.Models[modelID]
-	return ok
+	if e.Client == nil {
+		return false
+	}
+	_, err := e.Client.ResolveModel(modelID)
+	return err == nil
 }
 
 func (p *AccountPool) availableEntry(accountID string, now time.Time) *accountEntry {

@@ -22,15 +22,15 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, filename string) (
 
 	part, err := writer.CreateFormFile("file", filename)
 	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %v", err)
+		return "", fmt.Errorf("failed to create form file: %w", err)
 	}
 
 	if _, err := part.Write(data); err != nil {
-		return "", fmt.Errorf("failed to write file data: %v", err)
+		return "", fmt.Errorf("failed to write file data: %w", err)
 	}
 
 	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("failed to close multipart writer: %v", err)
+		return "", fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointUpload, &buf)
@@ -49,7 +49,7 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, filename string) (
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("upload failed: %v", err)
+		return "", transportProtocolError("upload", err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
@@ -58,12 +58,12 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, filename string) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("upload failed with status: %d", resp.StatusCode)
+		return "", httpStatusError(resp.StatusCode, "upload")
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return "", retryableProtocolError("read upload response", err)
 	}
 
 	return string(body), nil

@@ -8,23 +8,28 @@ import (
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
+	tls_client "github.com/bogdanfinn/tls-client"
 )
 
-func (c *Client) installCookies(cookies []Cookie) error {
-	c.cookieMu.Lock()
-	defer c.cookieMu.Unlock()
+func (c *Client) replaceCookies(cookies []Cookie) error {
+	jar := tls_client.NewCookieJar()
+	next := make(map[string]Cookie, len(cookies))
 	for _, cookie := range cookies {
 		cookie = normalizeCookie(cookie, "gemini.google.com")
 		if cookie.Name == "" {
 			return fmt.Errorf("cookie name is empty")
 		}
-		c.cookies[cookieKey(cookie)] = cookie
 		target, err := cookieURL(cookie)
 		if err != nil {
 			return err
 		}
-		c.httpClient.SetCookies(target, []*http.Cookie{toHTTPCookie(cookie)})
+		next[cookieKey(cookie)] = cookie
+		jar.SetCookies(target, []*http.Cookie{toHTTPCookie(cookie)})
 	}
+	c.cookieMu.Lock()
+	c.cookies = next
+	c.httpClient.SetCookieJar(jar)
+	c.cookieMu.Unlock()
 	return nil
 }
 

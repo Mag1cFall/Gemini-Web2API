@@ -12,8 +12,8 @@ func TestAccountPoolRoundRobinAndStickySession(t *testing.T) {
 	pool := NewAccountPool(time.Minute, time.Hour)
 	first := &gemini.Client{}
 	second := &gemini.Client{}
-	pool.Add(first, "first", nil)
-	pool.Add(second, "second", nil)
+	pool.Add(first, "first")
+	pool.Add(second, "second")
 
 	client, accountID := pool.NextForModel("conversation-a", "")
 	if client != first || accountID != "first" {
@@ -34,8 +34,8 @@ func TestAccountPoolBindsResponseAlias(t *testing.T) {
 	pool := NewAccountPool(time.Minute, time.Hour)
 	first := &gemini.Client{}
 	second := &gemini.Client{}
-	pool.Add(first, "first", nil)
-	pool.Add(second, "second", nil)
+	pool.Add(first, "first")
+	pool.Add(second, "second")
 
 	client, accountID := pool.NextForModel("", "")
 	if client != first || accountID != "first" {
@@ -54,8 +54,8 @@ func TestAccountPoolCooldownPreservesStickySession(t *testing.T) {
 	pool := NewAccountPool(time.Minute, time.Hour)
 	first := &gemini.Client{}
 	second := &gemini.Client{}
-	pool.Add(first, "first", nil)
-	pool.Add(second, "second", nil)
+	pool.Add(first, "first")
+	pool.Add(second, "second")
 
 	_, _ = pool.NextForModel("conversation-a", "")
 	pool.ReportFailure("first")
@@ -97,33 +97,19 @@ func TestAccountPoolUnavailableStatus(t *testing.T) {
 	}
 }
 
-// TestAccountPoolSelectsAccountWithRequestedModel 验证模型灰度账号选择
-func TestAccountPoolSelectsAccountWithRequestedModel(t *testing.T) {
+// TestAccountPoolRejectsUnknownModel 验证账号模型能力来自客户端目录
+func TestAccountPoolRejectsUnknownModel(t *testing.T) {
 	pool := NewAccountPool(time.Minute, time.Hour)
 	first := &gemini.Client{}
 	second := &gemini.Client{}
-	pool.Add(first, "first", []gemini.Model{{ID: "model-a"}})
-	pool.Add(second, "second", []gemini.Model{{ID: "model-b"}})
+	pool.Add(first, "first")
+	pool.Add(second, "second")
 
-	client, accountID := pool.NextForModel("", "model-b")
-	if client != second || accountID != "second" {
-		t.Fatalf("model-aware selection = %p %q", client, accountID)
+	client, accountID := pool.NextForModel("", "model-missing")
+	if client != nil || accountID != "" {
+		t.Fatalf("unknown model selection = %p %q", client, accountID)
 	}
-
-	pool.BindSession("conversation-b", accountID)
-	client, accountID = pool.NextForModel("conversation-b", "model-a")
-	if client != nil || accountID != "second" {
-		t.Fatalf("bound model selection = %p %q", client, accountID)
-	}
-	client, accountID = pool.NextForModel("", "model-a")
-	if client != first || accountID != "first" {
-		t.Fatalf("new model-aware selection = %p %q", client, accountID)
-	}
-	client, accountID = pool.NextForModel("conversation-b", "model-b")
-	if client != second || accountID != "second" {
-		t.Fatalf("preserved model binding = %p %q", client, accountID)
-	}
-	if !pool.HasModel("model-a") || pool.HasModel("model-missing") {
-		t.Fatal("HasModel returned an incorrect result")
+	if pool.HasModel("model-missing") {
+		t.Fatal("HasModel returned an unknown model")
 	}
 }

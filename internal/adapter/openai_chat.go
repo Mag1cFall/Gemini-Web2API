@@ -5,21 +5,24 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/gin-gonic/gin"
 )
 
 // ChatMessage 表示 OpenAI Chat 消息
 type ChatMessage struct {
-	Role       string           `json:"role"`
-	Content    json.RawMessage  `json:"content"`
-	Name       string           `json:"name,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
-	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	Role                string            `json:"role"`
+	Content             json.RawMessage   `json:"content"`
+	Name                string            `json:"name,omitempty"`
+	ToolCallID          string            `json:"tool_call_id,omitempty"`
+	ToolCalls           []OpenAIToolCall  `json:"tool_calls,omitempty"`
+	ReasoningContent    json.RawMessage   `json:"reasoning_content,omitempty"`
+	TranscriptReasoning json.RawMessage   `json:"-"`
+	TranscriptItems     []json.RawMessage `json:"-"`
 }
 
 // OpenAIToolCall 表示 OpenAI 函数调用
@@ -97,7 +100,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, err := openAIChatThinkingMode(request)
+		thinkingMode, includeThoughts, err := openAIChatThinkingSettings(request)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
@@ -118,10 +121,19 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 
 		if request.Stream {
 			setSSEHeaders(c)
-			if err := writeOpenAIRole(c.Writer, responseID, created, request.Model); err != nil {
+			streamModel := config.MapModel(request.Model)
+			roleSent := false
+			writeRole := func() error {
+				if roleSent {
+					return nil
+				}
+				roleSent = true
+				return writeOpenAIRole(c.Writer, responseID, created, streamModel)
+			}
+			if err := writeRole(); err != nil {
 				return
 			}
-			projection := newStreamProjection(bridge)
+			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
 				c.Request.Context(), pool, sessionKey, allowNewSession, request.Model, responseID, false, thinkingMode,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
@@ -129,15 +141,19 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				},
 				func(event gemini.Event) error {
 					return projection.project(event, func(event gemini.Event) error {
+						if err := writeRole(); err != nil {
+							return err
+						}
 						delta := gin.H{"content": event.Delta}
 						if event.Kind == gemini.EventThought {
 							delta = gin.H{"reasoning_content": event.Delta}
 						}
-						return writeOpenAIDelta(c.Writer, responseID, created, request.Model, delta)
+						return writeOpenAIDelta(c.Writer, responseID, created, streamModel, delta)
 					}, func(err error) error {
 						return writeOpenAIStreamError(c.Writer, "upstream_rewrite", err)
 					})
 				},
+				projection.hasVisibleOutput,
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
@@ -146,13 +162,21 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				}
 				return
 			}
-			if err := writeProjectedOpenAI(c.Writer, responseID, created, request.Model, result.Accumulator, bridge, projection); err != nil {
+			streamModel = result.Model
+			if err := writeRole(); err != nil {
+				return
+			}
+			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+				_ = writeOpenAIStreamError(c.Writer, "media_download_error", err)
+				return
+			}
+			if err := writeProjectedOpenAI(c.Writer, responseID, created, streamModel, result.Accumulator, bridge, projection); err != nil {
 				_ = writeOpenAIStreamError(c.Writer, "output_validation_error", err)
 				return
 			}
-			_ = writeOpenAIFinish(c.Writer, responseID, created, request.Model, result, bridge)
+			_ = writeOpenAIFinish(c.Writer, responseID, created, streamModel, result, bridge)
 			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && result.Accumulator.Usage != nil {
-				_ = writeOpenAIUsageChunk(c.Writer, responseID, created, request.Model, result.Accumulator.Usage)
+				_ = writeOpenAIUsageChunk(c.Writer, responseID, created, streamModel, result.Accumulator.Usage)
 			}
 			writeSSEDone(c.Writer)
 			return
@@ -163,7 +187,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildOpenAIChatPrompt(c, client, request, continuation, bridge)
 			},
-			nil,
+			nil, nil,
 		)
 		c.Set("account_id", accountID)
 		if err != nil {
@@ -171,7 +195,11 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
-		response, err := buildOpenAIResponse(request.Model, responseID, created, result, bridge)
+		if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+			writeOpenAIError(c, http.StatusBadGateway, "media_download_error", err.Error())
+			return
+		}
+		response, err := buildOpenAIResponse(responseID, created, result, bridge, includeThoughts)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
 			return
@@ -193,7 +221,17 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 			return "", nil, err
 		}
 		files = append(files, attachments...)
-		record := map[string]interface{}{"role": transcriptRole(message.Role), "content": content}
+		role := transcriptRole(message.Role)
+		record := map[string]interface{}{"role": role, "content": content}
+		if len(message.ReasoningContent) > 0 && string(message.ReasoningContent) != "null" {
+			record["reasoning_content"] = message.ReasoningContent
+		}
+		if len(message.TranscriptReasoning) > 0 {
+			record["reasoning"] = message.TranscriptReasoning
+		}
+		if len(message.TranscriptItems) > 0 {
+			record["events"] = message.TranscriptItems
+		}
 		if len(message.ToolCalls) > 0 {
 			record["tool_calls"] = message.ToolCalls
 		}
@@ -201,6 +239,9 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 			record["tool_call_id"] = message.ToolCallID
 		}
 		records = append(records, record)
+	}
+	if len(records) == 0 {
+		records = append(records, map[string]interface{}{"role": "user", "content": "Hello"})
 	}
 	transcript, err := json.Marshal(map[string]interface{}{"messages": records})
 	if err != nil {
@@ -210,33 +251,32 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	if err != nil {
 		return "", nil, err
 	}
-	prompt := string(transcript) + suffix
-	if len(records) == 0 {
-		prompt = `{"messages":[{"role":"user","content":"Hello"}]}` + suffix
-	}
-	return prompt, files, nil
+	return string(transcript) + suffix, files, nil
 }
 
-func buildOpenAIResponse(model string, responseID string, created int64, result generationResult, bridge ToolBridge) (gin.H, error) {
+func buildOpenAIResponse(responseID string, created int64, result generationResult, bridge ToolBridge, includeThoughts bool) (gin.H, error) {
 	primary := result.Accumulator.Primary()
 	content, calls, err := bridge.Parse(primary.Text)
 	if err != nil {
 		return nil, err
 	}
 	calls = assignToolCallIDs(calls, responseID)
+	content = renderCandidateMarkdown(content, primary, 0)
 	message := gin.H{"role": "assistant", "content": content}
 	finishReason := "stop"
-	if primary.Thought != "" {
+	if includeThoughts && primary.Thought != "" {
 		message["reasoning_content"] = primary.Thought
+	}
+	if annotations := openAICitationAnnotations(content, primary.Citations); len(annotations) > 0 {
+		message["annotations"] = annotations
 	}
 	if len(calls) > 0 {
 		message["content"] = nil
 		message["tool_calls"] = openAIToolCallResponses(calls)
 		finishReason = "tool_calls"
 	}
-	appendImageMarkdown(message, primary.Images)
 	response := gin.H{
-		"id": responseID, "object": "chat.completion", "created": created, "model": model,
+		"id": responseID, "object": "chat.completion", "created": created, "model": result.Model,
 		"provider_model": result.ProviderModel, "conversation_id": result.ConversationID, "response_id": responseID,
 		"choices": []gin.H{{"index": 0, "message": message, "finish_reason": finishReason}},
 	}
@@ -248,7 +288,7 @@ func buildOpenAIResponse(model string, responseID string, created int64, result 
 
 func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, accumulator *EventAccumulator, bridge ToolBridge, projection *streamProjection) error {
 	primary := accumulator.Primary()
-	if projection.bufferThought && primary.Thought != "" {
+	if projection.includeThought && projection.bufferThought && primary.Thought != "" {
 		if err := writeOpenAIDelta(w, id, created, model, gin.H{"reasoning_content": primary.Thought}); err != nil {
 			return err
 		}
@@ -259,6 +299,7 @@ func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, a
 			return err
 		}
 		calls = assignToolCallIDs(calls, id)
+		content = renderCandidateMarkdown(content, primary, projection.textRunes)
 		if content != "" {
 			if err := writeOpenAIDelta(w, id, created, model, gin.H{"content": content}); err != nil {
 				return err
@@ -274,12 +315,38 @@ func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, a
 			}
 		}
 	}
-	for _, image := range primary.Images {
-		if err := writeOpenAIDelta(w, id, created, model, gin.H{"content": fmt.Sprintf("\n\n![%s](%s)", image.Alt, image.URL)}); err != nil {
+	fullContent, _, _ := bridge.Parse(primary.Text)
+	fullContent = renderCandidateMarkdown(fullContent, primary, 0)
+	if annotations := openAICitationAnnotations(fullContent, primary.Citations); len(annotations) > 0 {
+		if err := writeOpenAIDelta(w, id, created, model, gin.H{"annotations": annotations}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func openAICitationAnnotations(text string, citations []gemini.Citation) []gin.H {
+	annotations := make([]gin.H, 0, len(citations))
+	for _, citation := range citations {
+		start, end := citationRange(text, citation)
+		annotations = append(annotations, gin.H{
+			"type":         "url_citation",
+			"url_citation": gin.H{"start_index": start, "end_index": end, "title": citation.Title, "url": citation.URL},
+		})
+	}
+	return annotations
+}
+
+func citationRange(text string, citation gemini.Citation) (int, int) {
+	length := len([]rune(text))
+	start, end := citation.Start, citation.End
+	if start < 0 || start > length {
+		start = 0
+	}
+	if end < start || end > length {
+		end = start
+	}
+	return start, end
 }
 
 func writeOpenAIRole(w io.Writer, id string, created int64, model string) error {
@@ -409,6 +476,9 @@ func openAIToolChoice(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &flat) == nil && flat.Name != "" {
 		return flat.Name
 	}
+	if flat.Type != "" && flat.Type != "function" {
+		return flat.Type
+	}
 	return "auto"
 }
 
@@ -461,17 +531,6 @@ func openAIToolCallResponses(calls []ToolCall) []gin.H {
 		})
 	}
 	return result
-}
-
-func appendImageMarkdown(message gin.H, images []gemini.Image) {
-	if len(images) == 0 {
-		return
-	}
-	content, _ := message["content"].(string)
-	for _, image := range images {
-		content += fmt.Sprintf("\n\n![%s](%s)", image.Alt, image.URL)
-	}
-	message["content"] = strings.TrimSpace(content)
 }
 
 func openAIUsage(usage *gemini.Usage) gin.H {

@@ -18,11 +18,10 @@ const (
 
 // GenerateRequest 表示一次网页协议生成请求
 type GenerateRequest struct {
-	Prompt          string
-	Model           string
-	ModelMode       int
-	ThinkingMode    ThinkingMode
-	Files           []FileData
-	Conversation    *ConversationState
-	ImageGeneration bool
+	Prompt       string
+	Model        string
+	ModelMode    int
+	ThinkingMode ThinkingMode
+	Files        []FileData
+	Conversation *ConversationState
 }

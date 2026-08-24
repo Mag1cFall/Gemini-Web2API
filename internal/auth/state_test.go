@@ -26,9 +26,8 @@ func TestStateRoundTrip(t *testing.T) {
 		}},
 		Origins: []json.RawMessage{},
 		Metadata: Metadata{
-			Version: 1,
-			ID:      "profile-40",
-			Proxy:   "http://127.0.0.1:8080",
+			ID:    "profile-40",
+			Proxy: "http://127.0.0.1:8080",
 			Fingerprint: gemini.Fingerprint{
 				TLSProfile: "chrome_146",
 				Language:   "en-US,en;q=0.9",

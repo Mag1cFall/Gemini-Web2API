@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -30,14 +31,22 @@ type Client struct {
 	clientID    string
 	saveHistory bool
 	reqID       atomic.Int64
+	contextSize atomic.Int64
 	requestMu   sync.Mutex
 
 	bootstrapMu sync.RWMutex
 	bootstrap   *Bootstrap
 
-	cookieMu sync.Mutex
-	cookies  map[string]Cookie
-	save     func([]Cookie) error
+	cookieMu  sync.Mutex
+	cookies   map[string]Cookie
+	save      func([]Cookie) error
+	refresh   func(context.Context) ([]Cookie, error)
+	refreshMu sync.Mutex
+}
+
+// ContextWindow 返回账号套餐对应的网页输入窗口
+func (c *Client) ContextWindow() int {
+	return int(c.contextSize.Load())
 }
 
 // AcquireRequest 独占同一账号的完整上游请求链
@@ -68,13 +77,14 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		saveHistory: saveHistory,
 		cookies:     make(map[string]Cookie, len(source.Cookies)),
 		save:        source.Save,
+		refresh:     source.Refresh,
 	}
 	reqID, err := initialReqID()
 	if err != nil {
 		return nil, err
 	}
 	client.reqID.Store(reqID)
-	if err := client.installCookies(source.Cookies); err != nil {
+	if err := client.replaceCookies(source.Cookies); err != nil {
 		return nil, err
 	}
 	return client, nil
@@ -82,6 +92,10 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 
 // Init 刷新首页动态参数并获取当前账号模型目录
 func (c *Client) Init(ctx context.Context) error {
+	return c.init(ctx, true)
+}
+
+func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointInit, nil)
 	if err != nil {
 		return err
@@ -89,29 +103,50 @@ func (c *Client) Init(ctx context.Context) error {
 	c.applyNavigationHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("account %q bootstrap request: %w", c.displayAccountID(), err)
+		return transportProtocolError(fmt.Sprintf("account %q bootstrap request", c.displayAccountID()), err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return httpStatusError(resp.StatusCode, "bootstrap")
+		protocolErr := httpStatusError(resp.StatusCode, "bootstrap")
+		if allowRefresh && isAuthenticationError(protocolErr) && c.refresh != nil {
+			resp.Body.Close()
+			if err := c.refreshCookies(ctx); err != nil {
+				return err
+			}
+			return c.init(ctx, false)
+		}
+		resp.Body.Close()
+		return protocolErr
 	}
 	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
-		return fmt.Errorf("read bootstrap page: %w", err)
+		return transportProtocolError("read bootstrap page", err)
 	}
 	bootstrap, err := parseBootstrap(string(body))
 	if err != nil {
 		if strings.Contains(string(body), "accounts.google.com") {
-			return fmt.Errorf("account %q is not signed in", c.displayAccountID())
+			if allowRefresh && c.refresh != nil {
+				if err := c.refreshCookies(ctx); err != nil {
+					return err
+				}
+				return c.init(ctx, false)
+			}
+			return retryableProtocolError(fmt.Sprintf("account %q is not signed in", c.displayAccountID()), nil)
 		}
-		return fmt.Errorf("account %q: %w", c.displayAccountID(), err)
+		return retryableProtocolError(fmt.Sprintf("account %q bootstrap: %v", c.displayAccountID(), err), err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		return err
 	}
 	catalog, err := c.fetchModelCatalog(ctx, bootstrap)
 	if err != nil {
-		return fmt.Errorf("account %q: %w", c.displayAccountID(), err)
+		if allowRefresh && isAuthenticationError(err) && c.refresh != nil {
+			if err := c.refreshCookies(ctx); err != nil {
+				return err
+			}
+			return c.init(ctx, false)
+		}
+		return retryableProtocolError(fmt.Sprintf("account %q initialize models: %v", c.displayAccountID(), err), err)
 	}
 	bootstrap.Catalog = catalog
 	c.bootstrapMu.Lock()
@@ -122,6 +157,10 @@ func (c *Client) Init(ctx context.Context) error {
 
 // Stream 执行一次生成并只输出规范事件
 func (c *Client) Stream(ctx context.Context, request GenerateRequest, emit func(Event) error) error {
+	return c.stream(ctx, request, emit, true)
+}
+
+func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(Event) error, allowRefresh bool) error {
 	bootstrap, err := c.bootstrapSnapshot()
 	if err != nil {
 		return err
@@ -165,7 +204,7 @@ func (c *Client) Stream(ctx context.Context, request GenerateRequest, emit func(
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("account %q generate request: %w", c.displayAccountID(), err)
+		return transportProtocolError(fmt.Sprintf("account %q generate request", c.displayAccountID()), err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
@@ -174,12 +213,46 @@ func (c *Client) Stream(ctx context.Context, request GenerateRequest, emit func(
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		protocolErr := httpStatusError(resp.StatusCode, "generate")
+		if allowRefresh && isAuthenticationError(protocolErr) && c.refresh != nil {
+			resp.Body.Close()
+			if err := c.refreshCookies(ctx); err != nil {
+				return err
+			}
+			if err := c.init(ctx, false); err != nil {
+				return err
+			}
+			return c.stream(ctx, request, emit, false)
+		}
 		if err := emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError}); err != nil {
 			return err
 		}
 		return protocolErr
 	}
-	return NewFrameDecoder().Decode(resp.Body, request.Conversation, emit)
+	decodeState := NewConversationState()
+	if request.Conversation != nil {
+		decodeState = NewConversationStateFrom(request.Conversation.Snapshot())
+	}
+	guard := newModelGuard(model, emit)
+	err = NewFrameDecoder().Decode(resp.Body, decodeState, guard.Emit)
+	if err != nil {
+		if allowRefresh && !guard.Emitted() && isAuthenticationError(err) && c.refresh != nil {
+			if err := c.refreshCookies(ctx); err != nil {
+				return err
+			}
+			if err := c.init(ctx, false); err != nil {
+				return err
+			}
+			return c.stream(ctx, request, emit, false)
+		}
+		return err
+	}
+	if err := guard.Complete(); err != nil {
+		return err
+	}
+	if request.Conversation != nil {
+		request.Conversation.Update(decodeState.Snapshot())
+	}
+	return nil
 }
 
 // Models 返回当前账号初始化得到的模型目录
@@ -226,7 +299,7 @@ func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (Mo
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return ModelCatalog{}, fmt.Errorf("model catalog request: %w", err)
+		return ModelCatalog{}, transportProtocolError("model catalog request", err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
@@ -262,7 +335,7 @@ func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (Mo
 		return ModelCatalog{}, err
 	}
 	if !found {
-		return ModelCatalog{}, fmt.Errorf("model catalog response has no otAQ7b payload")
+		return ModelCatalog{}, retryableProtocolError("model catalog response has no otAQ7b payload", nil)
 	}
 	return catalog, nil
 }
@@ -278,7 +351,7 @@ func (c *Client) bootstrapSnapshot() (Bootstrap, error) {
 	c.bootstrapMu.RLock()
 	defer c.bootstrapMu.RUnlock()
 	if c.bootstrap == nil {
-		return Bootstrap{}, fmt.Errorf("account %q is not initialized", c.displayAccountID())
+		return Bootstrap{}, retryableProtocolError(fmt.Sprintf("account %q is not initialized", c.displayAccountID()), nil)
 	}
 	return *c.bootstrap, nil
 }
@@ -367,6 +440,46 @@ func (c *Client) displayAccountID() string {
 	return c.accountID
 }
 
+func (c *Client) refreshCookies(ctx context.Context) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if c.refresh == nil {
+		return fmt.Errorf("account %q has no cookie refresh source", c.displayAccountID())
+	}
+	cookies, err := c.refresh(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return retryableProtocolError(fmt.Sprintf("account %q refresh cookies: %v", c.displayAccountID(), err), err)
+	}
+	if len(cookies) == 0 {
+		return retryableProtocolError(fmt.Sprintf("account %q refresh returned no cookies", c.displayAccountID()), nil)
+	}
+	if err := c.replaceCookies(cookies); err != nil {
+		return retryableProtocolError(fmt.Sprintf("account %q install refreshed cookies: %v", c.displayAccountID(), err), err)
+	}
+	c.cookieMu.Lock()
+	snapshot := c.cookieSnapshotLocked()
+	c.cookieMu.Unlock()
+	if c.save != nil {
+		if err := c.save(snapshot); err != nil {
+			return retryableProtocolError(fmt.Sprintf("persist refreshed account cookies: %v", err), err)
+		}
+	}
+	return nil
+}
+
+// CloseIdleConnections 关闭协议客户端的空闲连接
+func (c *Client) CloseIdleConnections() {
+	c.httpClient.CloseIdleConnections()
+}
+
+func isAuthenticationError(err error) bool {
+	var protocolErr *ProtocolError
+	return errors.As(err, &protocolErr) && (protocolErr.HTTPStatus == http.StatusUnauthorized || protocolErr.HTTPStatus == http.StatusForbidden || protocolErr.Code == http.StatusUnauthorized || protocolErr.Code == http.StatusForbidden)
+}
+
 func newProtocolID() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -396,6 +509,17 @@ func httpStatusError(status int, operation string) *ProtocolError {
 		HTTPStatus: status,
 		Code:       status,
 		Message:    fmt.Sprintf("gemini %s returned HTTP %d", operation, status),
-		Retryable:  status == 400 || status == 401 || status == 403 || status == 429 || status >= 500,
+		Retryable:  status == 401 || status == 403 || status == 429 || status >= 500,
 	}
+}
+
+func transportProtocolError(operation string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return retryableProtocolError(fmt.Sprintf("gemini %s: %v", operation, err), err)
+}
+
+func retryableProtocolError(message string, cause error) *ProtocolError {
+	return &ProtocolError{HTTPStatus: http.StatusBadGateway, Code: http.StatusBadGateway, Message: message, Retryable: true, Cause: cause}
 }

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,20 +39,44 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	chromeRoot := flags.String("chrome-root", "", "Chrome User Data 目录")
 	output := flags.String("output", "auth", "认证状态输出目录")
 	proxy := flags.String("proxy", "", "账号固定代理 URL")
+	cookieHeader := flags.String("cookie", "", "从一行 Cookie Header 导入账号")
+	accountID := flags.String("id", "", "Cookie Header 导入使用的账号名称")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("setup 不接受位置参数")
 	}
+	proxyURL := strings.TrimSpace(*proxy)
+	if proxyURL == "" {
+		proxyURL = strings.TrimSpace(os.Getenv("PROXY"))
+	}
+
+	outputPath, err := filepath.Abs(strings.TrimSpace(*output))
+	if err != nil {
+		return fmt.Errorf("解析输出目录: %w", err)
+	}
+	if strings.TrimSpace(*cookieHeader) != "" {
+		if len(profiles) != 0 || len(emails) != 0 || strings.TrimSpace(*chromeRoot) != "" {
+			return fmt.Errorf("--cookie 不能与 Chrome 账号选择参数同时使用")
+		}
+		_, modelCount, err := ImportCookieHeader(ctx, CookieImportOptions{
+			Header: *cookieHeader, ID: *accountID, Output: outputPath, Proxy: proxyURL,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, map[string]any{
+			"setup": true, "accounts": 1, "models": modelCount, "output": outputPath,
+		})
+	}
+	if strings.TrimSpace(*accountID) != "" {
+		return fmt.Errorf("--id 只与 --cookie 一起使用")
+	}
 
 	root, err := resolveChromeRoot(*chromeRoot)
 	if err != nil {
 		return err
-	}
-	outputPath, err := filepath.Abs(strings.TrimSpace(*output))
-	if err != nil {
-		return fmt.Errorf("解析输出目录: %w", err)
 	}
 	if len(profiles) == 0 && len(emails) == 0 {
 		if !interactive {
@@ -67,17 +92,13 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 		}
 	}
 
-	results, err := Import(ctx, ImportOptions{
+	results, modelCount, err := Import(ctx, ImportOptions{
 		ChromeRoot: root,
 		Output:     outputPath,
-		Proxy:      *proxy,
+		Proxy:      proxyURL,
 		Profiles:   profiles,
 		Emails:     emails,
 	})
-	if err != nil {
-		return err
-	}
-	modelCount, err := verifyImported(ctx, results)
 	if err != nil {
 		return err
 	}

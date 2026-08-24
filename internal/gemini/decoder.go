@@ -6,23 +6,45 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const maxProtocolFrameSize = 64 * 1024 * 1024
 
 // FrameDecoder 将 Google 累计帧转换为唯一规范事件流
 type FrameDecoder struct {
-	texts       map[int]string
-	thoughts    map[int]string
-	phases      map[int]Phase
-	images      map[string]struct{}
-	lastSession ConversationSnapshot
-	metadata    EventMetadataData
-	sawComplete bool
-	sawError    bool
-	sawEnd      bool
+	texts         map[int]string
+	emittedText   map[int]string
+	thoughts      map[int]string
+	codes         map[codeEventKey]codeSnapshot
+	citations     map[int][]Citation
+	phases        map[int]Phase
+	imageProgress Phase
+	media         map[string]struct{}
+	lastSession   ConversationSnapshot
+	metadata      EventMetadataData
+	sawComplete   bool
+	sawError      bool
+	sawEnd        bool
+}
+
+type codeEventKey struct {
+	Candidate int
+	Index     int
+	Type      CodeEventType
+}
+
+type codeSnapshot struct {
+	Index    int
+	Type     CodeEventType
+	Language string
+	Content  string
+	Offset   int
+	Complete bool
 }
 
 // NewFrameDecoder 创建独立的单响应解码器
@@ -60,12 +82,20 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 			protocolErr = &ProtocolError{
 				Code:      code,
 				Message:   fmt.Sprintf("gemini protocol returned code %d", code),
-				Retryable: code == 400 || code == 401 || code == 403,
+				Retryable: code == 401 || code == 403 || code == 429 || code >= 500,
 			}
 			d.sawError = true
 			return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
 		case "e":
 			d.sawEnd = true
+			if !d.sawComplete && !d.sawError {
+				return retryableProtocolError("gemini protocol ended without a completed candidate", nil)
+			}
+			for candidateIndex := range d.texts {
+				if err := d.flushText(candidateIndex, emit); err != nil {
+					return err
+				}
+			}
 			finish := FinishUnknown
 			if d.sawComplete {
 				finish = FinishStop
@@ -84,16 +114,20 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 		return protocolErr
 	}
 	if !d.sawEnd {
-		return fmt.Errorf("gemini protocol stream ended without terminal frame")
+		return retryableProtocolError("gemini protocol stream ended without terminal frame", nil)
 	}
 	return nil
 }
 
 func (d *FrameDecoder) reset() {
 	d.texts = make(map[int]string)
+	d.emittedText = make(map[int]string)
 	d.thoughts = make(map[int]string)
+	d.codes = make(map[codeEventKey]codeSnapshot)
+	d.citations = make(map[int][]Citation)
 	d.phases = make(map[int]Phase)
-	d.images = make(map[string]struct{})
+	d.imageProgress = PhaseUnknown
+	d.media = make(map[string]struct{})
 	d.lastSession = ConversationSnapshot{}
 	d.metadata = EventMetadataData{}
 	d.sawComplete = false
@@ -111,6 +145,9 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 		}
 	}
 	if err := d.decodeMetadata(payload, emit); err != nil {
+		return err
+	}
+	if err := d.decodeImageProgress(payload, emit); err != nil {
 		return err
 	}
 
@@ -141,29 +178,64 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 				return err
 			}
 		}
-		text, _ := stringPath(candidate, 1, 0)
-		text = normalizeSnapshot(text)
-		if event, changed := diffSnapshot(EventText, candidateIndex, d.texts[candidateIndex], text); changed {
-			d.texts[candidateIndex] = text
-			if err := emit(event); err != nil {
-				return err
-			}
+		if err := d.decodeContent(candidate, candidateIndex, emit); err != nil {
+			return err
 		}
 		phaseValue, _ := intPath(candidate, 8, 0)
 		phase := Phase(phaseValue)
+		if phase == PhaseComplete {
+			if err := d.flushText(candidateIndex, emit); err != nil {
+				return err
+			}
+			d.sawComplete = d.sawComplete || candidateIndex == 0
+		}
 		if phase != PhaseUnknown && phase != d.phases[candidateIndex] {
 			d.phases[candidateIndex] = phase
-			d.sawComplete = d.sawComplete || phase == PhaseComplete
 			if err := emit(Event{Kind: EventPhase, Candidate: candidateIndex, Phase: phase}); err != nil {
 				return err
 			}
 		}
-		if err := d.decodeImages(candidate, candidateIndex, emit); err != nil {
+		if err := d.decodeCitations(candidate, candidateIndex, emit); err != nil {
+			return err
+		}
+		if err := d.decodeMedia(candidate, candidateIndex, emit); err != nil {
 			return err
 		}
 		candidateIndex++
 	}
 	return nil
+}
+
+func (d *FrameDecoder) decodeImageProgress(payload []any, emit func(Event) error) error {
+	if len(payload) <= 2 {
+		return nil
+	}
+	root, ok := payload[2].(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := root["7"].([]any)
+	if !ok {
+		return nil
+	}
+	tool, _ := stringPath(raw, 1, 0)
+	category, _ := intPath(raw, 1, 3, 1, 7, 0)
+	status, _ := intPath(raw, 1, 2)
+	if tool != "data_analysis_tool" || category != 20 {
+		return nil
+	}
+	phase := PhaseUnknown
+	switch status {
+	case 1:
+		phase = PhaseGenerating
+	case 4:
+		phase = PhaseToolComplete
+	}
+	if phase == PhaseUnknown || phase == d.imageProgress {
+		return nil
+	}
+	d.imageProgress = phase
+	return emit(Event{Kind: EventImageProgress, Phase: phase})
 }
 
 func (d *FrameDecoder) sessionFromPayload(payload []any, current ConversationSnapshot) ConversationSnapshot {
@@ -192,10 +264,10 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 			}
 		}
 	}
-	if modelHash, ok := stringAt(payload, 39); ok {
+	if modelHash, ok := jspbString(payload, 39); ok {
 		next.ModelHash = modelHash
 	}
-	if modelName, ok := stringAt(payload, 42); ok {
+	if modelName, ok := jspbString(payload, 42); ok {
 		next.ModelName = modelName
 	}
 	if next == d.metadata {
@@ -206,35 +278,258 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 	return emit(Event{Kind: EventMetadata, Metadata: &copy})
 }
 
-func (d *FrameDecoder) decodeImages(candidate []any, candidateIndex int, emit func(Event) error) error {
-	rawImages, ok := valuePath(candidate, 12, 7, 0)
-	if !ok {
-		return nil
-	}
-	images, ok := rawImages.([]any)
-	if !ok {
-		return nil
-	}
-	for _, rawImage := range images {
-		urlValue, ok := stringPath(rawImage, 0, 3, 3)
-		if !ok || urlValue == "" || isGeneratedImagePlaceholder(urlValue) {
+func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit func(Event) error) error {
+	raw, _ := stringPath(candidate, 1, 0)
+	text, codes := parseStructuredContent(raw)
+	seen := make(map[codeEventKey]struct{}, len(codes))
+	for _, code := range codes {
+		key := codeEventKey{Candidate: candidateIndex, Index: code.Index, Type: code.Type}
+		seen[key] = struct{}{}
+		previous := d.codes[key]
+		event, changed := diffSnapshot(EventCode, candidateIndex, previous.Content, code.Content)
+		if !changed && previous.Language == code.Language && previous.Offset == code.Offset && previous.Complete == code.Complete {
 			continue
 		}
-		if _, exists := d.images[urlValue]; exists {
+		if !changed {
+			event = Event{
+				Kind: EventCode, Candidate: candidateIndex, Operation: SnapshotReplace,
+				Snapshot: code.Content, PrefixLength: utf8.RuneCountInString(code.Content),
+			}
+		}
+		d.codes[key] = code
+		data := CodeExecutionEvent{Index: code.Index, Type: code.Type, Language: code.Language, Offset: code.Offset, Complete: code.Complete}
+		event.Code = &data
+		if err := emit(event); err != nil {
+			return err
+		}
+	}
+	for key, previous := range d.codes {
+		if key.Candidate != candidateIndex {
 			continue
 		}
-		d.images[urlValue] = struct{}{}
-		image := &Image{Type: ImageTypeGenerated, URL: urlValue}
-		if err := emit(Event{Kind: EventImage, Candidate: candidateIndex, Image: image}); err != nil {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		delete(d.codes, key)
+		data := CodeExecutionEvent{Index: key.Index, Type: key.Type, Language: previous.Language, Offset: previous.Offset, Complete: true}
+		if err := emit(Event{Kind: EventCode, Candidate: candidateIndex, Operation: SnapshotTruncate, PrefixLength: 0, Code: &data}); err != nil {
+			return err
+		}
+	}
+	d.texts[candidateIndex] = text
+	if event, changed := diffSnapshot(EventText, candidateIndex, d.emittedText[candidateIndex], text); changed {
+		d.emittedText[candidateIndex] = text
+		if err := emit(event); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (d *FrameDecoder) flushText(candidateIndex int, emit func(Event) error) error {
+	event, changed := diffSnapshot(EventText, candidateIndex, d.emittedText[candidateIndex], d.texts[candidateIndex])
+	if !changed {
+		return nil
+	}
+	d.emittedText[candidateIndex] = d.texts[candidateIndex]
+	return emit(event)
+}
+
+func (d *FrameDecoder) decodeCitations(candidate []any, candidateIndex int, emit func(Event) error) error {
+	raw, _ := valuePath(candidate, 2, 1)
+	next := parseCitations(raw)
+	if reflect.DeepEqual(next, d.citations[candidateIndex]) {
+		return nil
+	}
+	d.citations[candidateIndex] = append([]Citation(nil), next...)
+	return emit(Event{Kind: EventCitations, Candidate: candidateIndex, Citations: next})
+}
+
+func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, emit func(Event) error) error {
+	if raw, ok := richContentField(candidate, 7); ok {
+		if itemsValue, ok := valuePath(raw, 0); ok {
+			if items, ok := itemsValue.([]any); ok {
+				for index, item := range items {
+					mediaURL, _ := stringPath(item, 0, 3, 3)
+					if isGeneratedImagePlaceholder(mediaURL) {
+						continue
+					}
+					fileName, _ := stringPath(item, 0, 3, 2)
+					mimeType, _ := stringPath(item, 0, 3, 11)
+					generator, _ := stringPath(item, 3, 18)
+					placeholder, _ := stringPath(item, 1, 0)
+					width, _ := intPath(item, 0, 3, 15, 0)
+					height, _ := intPath(item, 0, 3, 15, 1)
+					sizeBytes, _ := intPath(item, 0, 3, 15, 2)
+					if err := d.emitMedia(candidateIndex, &Media{
+						Type: MediaGeneratedImage, URL: mediaURL, Title: fmt.Sprintf("[Generated Image %d]", index+1),
+						FileName: fileName, MIMEType: mimeType, Generator: generator, Placeholder: placeholder,
+						Width: width, Height: height, SizeBytes: sizeBytes, Offset: mediaPlaceholderOffset(candidate, placeholder),
+					}, emit); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (d *FrameDecoder) emitMedia(candidateIndex int, media *Media, emit func(Event) error) error {
+	if media == nil || media.URL == "" {
+		return nil
+	}
+	key := string(media.Type) + "\x00" + media.URL
+	if _, exists := d.media[key]; exists {
+		return nil
+	}
+	d.media[key] = struct{}{}
+	return emit(Event{Kind: EventMedia, Candidate: candidateIndex, Media: media})
+}
+
 func isGeneratedImagePlaceholder(value string) bool {
 	imageURL, err := url.Parse(value)
 	return err == nil && imageURL.Hostname() == "googleusercontent.com" && strings.HasPrefix(imageURL.Path, "/image_generation_content/")
+}
+
+var (
+	structuredCodePattern = regexp.MustCompile("(?m)^```([^?`\\r\\n]*)\\?(code_reference|code_stdout|code_stderr)&code_event_index=(\\d+)\\r?\\n")
+	artifactPattern       = regexp.MustCompile("(?m)^https?://googleusercontent\\.com/image_generation_content/\\S+\\s*")
+)
+
+func parseStructuredContent(raw string) (string, []codeSnapshot) {
+	var text strings.Builder
+	codes := make([]codeSnapshot, 0)
+	cursor := 0
+	for cursor < len(raw) {
+		match := structuredCodePattern.FindStringSubmatchIndex(raw[cursor:])
+		if match == nil {
+			text.WriteString(raw[cursor:])
+			break
+		}
+		start := cursor + match[0]
+		bodyStart := cursor + match[1]
+		text.WriteString(raw[cursor:start])
+		language := raw[cursor+match[2] : cursor+match[3]]
+		typeName := raw[cursor+match[4] : cursor+match[5]]
+		indexValue := raw[cursor+match[6] : cursor+match[7]]
+		index, _ := strconv.Atoi(indexValue)
+		remainder := raw[bodyStart:]
+		closing := strings.Index(remainder, "\n```")
+		content := remainder
+		complete := false
+		if closing >= 0 {
+			content = strings.TrimSuffix(remainder[:closing], "\r")
+			cursor = bodyStart + closing + len("\n```")
+			if cursor < len(raw) && raw[cursor] == '\r' {
+				cursor++
+			}
+			if cursor < len(raw) && raw[cursor] == '\n' {
+				cursor++
+			}
+			complete = true
+		} else {
+			cursor = len(raw)
+		}
+		visiblePrefix := normalizeSnapshot(artifactPattern.ReplaceAllString(text.String(), ""))
+		codes = append(codes, codeSnapshot{
+			Index: index, Type: CodeEventType(typeName), Language: language,
+			Content: content, Offset: utf8.RuneCountInString(visiblePrefix), Complete: complete,
+		})
+	}
+	return normalizeSnapshot(artifactPattern.ReplaceAllString(text.String(), "")), codes
+}
+
+func parseCitations(raw any) []Citation {
+	groups, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]Citation, 0)
+	for _, group := range groups {
+		entriesValue, _ := valuePath(group, 2)
+		entries, _ := entriesValue.([]any)
+		sourceID, _ := stringPath(group, 3)
+		claim, _ := stringPath(group, 0, 0)
+		start, _ := intPath(group, 0, 3, 0, 0)
+		end, _ := intPath(group, 0, 3, 0, 1)
+		for _, entry := range entries {
+			citationURL, _ := stringPath(entry, 0)
+			if citationURL == "" {
+				continue
+			}
+			title, _ := stringPath(entry, 1)
+			favicon, _ := stringPath(entry, 2)
+			snippet, _ := stringPath(entry, 3)
+			publisher, _ := stringPath(entry, 6)
+			result = append(result, Citation{
+				ID: len(result) + 1, SourceID: sourceID, Claim: claim, Title: title,
+				URL: citationURL, Favicon: favicon, Snippet: snippet, Publisher: publisher, Start: start, End: end,
+			})
+		}
+	}
+	return result
+}
+
+func richContentField(candidate []any, index int) (any, bool) {
+	rich, ok := valuePath(candidate, 12)
+	if !ok {
+		return nil, false
+	}
+	return jspbField(rich, index)
+}
+
+func jspbField(container any, index int) (any, bool) {
+	values, ok := container.([]any)
+	if !ok || len(values) == 0 {
+		return nil, false
+	}
+	if index >= 0 && index < len(values) && hasJSPBValue(values[index]) {
+		if _, sparse := values[index].(map[string]any); !sparse {
+			return values[index], true
+		}
+	}
+	bundle, ok := values[len(values)-1].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	value, ok := bundle[strconv.Itoa(index+1)]
+	return value, ok && hasJSPBValue(value)
+}
+
+func jspbString(container []any, index int) (string, bool) {
+	value, ok := jspbField(container, index)
+	if !ok {
+		return "", false
+	}
+	result, ok := value.(string)
+	return result, ok
+}
+
+func hasJSPBValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func mediaPlaceholderOffset(candidate []any, placeholder string) int {
+	if placeholder == "" {
+		return -1
+	}
+	raw, _ := stringPath(candidate, 1, 0)
+	index := strings.Index(raw, placeholder)
+	if index < 0 {
+		return -1
+	}
+	prefix := artifactPattern.ReplaceAllString(raw[:index], "")
+	return utf8.RuneCountInString(prefix)
 }
 
 func diffSnapshot(kind EventKind, candidate int, previous, current string) (Event, bool) {
@@ -290,7 +585,7 @@ func scanProtocolRecords(reader io.Reader, handle func([]any) error) error {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read protocol stream: %w", err)
+		return transportProtocolError("read protocol stream", err)
 	}
 	return nil
 }

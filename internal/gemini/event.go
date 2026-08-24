@@ -4,14 +4,17 @@ package gemini
 type EventKind string
 
 const (
-	EventSession  EventKind = "session"
-	EventText     EventKind = "text"
-	EventThought  EventKind = "thought"
-	EventPhase    EventKind = "phase"
-	EventImage    EventKind = "image"
-	EventMetadata EventKind = "metadata"
-	EventError    EventKind = "error"
-	EventDone     EventKind = "done"
+	EventSession       EventKind = "session"
+	EventText          EventKind = "text"
+	EventThought       EventKind = "thought"
+	EventCode          EventKind = "code"
+	EventCitations     EventKind = "citations"
+	EventMedia         EventKind = "media"
+	EventImageProgress EventKind = "image_progress"
+	EventPhase         EventKind = "phase"
+	EventMetadata      EventKind = "metadata"
+	EventError         EventKind = "error"
+	EventDone          EventKind = "done"
 )
 
 // SnapshotOperation 表示累计快照相对上一版本的变化
@@ -27,9 +30,10 @@ const (
 type Phase int
 
 const (
-	PhaseUnknown    Phase = 0
-	PhaseGenerating Phase = 1
-	PhaseComplete   Phase = 2
+	PhaseUnknown      Phase = 0
+	PhaseGenerating   Phase = 1
+	PhaseComplete     Phase = 2
+	PhaseToolComplete Phase = 4
 )
 
 // FinishReason 表示规范化结束原因
@@ -63,12 +67,45 @@ type EventMetadataData struct {
 	ModelName    string
 }
 
+// CodeEventType 表示 Gemini Web 内置代码执行事件类型
+type CodeEventType string
+
+const (
+	CodeReference CodeEventType = "code_reference"
+	CodeStdout    CodeEventType = "code_stdout"
+	CodeStderr    CodeEventType = "code_stderr"
+)
+
+// CodeExecutionEvent 表示 Google 已执行的代码及其结果
+type CodeExecutionEvent struct {
+	Index    int
+	Type     CodeEventType
+	Language string
+	Offset   int
+	Complete bool
+}
+
+// Citation 表示正文引用标记对应的网页来源
+type Citation struct {
+	ID        int    `json:"id"`
+	SourceID  string `json:"source_id,omitempty"`
+	Claim     string `json:"claim,omitempty"`
+	Title     string `json:"title,omitempty"`
+	URL       string `json:"url"`
+	Favicon   string `json:"favicon,omitempty"`
+	Snippet   string `json:"snippet,omitempty"`
+	Publisher string `json:"publisher,omitempty"`
+	Start     int    `json:"start"`
+	End       int    `json:"end"`
+}
+
 // ProtocolError 表示 HTTP 或帧内协议错误
 type ProtocolError struct {
 	HTTPStatus int
 	Code       int
 	Message    string
 	Retryable  bool
+	Cause      error
 }
 
 // Error 返回适合日志和公开错误映射的描述
@@ -85,6 +122,14 @@ func (e *ProtocolError) Error() string {
 	return "gemini upstream error"
 }
 
+// Unwrap 返回底层错误
+func (e *ProtocolError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 // Event 表示所有公开适配器共享的上游事件
 type Event struct {
 	Kind         EventKind
@@ -95,7 +140,9 @@ type Event struct {
 	PrefixLength int
 	Phase        Phase
 	Session      ConversationSnapshot
-	Image        *Image
+	Code         *CodeExecutionEvent
+	Citations    []Citation
+	Media        *Media
 	Metadata     *EventMetadataData
 	Usage        *Usage
 	FinishReason FinishReason

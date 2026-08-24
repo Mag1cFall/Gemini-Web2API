@@ -97,6 +97,9 @@ func TestParseModelCatalog(t *testing.T) {
 	if thinkingMode, _ := intAt(header, 15); thinkingMode != 2 {
 		t.Fatalf("extended header thinking mode = %d", thinkingMode)
 	}
+	if requestMode, _ := intAt(header, 7); requestMode != 1 {
+		t.Fatalf("request header mode = %d", requestMode)
+	}
 	defaultModel, err := catalog.Default()
 	if err != nil || defaultModel.ID != "gemini-3.7-flash" {
 		t.Fatalf("default model = %+v error = %v", defaultModel, err)

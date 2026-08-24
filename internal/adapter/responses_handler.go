@@ -1,22 +1,36 @@
 package adapter
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/gin-gonic/gin"
 )
 
 // ResponsesTool 表示 Responses API 函数工具
 type ResponsesTool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"`
+	Type              string          `json:"type"`
+	Name              string          `json:"name"`
+	Description       string          `json:"description,omitempty"`
+	Parameters        json.RawMessage `json:"parameters"`
+	Action            string          `json:"action,omitempty"`
+	Background        string          `json:"background,omitempty"`
+	InputFidelity     string          `json:"input_fidelity,omitempty"`
+	InputImageMask    json.RawMessage `json:"input_image_mask,omitempty"`
+	ImageModel        string          `json:"model,omitempty"`
+	Moderation        string          `json:"moderation,omitempty"`
+	OutputCompression *int            `json:"output_compression,omitempty"`
+	OutputFormat      string          `json:"output_format,omitempty"`
+	PartialImages     *int            `json:"partial_images,omitempty"`
+	Quality           string          `json:"quality,omitempty"`
+	Size              string          `json:"size,omitempty"`
 }
 
 // ResponsesRequest 表示 OpenAI Responses 请求
@@ -60,7 +74,7 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, err := responsesThinkingMode(request)
+		thinkingMode, includeThoughts, err := responsesThinkingSettings(request)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
@@ -84,17 +98,31 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		if request.Stream {
 			setSSEHeaders(c)
 			writer := responseSequenceWriter{writer: c.Writer}
-			if err := writer.start(responseID, request.Model, created); err != nil {
+			streamModel := config.MapModel(request.Model)
+			if err := writer.start(responseID, streamModel, created); err != nil {
 				return
 			}
-			projection := newStreamProjection(bridge)
+			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, false, thinkingMode,
+				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, bridge.RequireImageGeneration, thinkingMode,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildResponsesPrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
-					return projection.project(event, writer.live, writer.fail)
+					if event.Kind == gemini.EventImageProgress {
+						projection.bufferText = true
+						if bridge.disallowsHostedTools() {
+							projection.bufferThought = true
+							return nil
+						}
+						return writer.imageProgress(event.Phase)
+					}
+					return projection.project(event, func(event gemini.Event) error {
+						return writer.live(event)
+					}, func(err error) error {
+						return writer.fail(err)
+					})
 				},
+				projection.hasVisibleOutput,
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
@@ -103,7 +131,11 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				}
 				return
 			}
-			response, err := buildResponsesObject(responseID, request.Model, created, request.PreviousResponseID, result, bridge)
+			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+				_ = writer.fail(err)
+				return
+			}
+			response, err := buildResponsesObject(responseID, created, request.PreviousResponseID, result, bridge, includeThoughts)
 			if err != nil {
 				_ = writer.fail(err)
 				return
@@ -115,10 +147,10 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, false, thinkingMode,
+			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, bridge.RequireImageGeneration, thinkingMode,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildResponsesPrompt(c, client, request, continuation, bridge)
-			}, nil,
+			}, nil, nil,
 		)
 		c.Set("account_id", accountID)
 		if err != nil {
@@ -126,7 +158,11 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
-		response, err := buildResponsesObject(responseID, request.Model, created, request.PreviousResponseID, result, bridge)
+		if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+			writeOpenAIError(c, http.StatusBadGateway, "media_download_error", err.Error())
+			return
+		}
+		response, err := buildResponsesObject(responseID, created, request.PreviousResponseID, result, bridge, includeThoughts)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
 			return
@@ -170,6 +206,7 @@ func responsesMessages(raw json.RawMessage) ([]ChatMessage, error) {
 			Output    json.RawMessage `json:"output"`
 			Name      string          `json:"name"`
 			Arguments string          `json:"arguments"`
+			Result    string          `json:"result"`
 		}
 		if err := json.Unmarshal(item, &envelope); err != nil {
 			return nil, err
@@ -182,11 +219,36 @@ func responsesMessages(raw json.RawMessage) ([]ChatMessage, error) {
 		case "function_call":
 			arguments := envelope.Arguments
 			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(envelope.CallID, envelope.Name, arguments)}})
+		case "reasoning":
+			messages = append(messages, ChatMessage{Role: "assistant", TranscriptReasoning: append(json.RawMessage(nil), item...)})
+		case "code_interpreter_call", "web_search_call":
+			messages = append(messages, ChatMessage{Role: "assistant", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
+		case "image_generation_call":
+			content, err := responseImageContent(envelope.Result)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, ChatMessage{Role: "assistant", Content: content})
 		default:
 			return nil, fmt.Errorf("不支持的 input item 类型 %q", envelope.Type)
 		}
 	}
 	return messages, nil
+}
+
+func responseImageContent(result string) (json.RawMessage, error) {
+	if strings.TrimSpace(result) == "" {
+		return nil, fmt.Errorf("image_generation_call 缺少 result")
+	}
+	data, err := base64.StdEncoding.DecodeString(result)
+	if err != nil {
+		return nil, fmt.Errorf("image_generation_call.result 不是有效 base64: %w", err)
+	}
+	mimeType := http.DetectContentType(data)
+	return json.Marshal([]gin.H{
+		{"type": "input_text", "text": "Previous generated image"},
+		{"type": "input_image", "image_url": "data:" + mimeType + ";base64," + result},
+	})
 }
 
 func responsesPriorToolCall(id string, name string, arguments string) OpenAIToolCall {
@@ -197,15 +259,32 @@ func responsesPriorToolCall(id string, name string, arguments string) OpenAITool
 
 func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice)}
+	imageTool := false
+	codeTool := false
+	webTool := false
 	for _, tool := range request.Tools {
-		if tool.Type != "function" || tool.Name == "" {
-			return ToolBridge{}, fmt.Errorf("仅支持 function 工具")
+		switch tool.Type {
+		case "function":
+			if tool.Name == "" {
+				return ToolBridge{}, fmt.Errorf("function 工具 name 不能为空")
+			}
+			parameters := tool.Parameters
+			if len(parameters) == 0 {
+				parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+			}
+			bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: tool.Name, Description: tool.Description, Parameters: parameters})
+		case "code_interpreter":
+			bridge.CodeExecution = true
+			codeTool = true
+		case "web_search", "web_search_preview":
+			bridge.WebSearch = true
+			webTool = true
+		case "image_generation":
+			imageTool = true
+			bridge.ImageGeneration = true
+		default:
+			return ToolBridge{}, fmt.Errorf("不支持的 Responses 工具 %q", tool.Type)
 		}
-		parameters := tool.Parameters
-		if len(parameters) == 0 {
-			parameters = json.RawMessage(`{"type":"object","properties":{}}`)
-		}
-		bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: tool.Name, Description: tool.Description, Parameters: parameters})
 	}
 	if len(request.Text) > 0 && string(request.Text) != "null" {
 		var textConfig struct {
@@ -230,46 +309,184 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 			return ToolBridge{}, fmt.Errorf("不支持的 text.format.type %q", textConfig.Format.Type)
 		}
 	}
+	choice := strings.ToLower(strings.TrimSpace(bridge.Choice))
+	hostedChoice := false
+	switch choice {
+	case "image_generation":
+		if !imageTool {
+			return ToolBridge{}, fmt.Errorf("tool_choice 选择了未声明的 image_generation")
+		}
+		bridge.RequireImageGeneration = true
+		hostedChoice = true
+	case "code_interpreter":
+		if !codeTool {
+			return ToolBridge{}, fmt.Errorf("tool_choice 选择了未声明的 code_interpreter")
+		}
+		bridge.RequireCodeExecution = true
+		hostedChoice = true
+	case "web_search", "web_search_preview":
+		if !webTool {
+			return ToolBridge{}, fmt.Errorf("tool_choice 选择了未声明的 web_search")
+		}
+		bridge.RequireWebSearch = true
+		hostedChoice = true
+	case "required", "any":
+		if len(request.Tools) == 1 {
+			bridge.RequireImageGeneration = imageTool
+			bridge.RequireCodeExecution = codeTool
+			bridge.RequireWebSearch = webTool
+			hostedChoice = imageTool || codeTool || webTool
+		} else if imageTool || codeTool || webTool {
+			return ToolBridge{}, fmt.Errorf("内置工具与其他工具组合时不支持 tool_choice=%s", choice)
+		}
+	}
+	if hostedChoice {
+		bridge.Choice = "auto"
+	}
 	return bridge, nil
 }
 
-func buildResponsesObject(id string, model string, created int64, previousResponseID string, result generationResult, bridge ToolBridge) (gin.H, error) {
+func buildResponsesObject(id string, created int64, previousResponseID string, result generationResult, bridge ToolBridge, includeThoughts bool) (gin.H, error) {
 	primary := result.Accumulator.Primary()
+	if err := validateHostedOutput(primary, bridge); err != nil {
+		return nil, err
+	}
 	content, calls, err := bridge.Parse(primary.Text)
 	if err != nil {
 		return nil, err
 	}
 	calls = assignToolCallIDs(calls, id)
 	output := make([]gin.H, 0)
-	if primary.Thought != "" {
+	if includeThoughts && primary.Thought != "" {
 		output = append(output, gin.H{"id": "rs_" + id, "type": "reasoning", "summary": []gin.H{{"type": "summary_text", "text": primary.Thought}}})
 	}
-	if content != "" || len(primary.Images) > 0 {
+	if len(primary.Citations) > 0 {
+		sources := make([]gin.H, 0, len(primary.Citations))
+		seenSources := make(map[string]struct{}, len(primary.Citations))
+		for _, citation := range primary.Citations {
+			if _, exists := seenSources[citation.URL]; exists {
+				continue
+			}
+			seenSources[citation.URL] = struct{}{}
+			sources = append(sources, gin.H{"type": "url", "url": citation.URL})
+		}
+		output = append(output, gin.H{
+			"id": "ws_" + id, "type": "web_search_call", "status": "completed",
+			"action": gin.H{"type": "search", "query": "", "sources": sources},
+		})
+	}
+	output = append(output, responseCodeInterpreterItems(primary, id)...)
+	output = append(output, responseImageGenerationItems(primary, id)...)
+	markdownOutput := responsesMarkdownOutput(primary)
+	content = renderCandidateMarkdown(content, markdownOutput, 0)
+	if strings.TrimSpace(content) != "" {
 		parts := []gin.H{}
 		if content != "" {
-			parts = append(parts, gin.H{"type": "output_text", "text": content, "annotations": []interface{}{}})
-		}
-		for _, image := range primary.Images {
-			parts = append(parts, gin.H{"type": "output_text", "text": fmt.Sprintf("![%s](%s)", image.Alt, image.URL), "annotations": []interface{}{}})
+			parts = append(parts, gin.H{"type": "output_text", "text": content, "annotations": responsesCitationAnnotations(content, primary.Citations)})
 		}
 		output = append(output, gin.H{"id": "msg_" + id, "type": "message", "status": "completed", "role": "assistant", "content": parts})
 	}
 	for _, call := range calls {
 		output = append(output, gin.H{"id": "fc_" + call.ID, "type": "function_call", "status": "completed", "call_id": call.ID, "name": call.Name, "arguments": string(call.Arguments)})
 	}
-	response := responseShell(id, model, created, "completed")
+	response := responseShell(id, result.Model, created, "completed")
 	if previousResponseID != "" {
 		response["previous_response_id"] = previousResponseID
 	}
 	response["completed_at"] = time.Now().Unix()
 	response["output"], response["conversation_id"], response["provider_model"] = output, result.ConversationID, result.ProviderModel
 	if result.Accumulator.Usage != nil {
+		outputTokens := result.Accumulator.Usage.OutputTokens()
+		reasoningTokens := result.Accumulator.Usage.ThoughtTokens
 		response["usage"] = gin.H{
-			"input_tokens": result.Accumulator.Usage.PromptTokens, "output_tokens": result.Accumulator.Usage.OutputTokens(), "total_tokens": result.Accumulator.Usage.TotalTokens,
-			"input_tokens_details": gin.H{"cached_tokens": 0}, "output_tokens_details": gin.H{"reasoning_tokens": result.Accumulator.Usage.ThoughtTokens},
+			"input_tokens": result.Accumulator.Usage.PromptTokens, "output_tokens": outputTokens, "total_tokens": result.Accumulator.Usage.PromptTokens + outputTokens,
+			"input_tokens_details": gin.H{"cached_tokens": 0}, "output_tokens_details": gin.H{"reasoning_tokens": reasoningTokens},
 		}
 	}
 	return response, nil
+}
+
+func responseImageGenerationItems(output CandidateOutput, responseID string) []gin.H {
+	items := make([]gin.H, 0)
+	for _, media := range output.Media {
+		if media.Type != gemini.MediaGeneratedImage {
+			continue
+		}
+		_, data, ok := splitDataURL(media.URL)
+		if !ok {
+			continue
+		}
+		items = append(items, gin.H{
+			"id": fmt.Sprintf("ig_%s_%d", responseID, len(items)), "type": "image_generation_call",
+			"status": "completed", "result": data,
+		})
+	}
+	return items
+}
+
+func responsesMarkdownOutput(output CandidateOutput) CandidateOutput {
+	output.Codes = nil
+	media := make([]gemini.Media, 0, len(output.Media))
+	for _, item := range output.Media {
+		if item.Type != gemini.MediaGeneratedImage {
+			media = append(media, item)
+		}
+	}
+	output.Media = media
+	return output
+}
+
+func responseCodeInterpreterItems(output CandidateOutput, responseID string) []gin.H {
+	type codeCall struct {
+		index  int
+		code   string
+		logs   []gin.H
+		failed bool
+	}
+	calls := make([]codeCall, 0)
+	indexes := make(map[int]int)
+	for _, event := range output.Codes {
+		position, ok := indexes[event.Index]
+		if !ok {
+			position = len(calls)
+			indexes[event.Index] = position
+			calls = append(calls, codeCall{index: event.Index})
+		}
+		call := &calls[position]
+		switch event.Type {
+		case gemini.CodeReference:
+			call.code = event.Content
+		case gemini.CodeStdout:
+			call.logs = append(call.logs, gin.H{"type": "logs", "logs": event.Content})
+		case gemini.CodeStderr:
+			call.logs = append(call.logs, gin.H{"type": "logs", "logs": "stderr:\n" + event.Content})
+			call.failed = true
+		}
+	}
+	items := make([]gin.H, 0, len(calls))
+	for _, call := range calls {
+		status := "completed"
+		if call.failed {
+			status = "failed"
+		}
+		items = append(items, gin.H{
+			"id": fmt.Sprintf("ci_%s_%d", responseID, call.index), "type": "code_interpreter_call",
+			"status": status, "code": call.code, "container_id": "gemini_web", "outputs": call.logs,
+		})
+	}
+	return items
+}
+
+func responsesCitationAnnotations(text string, citations []gemini.Citation) []gin.H {
+	annotations := make([]gin.H, 0, len(citations))
+	for _, citation := range citations {
+		start, end := citationRange(text, citation)
+		annotations = append(annotations, gin.H{
+			"type": "url_citation", "start_index": start, "end_index": end,
+			"title": citation.Title, "url": citation.URL,
+		})
+	}
+	return annotations
 }
 
 func responsesConversationID(raw json.RawMessage) (string, error) {
@@ -309,6 +526,8 @@ type responseSequenceWriter struct {
 	outputIndexes      map[string]int
 	reasoningStarted   bool
 	messagePartStarted bool
+	imageStarted       bool
+	imageGenerating    bool
 	failed             bool
 }
 
@@ -343,6 +562,27 @@ func (w *responseSequenceWriter) live(event gemini.Event) error {
 		return w.reasoningDelta(event.Delta)
 	}
 	return w.textDelta(event.Delta)
+}
+
+func (w *responseSequenceWriter) imageProgress(phase gemini.Phase) error {
+	id := "ig_" + w.responseID + "_0"
+	index, err := w.ensureOutputItem(id, gin.H{"id": id, "type": "image_generation_call", "status": "in_progress", "result": nil})
+	if err != nil {
+		return err
+	}
+	if !w.imageStarted {
+		if err := w.emit("response.image_generation_call.in_progress", gin.H{"item_id": id, "output_index": index}); err != nil {
+			return err
+		}
+		w.imageStarted = true
+	}
+	if phase == gemini.PhaseToolComplete && !w.imageGenerating {
+		if err := w.emit("response.image_generation_call.generating", gin.H{"item_id": id, "output_index": index}); err != nil {
+			return err
+		}
+		w.imageGenerating = true
+	}
+	return nil
 }
 
 func (w *responseSequenceWriter) reasoningDelta(delta string) error {
@@ -394,13 +634,13 @@ func (w *responseSequenceWriter) fail(err error) error {
 	}
 	w.failed = true
 	response := responseShell(w.responseID, w.model, w.created, "failed")
-	response["error"] = gin.H{"code": "upstream_error", "message": err.Error()}
+	response["error"] = gin.H{"code": "server_error", "message": err.Error()}
 	return w.emit("response.failed", gin.H{"response": response})
 }
 
 func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *EventAccumulator, projection *streamProjection) error {
 	primary := accumulator.Primary()
-	if projection.bufferThought && primary.Thought != "" {
+	if projection.includeThought && projection.bufferThought && primary.Thought != "" {
 		if err := w.reasoningDelta(primary.Thought); err != nil {
 			return err
 		}
@@ -414,9 +654,16 @@ func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *Ev
 			parts, _ := item["content"].([]gin.H)
 			if len(parts) > 0 {
 				text, _ := parts[0]["text"].(string)
+				markdownOutput := responsesMarkdownOutput(primary)
+				text = renderCandidateMarkdown(primary.Text, markdownOutput, projection.textRunes)
 				if text != "" {
-					if err := w.textDelta(text); err != nil {
-						return err
+					if projection.emittedText {
+						if err := w.textDelta(text); err != nil {
+							return err
+						}
+					} else {
+						parts[0]["text"] = text
+						parts[0]["annotations"] = responsesCitationAnnotations(text, primary.Citations)
 					}
 				}
 			}
@@ -446,6 +693,51 @@ func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *Ev
 				return err
 			}
 			if err := w.emit("response.function_call_arguments.done", gin.H{"item_id": id, "output_index": index, "arguments": arguments, "name": item["name"]}); err != nil {
+				return err
+			}
+		case "code_interpreter_call":
+			code, _ := item["code"].(string)
+			if err := w.emit("response.code_interpreter_call.in_progress", gin.H{"item_id": id, "output_index": index}); err != nil {
+				return err
+			}
+			if code != "" {
+				if err := w.emit("response.code_interpreter_call_code.delta", gin.H{"item_id": id, "output_index": index, "delta": code}); err != nil {
+					return err
+				}
+				if err := w.emit("response.code_interpreter_call_code.done", gin.H{"item_id": id, "output_index": index, "code": code}); err != nil {
+					return err
+				}
+			}
+			if err := w.emit("response.code_interpreter_call.interpreting", gin.H{"item_id": id, "output_index": index}); err != nil {
+				return err
+			}
+			if err := w.emit("response.code_interpreter_call.completed", gin.H{"item_id": id, "output_index": index}); err != nil {
+				return err
+			}
+		case "web_search_call":
+			if err := w.emit("response.web_search_call.in_progress", gin.H{"item_id": id, "output_index": index}); err != nil {
+				return err
+			}
+			if err := w.emit("response.web_search_call.searching", gin.H{"item_id": id, "output_index": index}); err != nil {
+				return err
+			}
+			if err := w.emit("response.web_search_call.completed", gin.H{"item_id": id, "output_index": index}); err != nil {
+				return err
+			}
+		case "image_generation_call":
+			if !w.imageStarted {
+				if err := w.emit("response.image_generation_call.in_progress", gin.H{"item_id": id, "output_index": index}); err != nil {
+					return err
+				}
+				w.imageStarted = true
+			}
+			if !w.imageGenerating {
+				if err := w.emit("response.image_generation_call.generating", gin.H{"item_id": id, "output_index": index}); err != nil {
+					return err
+				}
+				w.imageGenerating = true
+			}
+			if err := w.emit("response.image_generation_call.completed", gin.H{"item_id": id, "output_index": index}); err != nil {
 				return err
 			}
 		}
@@ -491,6 +783,15 @@ func (w *responseSequenceWriter) finishMessage(index int, item gin.H) error {
 				return err
 			}
 			if err := w.emit("response.output_text.delta", gin.H{"item_id": id, "output_index": index, "content_index": contentIndex, "delta": text, "logprobs": []interface{}{}}); err != nil {
+				return err
+			}
+		}
+		annotations, _ := part["annotations"].([]gin.H)
+		for annotationIndex, annotation := range annotations {
+			if err := w.emit("response.output_text.annotation.added", gin.H{
+				"item_id": id, "output_index": index, "content_index": contentIndex,
+				"annotation_index": annotationIndex, "annotation": annotation,
+			}); err != nil {
 				return err
 			}
 		}
@@ -540,6 +841,11 @@ func addedResponseItem(item gin.H) gin.H {
 		added["summary"] = []interface{}{}
 	case "function_call":
 		added["arguments"] = ""
+	case "code_interpreter_call":
+		added["code"] = ""
+		added["outputs"] = nil
+	case "image_generation_call":
+		added["result"] = nil
 	}
 	return added
 }
@@ -560,6 +866,45 @@ func unsupportedResponsesParameters(request ResponsesRequest) []string {
 	}
 	if request.ParallelToolCalls != nil {
 		fields = append(fields, "parallel_tool_calls")
+	}
+	for index, tool := range request.Tools {
+		if tool.Type != "image_generation" {
+			continue
+		}
+		prefix := fmt.Sprintf("tools[%d].", index)
+		if tool.Action != "" {
+			fields = append(fields, prefix+"action")
+		}
+		if tool.Background != "" {
+			fields = append(fields, prefix+"background")
+		}
+		if tool.InputFidelity != "" {
+			fields = append(fields, prefix+"input_fidelity")
+		}
+		if len(tool.InputImageMask) > 0 && string(tool.InputImageMask) != "null" {
+			fields = append(fields, prefix+"input_image_mask")
+		}
+		if tool.ImageModel != "" {
+			fields = append(fields, prefix+"model")
+		}
+		if tool.Moderation != "" {
+			fields = append(fields, prefix+"moderation")
+		}
+		if tool.OutputCompression != nil {
+			fields = append(fields, prefix+"output_compression")
+		}
+		if tool.OutputFormat != "" {
+			fields = append(fields, prefix+"output_format")
+		}
+		if tool.PartialImages != nil {
+			fields = append(fields, prefix+"partial_images")
+		}
+		if tool.Quality != "" {
+			fields = append(fields, prefix+"quality")
+		}
+		if tool.Size != "" {
+			fields = append(fields, prefix+"size")
+		}
 	}
 	return fields
 }

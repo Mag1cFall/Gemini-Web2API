@@ -1,8 +1,10 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -13,6 +15,8 @@ import (
 )
 
 const usageRPC = "jSf9Qc"
+
+var errUsageNotSignedIn = errors.New("usage response is not signed in")
 
 // UsageWindow 表示官网展示的一段用量窗口
 type UsageWindow struct {
@@ -33,6 +37,19 @@ type UsageInfo struct {
 
 // FetchUsage 读取官网当前账号用量
 func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
+	usage, err := c.fetchUsage(ctx, true)
+	if err != nil {
+		return UsageInfo{}, err
+	}
+	contextWindow, err := usageContextWindow(usage.Tier)
+	if err != nil {
+		return UsageInfo{}, err
+	}
+	c.contextSize.Store(int64(contextWindow))
+	return usage, nil
+}
+
+func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, error) {
 	bootstrap, err := c.bootstrapSnapshot()
 	if err != nil {
 		return UsageInfo{}, err
@@ -62,17 +79,54 @@ func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return UsageInfo{}, fmt.Errorf("usage request: %w", err)
+		return UsageInfo{}, transportProtocolError("usage request", err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
 		return UsageInfo{}, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return UsageInfo{}, httpStatusError(resp.StatusCode, "usage")
+		protocolErr := httpStatusError(resp.StatusCode, "usage")
+		resp.Body.Close()
+		if allowRefresh && isAuthenticationError(protocolErr) && c.refresh != nil {
+			if err := c.refreshCookies(ctx); err != nil {
+				return UsageInfo{}, err
+			}
+			if err := c.init(ctx, false); err != nil {
+				return UsageInfo{}, err
+			}
+			return c.fetchUsage(ctx, false)
+		}
+		return UsageInfo{}, protocolErr
 	}
-	return decodeUsageResponse(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return UsageInfo{}, transportProtocolError("read usage response", err)
+	}
+	if bytes.Contains(body, []byte("accounts.google.com")) {
+		if allowRefresh && c.refresh != nil {
+			if err := c.refreshCookies(ctx); err != nil {
+				return UsageInfo{}, err
+			}
+			if err := c.init(ctx, false); err != nil {
+				return UsageInfo{}, err
+			}
+			return c.fetchUsage(ctx, false)
+		}
+		return UsageInfo{}, retryableProtocolError(fmt.Sprintf("account %q is not signed in", c.displayAccountID()), nil)
+	}
+	usage, err := decodeUsageResponse(bytes.NewReader(body))
+	if allowRefresh && errors.Is(err, errUsageNotSignedIn) && c.refresh != nil {
+		if err := c.refreshCookies(ctx); err != nil {
+			return UsageInfo{}, err
+		}
+		if err := c.init(ctx, false); err != nil {
+			return UsageInfo{}, err
+		}
+		return c.fetchUsage(ctx, false)
+	}
+	return usage, err
 }
 
 func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
@@ -85,6 +139,9 @@ func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
 			return nil
 		}
 		encoded, _ := stringAt(record, 2)
+		if encoded == "" {
+			return errUsageNotSignedIn
+		}
 		var payload []any
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
 			return fmt.Errorf("decode usage payload: %w", err)
@@ -101,7 +158,7 @@ func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
 		return UsageInfo{}, err
 	}
 	if !found {
-		return UsageInfo{}, fmt.Errorf("usage response has no %s payload", usageRPC)
+		return UsageInfo{}, fmt.Errorf("%w: response has no %s payload", errUsageNotSignedIn, usageRPC)
 	}
 	return usage, nil
 }
@@ -186,6 +243,19 @@ func usageTier(code int) string {
 		return "plus"
 	default:
 		return "unknown"
+	}
+}
+
+func usageContextWindow(tier string) (int, error) {
+	switch tier {
+	case "free":
+		return 32 * 1024, nil
+	case "plus":
+		return 128 * 1024, nil
+	case "pro", "ultra":
+		return 1024 * 1024, nil
+	default:
+		return 0, fmt.Errorf("unknown Gemini Web tier %q", tier)
 	}
 }
 

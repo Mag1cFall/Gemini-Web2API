@@ -12,7 +12,7 @@ import (
 )
 
 func TestStreamProjectionEmitsAppendImmediately(t *testing.T) {
-	projection := newStreamProjection(ToolBridge{})
+	projection := newStreamProjection(ToolBridge{}, true)
 	var emitted []gemini.Event
 	err := projection.project(
 		gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: "live"},
@@ -27,7 +27,7 @@ func TestStreamProjectionEmitsAppendImmediately(t *testing.T) {
 }
 
 func TestStreamProjectionBuffersRewriteBeforeOutput(t *testing.T) {
-	projection := newStreamProjection(ToolBridge{})
+	projection := newStreamProjection(ToolBridge{}, true)
 	emitCount := 0
 	emit := func(gemini.Event) error {
 		emitCount++
@@ -45,7 +45,7 @@ func TestStreamProjectionBuffersRewriteBeforeOutput(t *testing.T) {
 }
 
 func TestStreamProjectionRejectsRewriteAfterOutput(t *testing.T) {
-	projection := newStreamProjection(ToolBridge{})
+	projection := newStreamProjection(ToolBridge{}, true)
 	writeErr := errors.New("unexpected write error")
 	if err := projection.project(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: "live"}, func(gemini.Event) error { return nil }, nil); err != nil {
 		t.Fatalf("输出 append 失败: %v", err)
@@ -65,7 +65,7 @@ func TestStreamProjectionRejectsRewriteAfterOutput(t *testing.T) {
 }
 
 func TestStreamProjectionTracksTextAndThoughtSeparately(t *testing.T) {
-	projection := newStreamProjection(ToolBridge{})
+	projection := newStreamProjection(ToolBridge{}, true)
 	var emitted []gemini.EventKind
 	emit := func(event gemini.Event) error {
 		emitted = append(emitted, event.Kind)
@@ -83,7 +83,7 @@ func TestStreamProjectionTracksTextAndThoughtSeparately(t *testing.T) {
 }
 
 func TestStreamProjectionBuffersToolTextOnly(t *testing.T) {
-	projection := newStreamProjection(ToolBridge{Definitions: []ToolDefinition{{Name: "lookup"}}})
+	projection := newStreamProjection(ToolBridge{Definitions: []ToolDefinition{{Name: "lookup"}}}, true)
 	var emitted []gemini.EventKind
 	emit := func(event gemini.Event) error {
 		emitted = append(emitted, event.Kind)
@@ -103,7 +103,7 @@ func TestStreamProjectionBuffersToolTextOnly(t *testing.T) {
 func TestOpenAIStreamUsesFinalSnapshot(t *testing.T) {
 	accumulator := NewEventAccumulator()
 	accumulator.Candidates[0] = &CandidateOutput{Text: "final answer", Thought: "final thought"}
-	projection := newStreamProjection(ToolBridge{})
+	projection := newStreamProjection(ToolBridge{}, true)
 	projection.bufferText = true
 	projection.bufferThought = true
 	var output bytes.Buffer
@@ -147,7 +147,7 @@ func TestResponsesWriterEmitsLiveDeltasBeforeCompletion(t *testing.T) {
 	}
 	accumulator := NewEventAccumulator()
 	accumulator.Candidates[0] = &CandidateOutput{Text: "answer", Thought: "reason"}
-	if err := writer.finishProjected(response, accumulator, newStreamProjection(ToolBridge{})); err != nil {
+	if err := writer.finishProjected(response, accumulator, newStreamProjection(ToolBridge{}, true)); err != nil {
 		t.Fatalf("完成 Responses 流失败: %v", err)
 	}
 	stream = recorder.Body.String()

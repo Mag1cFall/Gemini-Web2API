@@ -134,7 +134,7 @@ func parseModelCatalog(payload []any, clientID string) (ModelCatalog, error) {
 // buildModelHeader 构造包含模型与思考策略的请求头
 func buildModelHeader(hash string, mode int, thinkingMode ThinkingMode, clientID string) (string, error) {
 	header, err := json.Marshal([]any{
-		1, nil, nil, nil, hash, nil, nil, 0,
+		1, nil, nil, nil, hash, nil, nil, 1,
 		[]int{4, 5, 6, 8, 4, 5, 6, 8}, nil, nil, 2, nil, nil, mode, int(thinkingMode) + 1, clientID,
 	})
 	if err != nil {

@@ -44,6 +44,7 @@ func main() {
 
 // runCommand 分派首次配置与默认服务
 func runCommand(args []string) error {
+	_ = godotenv.Load()
 	if len(args) != 0 && args[0] == "setup" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -54,7 +55,6 @@ func runCommand(args []string) error {
 
 // run 管理配置、协议初始化和服务生命周期
 func run(args []string) error {
-	_ = godotenv.Load()
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -147,10 +147,19 @@ func bootstrapAccounts(parent context.Context, cfg config.Config) (*balancer.Acc
 		go func(index int, account auth.LoadedAccount) {
 			ctx, cancel := context.WithTimeout(parent, cfg.InitTimeout)
 			defer cancel()
+			if account.OAuth != nil {
+				material := *account.OAuth
+				account.Source.Refresh = func(refreshContext context.Context) ([]gemini.Cookie, error) {
+					return chromeauth.Refresh(refreshContext, material, account.ProxyURL)
+				}
+			}
 
 			client, err := gemini.NewClient(account.Source, account.ProxyURL, cfg.SaveHistory)
 			if err == nil {
 				err = client.Init(ctx)
+			}
+			if err == nil {
+				_, err = client.FetchUsage(ctx)
 			}
 			results <- bootstrapResult{
 				index: index, accountID: account.ID,
@@ -170,7 +179,7 @@ func bootstrapAccounts(parent context.Context, cfg config.Config) (*balancer.Acc
 			log.Printf("账号 %q 初始化失败: %v", result.accountID, result.err)
 			continue
 		}
-		pool.Add(result.client, result.accountID, result.client.Models())
+		pool.Add(result.client, result.accountID)
 	}
 	if pool.Size() == 0 {
 		return nil, fmt.Errorf("没有账号完成 Gemini Web 协议初始化")

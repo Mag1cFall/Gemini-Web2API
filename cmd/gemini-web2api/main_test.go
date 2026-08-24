@@ -50,7 +50,7 @@ func TestHealthEndpoints(t *testing.T) {
 		t.Fatalf("empty readiness status = %d", ready.Code)
 	}
 
-	pool.Add(&gemini.Client{}, "ready", nil)
+	pool.Add(&gemini.Client{}, "ready")
 	ready = httptest.NewRecorder()
 	router.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if ready.Code != http.StatusOK {

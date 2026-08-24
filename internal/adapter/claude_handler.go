@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/claude"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 	"github.com/gin-gonic/gin"
@@ -37,7 +39,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusServiceUnavailable, "overloaded_error", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, err := claudeThinkingMode(request)
+		thinkingMode, includeThoughts, err := claudeThinkingSettings(request)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
@@ -54,8 +56,8 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 
 		if request.Stream {
 			setSSEHeaders(c)
-			processor := claude.NewStreamProcessor(request.Model, c.Writer, responseID)
-			projection := newStreamProjection(bridge)
+			processor := claude.NewStreamProcessor(config.MapModel(request.Model), c.Writer, responseID)
+			projection := newStreamProjection(bridge, includeThoughts)
 			thinkingOpen := false
 			thinkingBlock := 0
 			result, accountID, err := runGeneration(
@@ -80,6 +82,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 						return processor.ProcessEvent(event)
 					}, processor.EmitError)
 				},
+				projection.hasVisibleOutput,
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
@@ -88,7 +91,16 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				}
 				return
 			}
+			processor.SetModel(result.Model)
+			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+				_ = processor.EmitError(err)
+				return
+			}
 			primary := result.Accumulator.Primary()
+			if err := validateHostedOutput(primary, bridge); err != nil {
+				_ = processor.EmitError(err)
+				return
+			}
 			content, calls, err := bridge.Parse(primary.Text)
 			if err != nil {
 				_ = processor.EmitError(err)
@@ -99,21 +111,23 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			if result.Accumulator.Usage != nil {
 				_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventMetadata, Usage: result.Accumulator.Usage})
 			}
-			if thinkingOpen {
+			if includeThoughts && thinkingOpen {
 				_ = processor.FinishThinking(thinkingSignature(responseID, thinkingBlock))
 				thinkingOpen = false
-			} else if projection.bufferThought && primary.Thought != "" {
+			} else if includeThoughts && projection.bufferThought && primary.Thought != "" {
 				_ = processor.EmitThinking(primary.Thought, thinkingSignature(responseID, 0))
 			}
-			if projection.bufferText && content != "" {
-				_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: content})
+			if projection.bufferText {
+				content = renderCandidateMarkdown(content, primary, projection.textRunes)
+				content = renderCitationMarkdown(content, primary.Citations)
+				if content != "" {
+					_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: content})
+				}
+			} else if len(primary.Citations) > 0 {
+				_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: renderCitationSources(primary.Citations)})
 			}
 			for _, call := range calls {
 				_ = processor.EmitToolCall(call.ID, call.Name, call.Arguments)
-			}
-			for _, image := range primary.Images {
-				image := image
-				_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventImage, Image: &image})
 			}
 			stopReason := "end_turn"
 			if len(calls) > 0 {
@@ -127,7 +141,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, false, thinkingMode,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildClaudePrompt(c, client, request, continuation, bridge)
-			}, nil,
+			}, nil, nil,
 		)
 		c.Set("account_id", accountID)
 		if err != nil {
@@ -135,16 +149,26 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
+		if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
+			return
+		}
 		primary := result.Accumulator.Primary()
+		if err := validateHostedOutput(primary, bridge); err != nil {
+			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
+			return
+		}
 		content, calls, err := bridge.Parse(primary.Text)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
 		calls = assignToolCallIDs(calls, responseID)
+		content = renderCandidateMarkdown(content, primary, 0)
+		content = renderCitationMarkdown(content, primary.Citations)
 
 		blocks := make([]claude.ContentBlock, 0)
-		if primary.Thought != "" {
+		if includeThoughts && primary.Thought != "" {
 			blocks = append(blocks, claude.ContentBlock{Type: "thinking", Thinking: primary.Thought, Signature: thinkingSignature(responseID, 0)})
 		}
 		if content != "" {
@@ -153,10 +177,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		for _, call := range calls {
 			var input map[string]interface{}
 			_ = json.Unmarshal(call.Arguments, &input)
-			blocks = append(blocks, claude.ContentBlock{Type: "tool_use", ID: call.ID, Name: call.Name, Input: input})
-		}
-		for _, image := range primary.Images {
-			blocks = append(blocks, claude.ContentBlock{Type: "text", Text: fmt.Sprintf("![%s](%s)", image.Alt, image.URL)})
+			blocks = append(blocks, claude.ContentBlock{Type: "tool_use", ID: call.ID, Name: call.Name, Input: &input})
 		}
 		if len(blocks) == 0 {
 			blocks = append(blocks, claude.ContentBlock{Type: "text"})
@@ -166,14 +187,16 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			stopReason = "tool_use"
 		}
 		response := claude.ClaudeResponse{
-			ID: responseID, Type: "message", Role: "assistant", Model: request.Model, Content: blocks,
+			ID: responseID, Type: "message", Role: "assistant", Model: result.Model, Content: blocks,
 			StopReason: stopReason, ConversationID: result.ConversationID, Usage: &claude.Usage{},
 		}
 		if result.Accumulator.Usage != nil {
-			response.Usage = &claude.Usage{InputTokens: result.Accumulator.Usage.PromptTokens, OutputTokens: result.Accumulator.Usage.OutputTokens()}
+			usage := result.Accumulator.Usage
+			response.Usage = &claude.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens()}
 		}
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
+		c.Header("X-Provider-Model", result.ProviderModel)
 		c.JSON(http.StatusOK, response)
 	}
 }
@@ -201,7 +224,8 @@ func ClaudeCountTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				for _, part := range parts {
 					var partType string
 					_ = json.Unmarshal(part["type"], &partType)
-					if partType == "image" || partType == "document" || partType == "input_file" {
+					switch partType {
+					case "image", "image_url", "input_image", "document", "input_file", "input_audio", "audio", "input_video", "video":
 						writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "本地 count_tokens 当前只支持文本与工具内容")
 						return
 					}
@@ -229,10 +253,15 @@ func ClaudeListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	}
 }
 
-func writeClaudeModelList(c *gin.Context, models []gemini.Model) {
+func writeClaudeModelList(c *gin.Context, models []availableModel) {
 	data := make([]gin.H, 0, len(models))
 	for _, model := range models {
-		data = append(data, gin.H{"id": model.ID, "type": "model", "display_name": model.DisplayName, "created_at": "1970-01-01T00:00:00Z", "default": model.Default})
+		data = append(data, gin.H{
+			"id": model.ID, "type": "model", "display_name": model.DisplayName,
+			"created_at": "1970-01-01T00:00:00Z", "default": model.Default,
+			"context_window": model.MaxInputTokenLimit, "min_context_window": model.MinInputTokenLimit,
+			"available_account_count": model.AccountCount,
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": data, "has_more": false, "first_id": firstModelID(models), "last_id": lastModelID(models)})
 }
@@ -277,9 +306,12 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 
 func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice)}
+	webTool := false
 	for _, tool := range request.Tools {
 		if tool.IsWebSearch() {
-			return ToolBridge{}, fmt.Errorf("web_search 工具尚未映射到 Gemini Web")
+			bridge.WebSearch = true
+			webTool = true
+			continue
 		}
 		if tool.Name == nil || *tool.Name == "" {
 			return ToolBridge{}, fmt.Errorf("工具 name 不能为空")
@@ -293,6 +325,22 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 			description = *tool.Description
 		}
 		bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: *tool.Name, Description: description, Parameters: parameters})
+	}
+	choice := strings.ToLower(strings.TrimSpace(bridge.Choice))
+	switch choice {
+	case "web_search", "web_search_20250305", "google_search":
+		if !webTool {
+			return ToolBridge{}, fmt.Errorf("tool_choice 选择了未声明的 web_search")
+		}
+		bridge.RequireWebSearch = true
+		bridge.Choice = "auto"
+	case "any", "required":
+		if webTool && len(request.Tools) == 1 {
+			bridge.RequireWebSearch = true
+			bridge.Choice = "auto"
+		} else if webTool {
+			return ToolBridge{}, fmt.Errorf("web_search 与其他工具组合时不支持 tool_choice=%s", choice)
+		}
 	}
 	return bridge, nil
 }
@@ -330,13 +378,13 @@ func unsupportedClaudeParameters(request claude.ClaudeRequest) []string {
 	return fields
 }
 
-func firstModelID(models []gemini.Model) string {
+func firstModelID(models []availableModel) string {
 	if len(models) == 0 {
 		return ""
 	}
 	return models[0].ID
 }
-func lastModelID(models []gemini.Model) string {
+func lastModelID(models []availableModel) string {
 	if len(models) == 0 {
 		return ""
 	}
@@ -345,5 +393,5 @@ func lastModelID(models []gemini.Model) string {
 
 func thinkingSignature(messageID string, blockIndex int) string {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", messageID, blockIndex)))
-	return base64.RawURLEncoding.EncodeToString(digest[:])
+	return base64.StdEncoding.EncodeToString(digest[:])
 }

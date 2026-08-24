@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return text, nil, nil
+		return decodeMarkdownImages(ctx, text, client)
 	}
 
 	var parts []map[string]json.RawMessage
@@ -44,7 +45,7 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			if file != nil {
 				files = append(files, *file)
 			}
-		case "document", "input_file":
+		case "document", "input_file", "input_audio", "audio", "input_video", "video":
 			label, file, err := decodeFilePart(ctx, part, client)
 			if err != nil {
 				return "", nil, err
@@ -73,6 +74,34 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			return "", nil, fmt.Errorf("不支持的消息内容段类型 %q", partType)
 		}
 	}
+	return builder.String(), files, nil
+}
+
+var markdownImagePattern = regexp.MustCompile(`!\[[^\r\n]*\]\((data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/_=-]+)\)`)
+
+func decodeMarkdownImages(ctx context.Context, text string, client *gemini.Client) (string, []gemini.FileData, error) {
+	matches := markdownImagePattern.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text, nil, nil
+	}
+
+	var builder strings.Builder
+	files := make([]gemini.FileData, 0, len(matches))
+	cursor := 0
+	for _, match := range matches {
+		builder.WriteString(text[cursor:match[0]])
+		imageURL, _ := json.Marshal(text[match[2]:match[3]])
+		label, file, err := decodeImagePart(ctx, map[string]json.RawMessage{"image_url": imageURL}, client)
+		if err != nil {
+			return "", nil, err
+		}
+		builder.WriteString(label)
+		if file != nil {
+			files = append(files, *file)
+		}
+		cursor = match[1]
+	}
+	builder.WriteString(text[cursor:])
 	return builder.String(), files, nil
 }
 
@@ -157,13 +186,36 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 		URL       string `json:"url"`
 	}
 	_ = json.Unmarshal(part["source"], &source)
+	var embedded struct {
+		Data     string `json:"data"`
+		Format   string `json:"format"`
+		MimeType string `json:"mime_type"`
+	}
+	for _, field := range []string{"input_audio", "audio", "input_video", "video"} {
+		if len(part[field]) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(part[field], &embedded); err != nil {
+			return "", nil, fmt.Errorf("媒体内容格式无效: %w", err)
+		}
+		if source.Data == "" {
+			source.Data = embedded.Data
+		}
+		if source.MediaType == "" {
+			source.MediaType = embedded.MimeType
+			if source.MediaType == "" {
+				source.MediaType = mediaFormatMIME(embedded.Format)
+			}
+		}
+		break
+	}
 	var fileURL, filename string
 	_ = json.Unmarshal(part["file_url"], &fileURL)
 	_ = json.Unmarshal(part["filename"], &filename)
 	if fileURL == "" {
 		fileURL = source.URL
 	}
-	if fileURL != "" {
+	if fileURL != "" && !strings.HasPrefix(fileURL, "data:") {
 		data, err := client.FetchMedia(ctx, fileURL)
 		if err != nil {
 			return "", nil, fmt.Errorf("下载远程文件失败: %w", err)
@@ -176,6 +228,9 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 			return "", nil, fmt.Errorf("上传远程文件失败: %w", err)
 		}
 		return "[File]", &gemini.FileData{URL: fileID, FileName: filename}, nil
+	}
+	if strings.HasPrefix(fileURL, "data:") && source.Data == "" {
+		source.Data = fileURL
 	}
 	if source.Data == "" {
 		_ = json.Unmarshal(part["file_data"], &source.Data)
@@ -205,6 +260,27 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 	return "[File]", &gemini.FileData{URL: fileID, FileName: filename}, nil
 }
 
+func mediaFormatMIME(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "wav":
+		return "audio/wav"
+	case "mp3", "mpeg":
+		return "audio/mpeg"
+	case "ogg":
+		return "audio/ogg"
+	case "flac":
+		return "audio/flac"
+	case "mp4":
+		return "video/mp4"
+	case "webm":
+		return "video/webm"
+	case "mov", "quicktime":
+		return "video/quicktime"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 func decodeBase64(value string) ([]byte, error) {
 	encodings := []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding}
 	for _, encoding := range encodings {
@@ -220,10 +296,11 @@ func appendTranscriptObject(builder *strings.Builder, value interface{}) {
 	if err != nil {
 		return
 	}
-	if builder.Len() > 0 {
+	if builder.Len() > 0 && !strings.HasSuffix(builder.String(), "\n") {
 		builder.WriteByte('\n')
 	}
 	builder.Write(data)
+	builder.WriteByte('\n')
 }
 
 func transcriptRole(role string) string {

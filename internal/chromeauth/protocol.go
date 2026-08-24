@@ -75,6 +75,7 @@ func fetchGoogleCookies(ctx context.Context, gaiaID string, token string, wrappe
 	if err != nil {
 		return nil, err
 	}
+	defer client.CloseIdleConnections()
 
 	firstStatus, first, err := requestMultilogin(ctx, client, gaiaID, token, assertionSentinel)
 	if err != nil {

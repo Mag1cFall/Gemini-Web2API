@@ -33,9 +33,6 @@ func buildGeneratePayload(request GenerateRequest, language, requestID string, t
 	inner[27] = 1
 	inner[30] = []any{4}
 	inner[41] = []any{1}
-	if request.ImageGeneration {
-		inner[49] = 14
-	}
 	inner[53] = 0
 	inner[59] = requestID
 	inner[61] = []any{}

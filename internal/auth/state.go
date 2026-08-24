@@ -29,13 +29,20 @@ type ImportSource struct {
 	Profile string `json:"profile,omitempty"`
 }
 
+// OAuthMaterial 保存无需再次读取浏览器的续签材料
+type OAuthMaterial struct {
+	GaiaID            string `json:"gaiaId"`
+	RefreshToken      string `json:"refreshToken"`
+	WrappedBindingKey []byte `json:"wrappedBindingKey"`
+}
+
 // Metadata 保存账号固定身份
 type Metadata struct {
-	Version     int                `json:"version"`
 	ID          string             `json:"id"`
 	Proxy       string             `json:"proxy,omitempty"`
 	Source      ImportSource       `json:"source,omitempty"`
 	Fingerprint gemini.Fingerprint `json:"fingerprint"`
+	OAuth       *OAuthMaterial     `json:"oauth,omitempty"`
 }
 
 // StorageState 是兼容 Playwright 的认证状态文件
@@ -50,6 +57,7 @@ type LoadedAccount struct {
 	ID       string
 	ProxyURL string
 	Source   gemini.AccountSource
+	OAuth    *OAuthMaterial
 }
 
 // File 管理一个可原子写回的认证状态文件
@@ -140,8 +148,8 @@ func Load(path string) (*File, error) {
 	if strings.TrimSpace(state.Metadata.ID) == "" {
 		state.Metadata.ID = accountIDFromPath(absPath)
 	}
-	if state.Metadata.Version == 0 {
-		state.Metadata.Version = 1
+	if err := validateOAuthMaterial(state.Metadata.OAuth); err != nil {
+		return nil, fmt.Errorf("认证状态 %s: %w", absPath, err)
 	}
 	return &File{path: absPath, state: state}, nil
 }
@@ -166,11 +174,11 @@ func New(path string, state StorageState) (*File, error) {
 	if strings.TrimSpace(state.Metadata.ID) == "" {
 		return nil, fmt.Errorf("认证状态缺少账号标识")
 	}
-	if state.Metadata.Version == 0 {
-		state.Metadata.Version = 1
-	}
 	if state.Origins == nil {
 		state.Origins = []json.RawMessage{}
+	}
+	if err := validateOAuthMaterial(state.Metadata.OAuth); err != nil {
+		return nil, err
 	}
 	return &File{path: absPath, state: state}, nil
 }
@@ -197,7 +205,10 @@ func (f *File) Account(globalProxy string) LoadedAccount {
 		Fingerprint: f.state.Metadata.Fingerprint,
 	}
 	source.Save = f.SaveCookies
-	return LoadedAccount{ID: source.ID, ProxyURL: proxyURL, Source: source}
+	return LoadedAccount{
+		ID: source.ID, ProxyURL: proxyURL, Source: source,
+		OAuth: f.state.Metadata.OAuth,
+	}
 }
 
 // SaveCookies 更新 Cookie 并原子写回认证状态
@@ -240,6 +251,16 @@ func (f *File) writeLocked() error {
 	}
 	if err := replaceFile(tempPath, f.path); err != nil {
 		return fmt.Errorf("替换认证状态 %s: %w", f.path, err)
+	}
+	return nil
+}
+
+func validateOAuthMaterial(material *OAuthMaterial) error {
+	if material == nil {
+		return nil
+	}
+	if strings.TrimSpace(material.GaiaID) == "" || strings.TrimSpace(material.RefreshToken) == "" || len(material.WrappedBindingKey) == 0 {
+		return fmt.Errorf("OAuth 续签材料不完整")
 	}
 	return nil
 }

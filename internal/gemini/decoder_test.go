@@ -27,8 +27,8 @@ func TestFrameDecoderGeneratedImages(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	images := eventsOfKind(events, EventImage)
-	if len(images) != 1 || images[0].Image.URL != "https://lh3.googleusercontent.com/gg-dl/preview" {
+	images := eventsOfKind(events, EventMedia)
+	if len(images) != 1 || images[0].Media.URL != "https://lh3.googleusercontent.com/gg-dl/preview" {
 		t.Fatalf("images = %+v", images)
 	}
 }

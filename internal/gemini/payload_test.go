@@ -10,12 +10,11 @@ import (
 func TestBuildGeneratePayload(t *testing.T) {
 	state := NewConversationStateFrom(ConversationSnapshot{CID: "c_1", RID: "r_1", RCID: "rc_1"})
 	payload, err := buildGeneratePayload(GenerateRequest{
-		Prompt:          "hello",
-		ModelMode:       3,
-		ThinkingMode:    ThinkingExtended,
-		Files:           []FileData{{URL: "file-id", FileName: "photo.png"}},
-		Conversation:    state,
-		ImageGeneration: true,
+		Prompt:       "hello",
+		ModelMode:    3,
+		ThinkingMode: ThinkingExtended,
+		Files:        []FileData{{URL: "file-id", FileName: "photo.png"}},
+		Conversation: state,
 	}, "en", "REQUEST-ID", true)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +43,7 @@ func TestBuildGeneratePayload(t *testing.T) {
 			nonNull = append(nonNull, index)
 		}
 	}
-	wantNonNull := []int{0, 1, 2, 6, 7, 10, 11, 17, 18, 27, 30, 41, 45, 49, 53, 59, 61, 67, 68, 79, 80, 91, 96}
+	wantNonNull := []int{0, 1, 2, 6, 7, 10, 11, 17, 18, 27, 30, 41, 45, 53, 59, 61, 67, 68, 79, 80, 91, 96}
 	if !reflect.DeepEqual(nonNull, wantNonNull) {
 		t.Fatalf("nonnull indexes = %v", nonNull)
 	}
@@ -69,8 +68,8 @@ func TestBuildGeneratePayload(t *testing.T) {
 	if temporary, _ := intAt(inner, 45); temporary != 1 {
 		t.Fatalf("temporary chat = %v", inner[45])
 	}
-	if imageMode, _ := intAt(inner, 49); imageMode != 14 {
-		t.Fatalf("image generation mode = %v", inner[49])
+	if inner[49] != nil {
+		t.Fatalf("reserved slot 49 = %v", inner[49])
 	}
 	if modelMode, _ := intAt(inner, 79); modelMode != 3 {
 		t.Fatalf("model mode = %v", inner[79])

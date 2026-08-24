@@ -50,7 +50,7 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("fetch media: %w", err)
+			return nil, transportProtocolError("media fetch", err)
 		}
 		if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 			resp.Body.Close()
@@ -76,7 +76,7 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			return nil, fmt.Errorf("read media: %w", err)
+			return nil, retryableProtocolError("read media response", err)
 		}
 		contentType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 		if generatedMedia && contentType == "text/plain" {

@@ -16,13 +16,21 @@ import (
 
 // ImageGenerationRequest 表示 OpenAI 图片生成请求
 type ImageGenerationRequest struct {
-	Prompt         string `json:"prompt"`
-	Model          string `json:"model,omitempty"`
-	N              int    `json:"n,omitempty"`
-	Size           string `json:"size,omitempty"`
-	ResponseFormat string `json:"response_format,omitempty"`
-	Quality        string `json:"quality,omitempty"`
-	Style          string `json:"style,omitempty"`
+	Prompt            string `json:"prompt"`
+	Model             string `json:"model,omitempty"`
+	N                 int    `json:"n,omitempty"`
+	Size              string `json:"size,omitempty"`
+	ResponseFormat    string `json:"response_format,omitempty"`
+	Quality           string `json:"quality,omitempty"`
+	Style             string `json:"style,omitempty"`
+	Stream            bool   `json:"stream,omitempty"`
+	PartialImages     *int   `json:"partial_images,omitempty"`
+	OutputFormat      string `json:"output_format,omitempty"`
+	OutputCompression *int   `json:"output_compression,omitempty"`
+	Background        string `json:"background,omitempty"`
+	User              string `json:"user,omitempty"`
+	InputFidelity     string `json:"input_fidelity,omitempty"`
+	Moderation        string `json:"moderation,omitempty"`
 }
 
 type imageInput struct {
@@ -59,12 +67,10 @@ func ImageEditHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		request := ImageGenerationRequest{
-			Prompt:         c.PostForm("prompt"),
-			Model:          c.PostForm("model"),
-			Size:           c.PostForm("size"),
-			ResponseFormat: c.PostForm("response_format"),
-			Quality:        c.PostForm("quality"),
-			Style:          c.PostForm("style"),
+			Prompt: c.PostForm("prompt"), Model: c.PostForm("model"), Size: c.PostForm("size"),
+			ResponseFormat: c.PostForm("response_format"), Quality: c.PostForm("quality"), Style: c.PostForm("style"),
+			OutputFormat: c.PostForm("output_format"), Background: c.PostForm("background"), User: c.PostForm("user"),
+			InputFidelity: c.PostForm("input_fidelity"), Moderation: c.PostForm("moderation"),
 		}
 		if rawN := strings.TrimSpace(c.PostForm("n")); rawN != "" {
 			n, err := strconv.Atoi(rawN)
@@ -73,6 +79,28 @@ func ImageEditHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				return
 			}
 			request.N = n
+		}
+		if raw := strings.TrimSpace(c.PostForm("stream")); raw != "" {
+			stream, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "stream must be a boolean")
+				return
+			}
+			request.Stream = stream
+		}
+		for name, target := range map[string]**int{
+			"partial_images": &request.PartialImages, "output_compression": &request.OutputCompression,
+		} {
+			raw := strings.TrimSpace(c.PostForm(name))
+			if raw == "" {
+				continue
+			}
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", name+" must be an integer")
+				return
+			}
+			*target = &value
 		}
 
 		headers := c.Request.MultipartForm.File["image"]
@@ -111,11 +139,15 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "prompt is required")
 		return
 	}
+	if request.Stream {
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "stream is not supported by the image endpoint")
+		return
+	}
 	if request.Model == "" {
 		request.Model = defaultImageModel(pool)
 	}
 	if request.Model == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "model_not_found", "No image model is available")
+		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No image model is available")
 		return
 	}
 	knownModel, readyModel := modelStatus(pool, request.Model)
@@ -144,15 +176,6 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 	setUnsupportedParameters(c, nonEmptyImageParameters(request))
 
 	prompt := request.Prompt
-	if request.Quality != "" {
-		prompt += "\nQuality: " + request.Quality
-	}
-	if request.Style != "" {
-		prompt += "\nStyle: " + request.Style
-	}
-	if request.Size != "" {
-		prompt += "\nCanvas size: " + request.Size
-	}
 	images := make([]gin.H, 0, request.N)
 	for index := 0; index < request.N && len(images) < request.N; index++ {
 		responseID := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), index)
@@ -168,16 +191,19 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 					files = append(files, gemini.FileData{URL: fileID, FileName: input.filename})
 				}
 				return prompt, files, nil
-			}, nil,
+			}, nil, nil,
 		)
 		c.Set("account_id", accountID)
 		if err != nil {
 			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
-		for _, image := range result.Accumulator.Primary().Images {
+		for _, image := range result.Accumulator.Primary().Media {
 			if len(images) == request.N {
 				break
+			}
+			if image.Type != gemini.MediaGeneratedImage {
+				continue
 			}
 			data, err := result.Client.FetchMedia(c.Request.Context(), image.URL)
 			if err != nil {
@@ -201,8 +227,8 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 
 func defaultImageModel(pool *balancer.AccountPool) string {
 	for _, model := range availableModels(pool) {
-		if model.Default {
-			return model.ID
+		if model.ID == flashImageModelID {
+			return flashImageModelID
 		}
 	}
 	return ""
@@ -218,6 +244,27 @@ func nonEmptyImageParameters(request ImageGenerationRequest) []string {
 	}
 	if request.Style != "" {
 		result = append(result, "style")
+	}
+	if request.PartialImages != nil {
+		result = append(result, "partial_images")
+	}
+	if request.OutputFormat != "" {
+		result = append(result, "output_format")
+	}
+	if request.OutputCompression != nil {
+		result = append(result, "output_compression")
+	}
+	if request.Background != "" {
+		result = append(result, "background")
+	}
+	if request.User != "" {
+		result = append(result, "user")
+	}
+	if request.InputFidelity != "" {
+		result = append(result, "input_fidelity")
+	}
+	if request.Moderation != "" {
+		result = append(result, "moderation")
 	}
 	return result
 }
