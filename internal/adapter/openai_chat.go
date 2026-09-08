@@ -10,6 +10,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 	"github.com/gin-gonic/gin"
 )
 
@@ -174,11 +175,15 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				_ = writeOpenAIStreamError(c.Writer, "output_validation_error", err)
 				return
 			}
-			_ = writeOpenAIFinish(c.Writer, responseID, created, streamModel, result, bridge)
-			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && result.Accumulator.Usage != nil {
-				_ = writeOpenAIUsageChunk(c.Writer, responseID, created, streamModel, result.Accumulator.Usage)
+			if err := writeOpenAIFinish(c.Writer, responseID, created, streamModel, result, bridge); err != nil {
+				return
 			}
-			writeSSEDone(c.Writer)
+			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && result.Accumulator.Usage != nil {
+				if err := writeOpenAIUsageChunk(c.Writer, responseID, created, streamModel, result.Accumulator.Usage); err != nil {
+					return
+				}
+			}
+			_ = writeSSEDone(c.Writer)
 			return
 		}
 
@@ -394,25 +399,21 @@ func writeSSEJSON(w io.Writer, payload interface{}) error {
 	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 		return err
 	}
-	flushWriter(w)
-	return nil
+	return streamio.Flush(w)
 }
 
-func writeSSEDone(w io.Writer) {
-	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-	flushWriter(w)
+// writeSSEDone 写入结束标记并传播发送错误
+func writeSSEDone(w io.Writer) error {
+	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+		return err
+	}
+	return streamio.Flush(w)
 }
 
 func setSSEHeaders(c *gin.Context) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
-}
-
-func flushWriter(w io.Writer) {
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }
 
 func openAIToolBridge(request ChatRequest) (ToolBridge, error) {

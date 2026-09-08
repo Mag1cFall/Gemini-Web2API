@@ -287,7 +287,11 @@ func (p *AccountPool) Usage(ctx context.Context) PoolUsageStatus {
 		wait.Add(1)
 		go func(index int, client *gemini.Client) {
 			defer wait.Done()
-			release := client.AcquireRequest()
+			release, err := client.AcquireRequest(ctx)
+			if err != nil {
+				accounts[index].Error = err.Error()
+				return
+			}
 			defer release()
 			usage, err := client.FetchUsage(ctx)
 			if err != nil {

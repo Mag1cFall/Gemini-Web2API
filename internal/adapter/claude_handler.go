@@ -109,25 +109,37 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			calls = assignToolCallIDs(calls, responseID)
 			processor.SetConversationID(result.ConversationID)
 			if result.Accumulator.Usage != nil {
-				_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventMetadata, Usage: result.Accumulator.Usage})
+				if err := processor.ProcessEvent(gemini.Event{Kind: gemini.EventMetadata, Usage: result.Accumulator.Usage}); err != nil {
+					return
+				}
 			}
 			if includeThoughts && thinkingOpen {
-				_ = processor.FinishThinking(thinkingSignature(responseID, thinkingBlock))
+				if err := processor.FinishThinking(thinkingSignature(responseID, thinkingBlock)); err != nil {
+					return
+				}
 				thinkingOpen = false
 			} else if includeThoughts && projection.bufferThought && primary.Thought != "" {
-				_ = processor.EmitThinking(primary.Thought, thinkingSignature(responseID, 0))
+				if err := processor.EmitThinking(primary.Thought, thinkingSignature(responseID, 0)); err != nil {
+					return
+				}
 			}
 			if projection.bufferText {
 				content = renderCandidateMarkdown(content, primary, projection.textRunes)
 				content = renderCitationMarkdown(content, primary.Citations)
 				if content != "" {
-					_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: content})
+					if err := processor.ProcessEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: content}); err != nil {
+						return
+					}
 				}
 			} else if len(primary.Citations) > 0 {
-				_ = processor.ProcessEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: renderCitationSources(primary.Citations)})
+				if err := processor.ProcessEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: renderCitationSources(primary.Citations)}); err != nil {
+					return
+				}
 			}
 			for _, call := range calls {
-				_ = processor.EmitToolCall(call.ID, call.Name, call.Arguments)
+				if err := processor.EmitToolCall(call.ID, call.Name, call.Arguments); err != nil {
+					return
+				}
 			}
 			stopReason := "end_turn"
 			if len(calls) > 0 {

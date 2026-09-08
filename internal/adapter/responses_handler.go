@@ -11,6 +11,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 	"github.com/gin-gonic/gin"
 )
 
@@ -542,8 +543,7 @@ func (w *responseSequenceWriter) emit(eventType string, payload gin.H) error {
 	if _, err := fmt.Fprintf(w.writer, "event: %s\ndata: %s\n\n", eventType, data); err != nil {
 		return err
 	}
-	flushWriter(w.writer)
-	return nil
+	return streamio.Flush(w.writer)
 }
 
 func (w *responseSequenceWriter) start(responseID string, model string, created int64) error {
@@ -646,24 +646,18 @@ func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *Ev
 		}
 	}
 	output, _ := response["output"].([]gin.H)
-	if projection.bufferText {
+	if projection.bufferText && projection.emittedText {
 		for _, item := range output {
 			if item["type"] != "message" {
 				continue
 			}
 			parts, _ := item["content"].([]gin.H)
 			if len(parts) > 0 {
-				text, _ := parts[0]["text"].(string)
 				markdownOutput := responsesMarkdownOutput(primary)
-				text = renderCandidateMarkdown(primary.Text, markdownOutput, projection.textRunes)
+				text := renderCandidateMarkdown(primary.Text, markdownOutput, projection.textRunes)
 				if text != "" {
-					if projection.emittedText {
-						if err := w.textDelta(text); err != nil {
-							return err
-						}
-					} else {
-						parts[0]["text"] = text
-						parts[0]["annotations"] = responsesCitationAnnotations(text, primary.Citations)
+					if err := w.textDelta(text); err != nil {
+						return err
 					}
 				}
 			}

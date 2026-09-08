@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 )
 
 // StreamingState 保存 Claude SSE 的输出状态
@@ -252,10 +253,7 @@ func (p *StreamProcessor) emit(eventType string, payload interface{}) error {
 	if _, err := fmt.Fprintf(p.writer, "event: %s\ndata: %s\n\n", eventType, data); err != nil {
 		return err
 	}
-	if flusher, ok := p.writer.(interface{ Flush() }); ok {
-		flusher.Flush()
-	}
-	return nil
+	return streamio.Flush(p.writer)
 }
 
 func mapFinishReason(reason gemini.FinishReason) string {

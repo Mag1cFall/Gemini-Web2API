@@ -15,6 +15,7 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
+	"golang.org/x/sync/semaphore"
 )
 
 const (
@@ -32,16 +33,16 @@ type Client struct {
 	saveHistory bool
 	reqID       atomic.Int64
 	contextSize atomic.Int64
-	requestMu   sync.Mutex
+	requestSlot *semaphore.Weighted
 
 	bootstrapMu sync.RWMutex
 	bootstrap   *Bootstrap
 
-	cookieMu  sync.Mutex
-	cookies   map[string]Cookie
-	save      func([]Cookie) error
-	refresh   func(context.Context) ([]Cookie, error)
-	refreshMu sync.Mutex
+	cookieMu    sync.Mutex
+	cookies     map[string]Cookie
+	save        func([]Cookie) error
+	refresh     func(context.Context) ([]Cookie, error)
+	refreshSlot *semaphore.Weighted
 }
 
 // ContextWindow 返回账号套餐对应的网页输入窗口
@@ -50,9 +51,11 @@ func (c *Client) ContextWindow() int {
 }
 
 // AcquireRequest 独占同一账号的完整上游请求链
-func (c *Client) AcquireRequest() func() {
-	c.requestMu.Lock()
-	return c.requestMu.Unlock
+func (c *Client) AcquireRequest(ctx context.Context) (func(), error) {
+	if err := c.requestSlot.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	return func() { c.requestSlot.Release(1) }, nil
 }
 
 // NewClient 创建固定 Cookie、代理和指纹的账号客户端
@@ -75,6 +78,8 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		fingerprint: fingerprint,
 		clientID:    clientID,
 		saveHistory: saveHistory,
+		requestSlot: semaphore.NewWeighted(1),
+		refreshSlot: semaphore.NewWeighted(1),
 		cookies:     make(map[string]Cookie, len(source.Cookies)),
 		save:        source.Save,
 		refresh:     source.Refresh,
@@ -440,9 +445,12 @@ func (c *Client) displayAccountID() string {
 	return c.accountID
 }
 
+// refreshCookies 在请求生命周期内串行更新账户凭证
 func (c *Client) refreshCookies(ctx context.Context) error {
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
+	if err := c.refreshSlot.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.refreshSlot.Release(1)
 	if c.refresh == nil {
 		return fmt.Errorf("account %q has no cookie refresh source", c.displayAccountID())
 	}

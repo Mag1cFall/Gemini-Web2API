@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -80,11 +81,7 @@ func run(args []string) error {
 	)
 	adapter.ConfigureSessionTTL(cfg.SessionTTL)
 
-	server := &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           newRouter(pool, cfg.ProxyAPIKey),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	server := newHTTPServer(ctx, cfg.ListenAddress, newRouter(pool, cfg.ProxyAPIKey))
 	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
@@ -103,6 +100,14 @@ func run(args []string) error {
 		<-shutdownDone
 	}
 	return nil
+}
+
+// newHTTPServer 将活动请求绑定到服务生命周期
+func newHTTPServer(ctx context.Context, address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
 }
 
 // parseFlags 用命令行参数覆盖最常用的启动配置

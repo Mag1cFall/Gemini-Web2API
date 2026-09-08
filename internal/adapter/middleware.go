@@ -16,7 +16,7 @@ import (
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, x-goog-api-key, X-Conversation-ID")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, x-goog-api-key, anthropic-version, X-Conversation-ID")
 		c.Writer.Header().Set("Access-Control-Expose-Headers", "X-Gemini-Web2API-Unsupported-Parameters, X-Conversation-ID, X-Response-ID")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET")
 		if c.Request.Method == http.MethodOptions {

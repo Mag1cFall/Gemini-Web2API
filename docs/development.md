@@ -24,6 +24,7 @@ internal/auth/       账号状态和原子写回
 internal/gemini/     Gemini Web 请求、解码与规范事件
 internal/balancer/   账号能力调度与会话粘连
 internal/adapter/    OpenAI、Claude 和 Gemini 协议投影
+internal/streamio/   HTTP 流刷新与网络错误传播
 ```
 
 ## 修改协议
@@ -36,12 +37,14 @@ internal/adapter/    OpenAI、Claude 和 Gemini 协议投影
 
 ## 验收修改
 
+账户和显式会话的排队等待使用请求 context；服务关闭会取消活动请求。流式写入错误直接终止输出，Responses 的结构化正文和终态复用已验证的响应对象。
+
 代码格式和静态检查使用：
 
 ```powershell
 gofmt -w <修改的 Go 文件>
 go vet ./...
-go test ./...
+go build ./cmd/gemini-web2api
 ```
 
 功能验收直接运行服务，并按修改范围调用真实入口。协议修改至少验证非流式、流式、取消和一次后续请求；认证修改至少验证首次导入、服务重启、Cookie 轮换和固定代理出口；适配器修改使用对应官方 SDK 或主流 Coding Agent 完成一轮真实请求。一次成功的目标场景与一次明确的失败场景足以形成证据，不需要为相同路径堆叠重复脚本。

@@ -159,7 +159,11 @@ func runGeneration(
 	}
 	releaseSession := func() {}
 	if allowNewSession && sessionKey != "" {
-		releaseSession = conversations.acquire(sessionKey)
+		var err error
+		releaseSession, err = conversations.acquire(ctx, sessionKey)
+		if err != nil {
+			return generationResult{}, "", err
+		}
 	}
 	defer releaseSession()
 	newSession := allowNewSession
@@ -237,7 +241,10 @@ func runGenerationWithClient(
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 ) (generationResult, error) {
-	releaseRequest := client.AcquireRequest()
+	releaseRequest, err := client.AcquireRequest(ctx)
+	if err != nil {
+		return generationResult{}, err
+	}
 	defer releaseRequest()
 
 	model, err := client.ResolveModel(requestedModel)

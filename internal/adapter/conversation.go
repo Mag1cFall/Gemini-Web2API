@@ -1,10 +1,12 @@
 package adapter
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"golang.org/x/sync/semaphore"
 )
 
 // conversationRegistry 保存不可变响应快照和线性会话锁
@@ -24,7 +26,7 @@ type conversationEntry struct {
 }
 
 type conversationLock struct {
-	mu   sync.Mutex
+	slot *semaphore.Weighted
 	refs int
 }
 
@@ -77,23 +79,22 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 	}
 }
 
-func (r *conversationRegistry) acquire(key string) func() {
+// acquire 在请求生命周期内取得线性会话的独占权
+func (r *conversationRegistry) acquire(ctx context.Context, key string) (func(), error) {
 	if key == "" {
-		return func() {}
+		return func() {}, nil
 	}
 
 	r.mu.Lock()
 	lock := r.locks[key]
 	if lock == nil {
-		lock = &conversationLock{}
+		lock = &conversationLock{slot: semaphore.NewWeighted(1)}
 		r.locks[key] = lock
 	}
 	lock.refs++
 	r.mu.Unlock()
 
-	lock.mu.Lock()
-	return func() {
-		lock.mu.Unlock()
+	releaseReference := func() {
 		r.mu.Lock()
 		lock.refs--
 		if lock.refs == 0 {
@@ -101,6 +102,14 @@ func (r *conversationRegistry) acquire(key string) func() {
 		}
 		r.mu.Unlock()
 	}
+	if err := lock.slot.Acquire(ctx, 1); err != nil {
+		releaseReference()
+		return nil, err
+	}
+	return func() {
+		lock.slot.Release(1)
+		releaseReference()
+	}, nil
 }
 
 func (r *conversationRegistry) cleanupLocked(now time.Time) {
