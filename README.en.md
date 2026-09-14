@@ -20,19 +20,19 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 
 | Model ID | Name | Input window / capability | Default |
 | --- | --- | ---: | --- |
-| `gemini-3.7-flash` | 3.7 Flash | 32,768-1,048,576 | Yes |
+| `gemini-3.8-flash` | 3.8 Flash | 32,768-1,048,576 | Yes |
 | `gemini-3.1-flash-image` | Nano Banana 2 | Image generation and editing |  |
 | `gemini-3.1-pro` | 3.1 Pro | 32,768-1,048,576 |  |
 | `gemini-3.5-flash-lite` | 3.5 Flash-Lite | 32,768-1,048,576 |  |
 | `gemini-3.6-flash` | 3.6 Flash | 32,768 |  |
 
-At startup, the service merges the live Gemini Web chat model catalog with the `gemini-3.1-flash-image` image capability ID; use `/v1/models` as the runtime source of truth. The image ID works with conversational image requests and `/v1/images/*`. Context windows, model access, and quotas depend on the account's plan and region. A local Gemini tokenizer reports tokens for text input, visible output, and visible reasoning summaries. Account usage is available from `/v1/accounts/usage`.
+At startup, the service merges the live Gemini Web chat model catalog with the `gemini-3.1-flash-image` image capability ID; use `/v1/models` as the runtime source of truth. IDs are derived from official display names, so accounts receiving 3.8 Flash automatically expose `gemini-3.8-flash`. The `available_account_count` and `default` fields describe current account coverage and the default selection. The image ID works with conversational image requests and `/v1/images/*`. Context windows, model access, and quotas depend on the account's plan and region. A local Gemini tokenizer reports tokens for text input, visible output, and visible reasoning summaries. Account usage is available from `/v1/accounts/usage`.
 
 ## Quick Start
 
 ### One-click Windows start
 
-Double-click `start.bat` in the repository root, or invoke it from cmd, PowerShell, or Git Bash. When Go is available, the script builds the current source on every run. Without Go, it uses a Release executable in the same directory. An invocation without arguments starts interactive setup when no account state exists; an invocation with arguments passes them directly to the executable.
+Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases), extract it, and double-click `start.bat`, or invoke it from cmd, PowerShell, or Git Bash. The script starts the executable in the same directory, building from source with Go 1.25.0+ when the executable is absent. An invocation without arguments starts interactive setup when no account state exists; an invocation with arguments passes them directly to the executable.
 
 ```powershell
 .\start.bat

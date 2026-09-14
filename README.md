@@ -20,19 +20,19 @@
 
 | 模型 ID | 名称 | 输入窗口 / 能力 | 默认 |
 | --- | --- | ---: | --- |
-| `gemini-3.7-flash` | 3.7 Flash | 32,768–1,048,576 | 是 |
+| `gemini-3.8-flash` | 3.8 Flash | 32,768–1,048,576 | 是 |
 | `gemini-3.1-flash-image` | Nano Banana 2 | 图片生成与编辑 |  |
 | `gemini-3.1-pro` | 3.1 Pro | 32,768–1,048,576 |  |
 | `gemini-3.5-flash-lite` | 3.5 Flash-Lite | 32,768–1,048,576 |  |
 | `gemini-3.6-flash` | 3.6 Flash | 32,768 |  |
 
-服务启动时将 Gemini Web 动态聊天模型目录与 `gemini-3.1-flash-image` 图片能力 ID 合并，运行后以 `/v1/models` 为准。图片 ID 可用于对话生图和 `/v1/images/*`。上下文窗口、模型权限和配额由 Gemini 网页账号的套餐与地区决定。服务按 Gemini tokenizer 返回文本输入、可见输出和思考摘要的 token usage；账号用量通过 `/v1/accounts/usage` 查看。
+服务启动时将 Gemini Web 动态聊天模型目录与 `gemini-3.1-flash-image` 图片能力 ID 合并，运行后以 `/v1/models` 为准。模型 ID 根据官网显示名称生成，账号收到 3.8 Flash 后自动公开 `gemini-3.8-flash`；各模型的 `available_account_count` 和 `default` 反映当前账号覆盖与默认选择。图片 ID 可用于对话生图和 `/v1/images/*`。上下文窗口、模型权限和配额由 Gemini 网页账号的套餐与地区决定。服务按 Gemini tokenizer 返回文本输入、可见输出和思考摘要的 token usage；账号用量通过 `/v1/accounts/usage` 查看。
 
 ## 快速开始
 
 ### Windows 一键启动
 
-双击根目录的 `start.bat`，或在 cmd、PowerShell、Git Bash 中运行它。有 Go 时脚本每次编译当前源码；没有 Go 时使用同目录的 Release 可执行文件。空参数启动会在缺少账号时进入交互式 setup，带参数调用则将参数直接传给程序。
+从 [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases) 下载 `windows-amd64.zip` 发布包，解压后双击 `start.bat`，或在 cmd、PowerShell、Git Bash 中运行它。脚本优先启动同目录的可执行文件；文件不存在时使用 Go 1.25.0+ 编译源码。空参数启动会在缺少账号时进入交互式 setup，带参数调用则将参数直接传给程序。
 
 ```powershell
 .\start.bat

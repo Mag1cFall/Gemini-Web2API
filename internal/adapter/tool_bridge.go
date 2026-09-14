@@ -41,7 +41,7 @@ type ToolBridge struct {
 func (b ToolBridge) PromptSuffix() (string, error) {
 	var sections []string
 
-	if len(b.Definitions) > 0 {
+	if len(b.Definitions) > 0 && !strings.EqualFold(strings.TrimSpace(b.Choice), "none") {
 		definitions, err := json.Marshal(b.Definitions)
 		if err != nil {
 			return "", fmt.Errorf("编码工具定义失败: %w", err)
@@ -53,8 +53,6 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 		}
 		rule := "需要调用工具时，只输出一个 JSON 对象；无需调用工具时，直接输出正常回答"
 		switch strings.ToLower(choice) {
-		case "none":
-			rule = "不要调用任何工具，直接输出正常回答"
 		case "required", "any":
 			rule = "必须调用一个可用工具，只输出一个 JSON 对象"
 		case "auto":
@@ -95,7 +93,7 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 			sections = append(sections, "本次请求必须使用 Gemini Web 内置图片生成")
 		}
 	} else {
-		sections = append(sections, "本次请求禁止使用代码执行、Google 搜索和图片生成")
+		sections = append(sections, "本次请求根据对话和已有工具结果直接回答；禁止调用函数工具、代码执行、Google 搜索和图片生成")
 	}
 
 	if len(sections) == 0 {

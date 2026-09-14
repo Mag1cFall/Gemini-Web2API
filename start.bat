@@ -4,21 +4,21 @@ setlocal
 cd /d "%~dp0"
 
 set "APP=%CD%\gemini-web2api.exe"
+if exist "%APP%" goto ready
+
 where go >nul 2>nul
 if errorlevel 1 (
-  if not exist "%APP%" (
-    echo Go 1.25 or a published gemini-web2api.exe is required
-    pause
-    exit /b 1
-  )
-) else (
-  go build -o "%APP%" ./cmd/gemini-web2api
-  if errorlevel 1 (
-    pause
-    exit /b 1
-  )
+  echo Go 1.25.0 or a published gemini-web2api.exe is required
+  pause
+  exit /b 1
+)
+go build -o "%APP%" ./cmd/gemini-web2api
+if errorlevel 1 (
+  pause
+  exit /b 1
 )
 
+:ready
 if not "%~1"=="" goto run
 
 set "AUTH_READY="

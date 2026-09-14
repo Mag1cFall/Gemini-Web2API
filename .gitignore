@@ -3,6 +3,8 @@
 *.dll
 *.so
 *.dylib
+/gemini-web2api
+/dist/
 
 # Logs
 *.log

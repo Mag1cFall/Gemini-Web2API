@@ -20,9 +20,6 @@ func (g *modelGuard) Emit(event Event) error {
 		g.emitted = true
 		return g.emit(event)
 	}
-	if isModelGuardContent(event.Kind) {
-		return retryableProtocolError(fmt.Sprintf("gemini response began %s before identifying the actual model for requested model %q", event.Kind, g.expected.ID), nil)
-	}
 	if event.Kind != EventMetadata || event.Metadata == nil || event.Metadata.ModelHash == "" {
 		g.pending = append(g.pending, event)
 		return nil
@@ -40,15 +37,6 @@ func (g *modelGuard) Emit(event Event) error {
 	}
 	g.pending = nil
 	return nil
-}
-
-func isModelGuardContent(kind EventKind) bool {
-	switch kind {
-	case EventText, EventThought, EventCode, EventCitations, EventMedia, EventPhase:
-		return true
-	default:
-		return false
-	}
 }
 
 func (g *modelGuard) Complete() error {

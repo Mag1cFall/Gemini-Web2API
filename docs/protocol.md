@@ -32,7 +32,7 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | 调度 | `internal/balancer` | 模型能力、上下文窗口、冷却与会话粘连 |
 | 适配 | `internal/adapter` | OpenAI、Claude 和 Gemini 请求与事件投影 |
 
-**核心约束：** `internal/gemini` 只产生规范事件；各 API 适配器不直接解析网页帧。
+`internal/gemini` 负责网页帧解码，各 API 适配器消费统一的规范事件。
 
 ## 2. Bootstrap 与模型目录
 
@@ -87,7 +87,7 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | `mode` | 生成请求模型模式 |
 | `default` | 单账号官网默认聊天模型标记 |
 
-公开模型 ID 由显示名称规范化得到，例如 `3.7 Flash` 生成 `gemini-3.7-flash`。解析同时接受公开 ID、显示名称和 hash。目录中不存在的模型返回 `404 model_not_found`。
+公开模型 ID 由显示名称规范化得到，例如 `3.8 Flash` 生成 `gemini-3.8-flash`。官网更新显示名后，启动读取的新目录直接生成对应 ID；各账号可以同时处于不同模型版本。解析同时接受公开 ID、显示名称和 hash。目录中不存在的模型返回 `404 model_not_found`。
 
 
 模型行位于 `payload[15]`。解析器只赋予以下槽位语义，其他槽位保留为官网原始数据：
@@ -112,10 +112,10 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 ]]
 ```
 
-该 fixture 验证数组结构，不表示线上目录持续不变。网关的全局 `default` 按当前 ready 账号的官网默认票数、模型覆盖账号数、公开 ID 字典序生成；它不表示该模型在全部账号中可用。
+网关的全局 `default` 按当前 ready 账号的官网默认票数、模型覆盖账号数、公开 ID 字典序生成。各模型的账号覆盖数由 `available_account_count` 返回。
 
 
-**真实模型校验：** 解码器在输出正文前读取响应中的模型 hash。请求模型与响应模型不一致时终止响应，防止权限变化导致静默降级。
+**真实模型校验：** 模型 hash 可以晚于正文到达，标识确认前的事件按原顺序暂存；匹配后依次发布，不匹配或流结束时仍缺标识则终止响应。
 
 ### 上下文窗口
 
@@ -210,8 +210,6 @@ AES-GCM 使用 32 字节 App-Bound 主密钥和空 AAD。解密结果必须为 1
 实现启动隐藏的独立 Chrome 146，向该进程载入 helper，通过 Chrome `IElevator::DecryptData` 取得 32 字节主密钥。现有 Chrome 进程与 Profile 不参与自动化操作。
 
 ### OAuthMultilogin 实现合同
-
-当前本地证据没有保存包含完整 OAuthMultilogin JSON 的逐字网络响应；以下结构来自已实网通过的实现合同。
 
 ```http
 POST /oauth/multilogin?source=ChromiumAccountReconcilorDice&reuseCookies=0
@@ -542,7 +540,7 @@ FILES = [
 0,1,2,3,4,6,7,10,11,17,18,27,30,41,45,53,59,61,67,68,79,80,91,96
 ```
 
-当前最小 encoder 的集合只删除 `3,4`，纯协议重放仍能成功；因此两槽属于官网 capture 原始值，不属于当前最小必需字段。2026-08-22 的普通文本 capture 曾在生成 header slot 7 使用 `0`，2026-08-24 的搜索与图片 capture 使用 `1`，该槽只记录观测值，不赋予图片开关语义。
+当前最小 encoder 将 `inner[3]` 与 `inner[4]` 编码为 `null`，该载荷已通过纯协议重放。生成 header slot 7 在 2026-08-22 的普通文本 capture 中为 `0`，在 2026-08-24 的搜索与图片 capture 中为 `1`；当前编码值为 `1`。该槽只记录观测值，不赋予图片开关语义。
 
 ### 附件上传
 
@@ -559,11 +557,11 @@ RAW_FILE_BYTES
 --boundary--
 ```
 
-HTTP 200 响应正文整体作为不透明 `UPLOAD_ID` 写入 `f.req[0][3][*][0][0]`。当前本地证据没有保存完整 multipart 逐字抓包；该结构来自已实网通过的实现合同。
+HTTP 200 响应正文整体作为不透明 `UPLOAD_ID` 写入 `f.req[0][3][*][0][0]`。
 
 ### 图片生成
 
-`otAQ7b` 只列出聊天协调模型，没有独立图片行。官网首发生图请求与同日普通搜索请求使用相同 header 和相同 97 槽结构，`inner[49]` 均为 `null`；已观察到的差异只有提示词、会话令牌和请求 UUID。官网在请求前调用过图片额度 RPC `ku4Jyf`，其中出现类别 `14`，但当前纯协议生成不需要该预请求。
+`otAQ7b` 提供聊天协调模型目录。官网首发生图请求与同日普通搜索请求使用相同 header 和相同 97 槽结构，`inner[49]` 均为 `null`；已观察到的差异位于提示词、会话令牌和请求 UUID。官网通过 `ku4Jyf` 查询类别 `14` 的图片额度，生成请求由 `StreamGenerate` 执行。
 
 成功图片响应同时披露三层身份：
 
@@ -590,7 +588,7 @@ candidate[12][7] = [[[
 
 同一 payload 的镜像结构也在 `payload[26][0][0][0][9][0][0][3][18]` 重复 generator tag；当前解码器以候选 rich content 为主读取路径。
 
-网关公开 `gemini-3.1-flash-image` 作为图片能力 ID，内部优先选择可用的官网默认非 Lite Flash，其次选择账号覆盖最广的可用 Flash，并允许已实测成功的 Flash-Lite 作为协调模型。请求提示词会加入明确的生成或编辑语义。该 ID 支持对话入口、Gemini `generateContent` 与 `/v1/images/generations`、`/v1/images/edits`。现场经 3.7 Flash 与 3.5 Flash-Lite 协调时得到 `imagen_default.ultra`，经 3.6 Flash 协调时得到 `imagen_default`；OpenAI Chat/Responses 通过 `provider_model` 返回实际 generator tag。当前只公开一个首发生图能力 ID。`Redo with Pro` 在前端资源中存在，尚未取得其二段请求与响应，不公开 Pro 图片 ID。
+网关公开 `gemini-3.1-flash-image` 作为图片能力 ID，内部优先选择可用的官网默认非 Lite Flash，其次选择账号覆盖最广的可用 Flash，并允许已实测成功的 Flash-Lite 作为协调模型。请求提示词会加入明确的生成或编辑语义。该 ID 支持对话入口、Gemini `generateContent` 与 `/v1/images/generations`、`/v1/images/edits`。现场经 3.7 Flash 与 3.5 Flash-Lite 协调时得到 `imagen_default.ultra`，经 3.6 Flash 协调时得到 `imagen_default`；OpenAI Chat/Responses 通过 `provider_model` 返回实际 generator tag。
 
 图片生成期间还会先出现根级稀疏进度：
 
@@ -598,7 +596,7 @@ candidate[12][7] = [[[
 payload[2]["7"] = [null,["data_analysis_tool",[null,null,"Creating your image",""],STATUS,[null,[null,null,null,null,null,null,null,[20]],false]]]
 ```
 
-类别 `20` 标识图片任务；已由同一抓包及前端状态判断验证 `STATUS=1` 为进行中、`STATUS=4` 为工具成功。媒体 URL 在后续 candidate 帧才出现，因此状态 `4` 仍不能视为图片数据已经可用。
+类别 `20` 标识图片任务，`STATUS=1` 为进行中、`STATUS=4` 为工具成功。图片结果取自后续 candidate 帧中的媒体 URL，消费方应等到该 URL 到达后下载。
 
 ## 5. 流式解码
 
@@ -661,7 +659,7 @@ DECIMAL_LENGTH_HINT
 ]
 ```
 
-模型 hash 必须在正文、思考、代码、引用、媒体或 phase 事件之前出现。hash 与请求模型不一致、内容先于 hash、终止前始终没有 hash，均产生可重试 `502`。
+**模型 hash 可以晚于正文到达。** 标识确认前的事件按原顺序暂存，收到与请求模型匹配的 hash 后依次发布。hash 与请求模型不一致或终止前始终没有 hash，产生可重试 `502`。
 
 ### Code Execution 原始文本
 
@@ -679,7 +677,7 @@ hello
 ```
 ````
 
-事件类型只接受 `code_reference`、`code_stdout`、`code_stderr`。关闭围栏尚未出现时 `complete=false`。代码段会从正文移除并记录其可见文本 rune offset。当前本地证据已保存真实投影结果，尚未保存含这些 marker 的完整官网逐字响应。
+事件类型只接受 `code_reference`、`code_stdout`、`code_stderr`。关闭围栏尚未出现时 `complete=false`。代码段会从正文移除并记录其可见文本 rune offset。
 
 ### Search 与 citations 原始数组
 
@@ -706,7 +704,7 @@ hello
 | source ID | `group[3]` |
 | URL/title/favicon/snippet/publisher | `entry[0/1/2/3/6]` |
 
-当前源码没有解析官网搜索 query、开始、结束或状态。OpenAI Responses 的 `web_search_call` 根据 citations 在适配层合成。
+OpenAI Responses 的 `web_search_call` 由适配层根据 citations 生成，状态为 `completed`。
 
 ### 生成媒体原始数组
 
@@ -776,7 +774,7 @@ https://lh3.googleusercontent.com/gg-dl/OPAQUE
 
 ### 自定义工具
 
-Gemini Web 当前没有已确认的任意 function declaration 载荷槽。适配器把各公开协议的消息序列编码为 `messages` JSON，并在存在自定义工具时追加工具文本契约。适配器解析模型返回的调用对象，再将客户端的 tool result 放入下一轮记录。该桥接运行在网页普通提示词层，工具可靠性取决于模型服从能力。
+适配器把各公开协议的消息序列编码为 `messages` JSON，并在存在自定义工具时追加工具文本契约。适配器解析模型返回的调用对象，再将客户端的 tool result 放入下一轮记录。该桥接运行在网页普通提示词层，工具可靠性取决于模型服从能力。
 
 实际提示形态为：
 
@@ -794,9 +792,9 @@ Gemini Web 当前没有已确认的任意 function declaration 载荷槽。适�
 需要调用工具时，只输出一个 JSON 对象，格式必须为 {"tool_calls":[{"name":"工具名称","arguments":{}}]}
 ```
 
-以上内容整体写入 Gemini Web 的普通提示词槽。`none` 禁止工具调用，`required`/`any` 要求调用任一声明工具，显式函数选择要求调用指定工具。支持 `previous_response_id` 或显式 conversation ID 的客户端会继续同一网页 session；无会话请求默认创建彼此独立的 Temporary Chat。
+以上内容整体写入 Gemini Web 的普通提示词槽。`none` 使用对话与已有工具结果直接作答，提示中省略函数定义和调用格式，显式响应 JSON Schema 继续生效；`required`/`any` 要求调用任一声明工具，显式函数选择要求调用指定工具。支持 `previous_response_id` 或显式 conversation ID 的客户端会继续同一网页 session；无会话请求默认创建彼此独立的 Temporary Chat。
 
-Google Search 与 Code Execution 是网页上游已经执行的内置能力。Responses 的 `web_search_call` 由 citations 合成 completed item；它不冒充官网原始搜索生命周期。Code Execution 当前实测由 3.1 Pro 与 3.6 Flash 执行。
+Google Search 与 Code Execution 由网页上游执行。Responses 的 `web_search_call` 根据 citations 输出 `completed` item；Code Execution 当前实测由 3.1 Pro 与 3.6 Flash 执行。
 
 图片下载完成后，OpenAI Responses 返回：
 
