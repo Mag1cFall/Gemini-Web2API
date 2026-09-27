@@ -409,7 +409,7 @@ func retryableAccountError(err error) bool {
 
 func isOutputMismatchError(err error) bool {
 	var mismatch *outputMismatchError
-	return errors.As(err, &mismatch)
+	return errors.As(err, &mismatch) || errors.Is(err, gemini.ErrUpstreamFailureText)
 }
 
 func isAccountContextError(err error) bool {

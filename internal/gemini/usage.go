@@ -50,6 +50,7 @@ func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
 }
 
 func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, error) {
+	started := time.Now()
 	bootstrap, err := c.bootstrapSnapshot()
 	if err != nil {
 		return UsageInfo{}, err
@@ -68,13 +69,12 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	query.Set("source-path", "/usage")
 	query.Set("bl", bootstrap.BL)
 	query.Set("f.sid", bootstrap.FSID)
-	query.Set("hl", c.fingerprint.languageCode())
+	query.Set("hl", bootstrap.Language)
 	query.Set("_reqid", fmt.Sprintf("%d", c.nextReqID()))
 	query.Set("rt", "c")
 	req.URL.RawQuery = query.Encode()
 	c.applyXHRHeaders(req)
-	genericHeader, _ := json.Marshal([]any{1, nil, nil, nil, nil, nil, nil, nil, []int{4, 5, 6, 8}, nil, nil, nil, nil, nil, nil, nil, c.clientID})
-	req.Header.Set("x-goog-ext-525001261-jspb", string(genericHeader))
+	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.clientID, requestTiming(time.Since(started), time.Now())))
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 
 	resp, err := c.httpClient.Do(req)

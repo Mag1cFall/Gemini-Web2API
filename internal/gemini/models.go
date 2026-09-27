@@ -6,15 +6,17 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Model 表示账号启动时发现的网页模型
 type Model struct {
-	ID           string
-	DisplayName  string
-	Description  string
-	Hash         string
-	Header       string
+	ID          string
+	DisplayName string
+	Description string
+	Hash        string
+	// Tier 为模型行第 4 槽的账号层级，生成请求模型头第 11 项回传该值
+	Tier         int
 	Capabilities []string
 	Mode         int
 	Default      bool
@@ -65,7 +67,7 @@ func modelID(displayName string) string {
 }
 
 // parseModelCatalog 从 otAQ7b 响应生成唯一模型目录
-func parseModelCatalog(payload []any, clientID string) (ModelCatalog, error) {
+func parseModelCatalog(payload []any) (ModelCatalog, error) {
 	rows, ok := arrayAt(payload, 15)
 	if !ok || len(rows) == 0 {
 		return ModelCatalog{}, fmt.Errorf("model catalog payload has no models")
@@ -91,16 +93,13 @@ func parseModelCatalog(payload []any, clientID string) (ModelCatalog, error) {
 		if alternateDefault, ok := boolAt(row, 15); ok {
 			isDefault = isDefault || alternateDefault
 		}
-		header, err := buildModelHeader(hash, mode, ThinkingStandard, clientID)
-		if err != nil {
-			return ModelCatalog{}, fmt.Errorf("encode model header: %w", err)
-		}
+		tier, _ := intAt(row, 4)
 		models = append(models, Model{
 			ID:           modelID(displayName),
 			DisplayName:  displayName,
 			Description:  description,
 			Hash:         hash,
-			Header:       header,
+			Tier:         tier,
 			Capabilities: []string{"generateContent", "streamGenerateContent"},
 			Mode:         mode,
 			Default:      isDefault,
@@ -131,16 +130,39 @@ func parseModelCatalog(payload []any, clientID string) (ModelCatalog, error) {
 	return catalog, nil
 }
 
-// buildModelHeader 构造包含模型与思考策略的请求头
-func buildModelHeader(hash string, mode int, thinkingMode ThinkingMode, clientID string) (string, error) {
+// buildModelHeader 构造包含模型、会话类型、思考策略与请求计时的生成请求头
+func buildModelHeader(model Model, temporaryChat bool, thinkingMode ThinkingMode, clientID string, timing []any) (string, error) {
+	chatMode := 0
+	if temporaryChat {
+		chatMode = 1
+	}
 	header, err := json.Marshal([]any{
-		1, nil, nil, nil, hash, nil, nil, 1,
-		[]int{4, 5, 6, 8, 4, 5, 6, 8}, nil, nil, 2, nil, nil, mode, int(thinkingMode) + 1, clientID,
+		1, nil, nil, nil, model.Hash, nil, nil, chatMode,
+		[]int{4, 5, 6, 8, 16, 4, 5, 6, 8, 16}, nil, nil, model.Tier, nil, nil, model.Mode, int(thinkingMode) + 1, clientID,
+		nil, nil, timing,
 	})
 	if err != nil {
 		return "", err
 	}
 	return string(header), nil
+}
+
+// buildGenericHeader 构造 batchexecute 请求使用的客户端头
+func buildGenericHeader(clientID string, timing []any) string {
+	header, _ := json.Marshal([]any{1, nil, nil, nil, nil, nil, nil, nil, []int{4, 5, 6, 8, 16}, nil, nil, nil, nil, nil, nil, nil, clientID, nil, nil, timing})
+	return string(header)
+}
+
+// requestTiming 返回网页客户端头末尾的耗时与发送时间，秒为零时写空值
+func requestTiming(elapsed time.Duration, now time.Time) []any {
+	var seconds any
+	if whole := int64(elapsed / time.Second); whole > 0 {
+		seconds = whole
+	}
+	return []any{
+		[]any{seconds, int64(elapsed % time.Second)},
+		[]any{now.Unix(), int64(now.Nanosecond()) / int64(time.Millisecond) * int64(time.Millisecond)},
+	}
 }
 
 func arrayAt(values []any, index int) ([]any, bool) {

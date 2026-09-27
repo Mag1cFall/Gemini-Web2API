@@ -291,6 +291,20 @@ func decodeBase64(value string) ([]byte, error) {
 	return nil, fmt.Errorf("base64 数据无效")
 }
 
+// renderTranscript 把消息记录写成网页提示词，单条普通用户消息与官网一样直接发送原文
+func renderTranscript(records []map[string]interface{}) (string, error) {
+	if len(records) == 1 && len(records[0]) == 2 && records[0]["role"] == "user" {
+		if content, ok := records[0]["content"].(string); ok {
+			return content, nil
+		}
+	}
+	transcript, err := json.Marshal(map[string]interface{}{"messages": records})
+	if err != nil {
+		return "", err
+	}
+	return string(transcript), nil
+}
+
 func appendTranscriptObject(builder *strings.Builder, value interface{}) {
 	data, err := json.Marshal(value)
 	if err != nil {

@@ -15,6 +15,7 @@ type ToolDefinition struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
+	Namespace   string          `json:"-"`
 }
 
 // ToolCall 描述模型选择执行的函数工具

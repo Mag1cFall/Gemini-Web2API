@@ -13,7 +13,7 @@ go run ./cmd/gemini-web2api
 
 `start.bat` 优先启动现有可执行文件。修改源码后使用 `go build -o gemini-web2api.exe ./cmd/gemini-web2api` 重建。
 
-程序从当前目录读取 `.env`。`setup` 与日常服务共同使用 `PROXY`；`--proxy` 只覆盖本次账号导入。认证状态保存在 `auth/`，不得提交 Cookie、refresh token、wrapped binding key、请求日志或账号信息。
+程序从当前目录读取 `.env`。`setup` 与日常服务共同使用 `PROXY`；`setup --proxy` 为本次导入的账号指定代理，并写入认证文件作为该账号运行时的固定出口。认证状态保存在 `auth/`，不得提交 Cookie、refresh token、wrapped binding key、请求日志或账号信息。
 
 无需读取本机 Chrome 时，可以用 `setup --cookie "<Cookie value>" --id <name>` 导入请求头中 `Cookie` 字段的一行值。这种状态只使用现有 Cookie，失效后重新导入。
 

@@ -305,7 +305,7 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 		records = append(records, map[string]interface{}{"role": transcriptRole(message.Role), "content": content})
 		files = append(files, attachments...)
 	}
-	transcript, err := json.Marshal(map[string]interface{}{"messages": records})
+	transcript, err := renderTranscript(records)
 	if err != nil {
 		return "", nil, err
 	}
@@ -313,7 +313,7 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 	if err != nil {
 		return "", nil, err
 	}
-	return string(transcript) + suffix, files, nil
+	return transcript + suffix, files, nil
 }
 
 func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {

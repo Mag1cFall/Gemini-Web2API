@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	defaultLanguage   = "en-US,en;q=0.9"
-	defaultTLSProfile = "chrome_146"
+	defaultLanguage = "en-US,en;q=0.9"
+	defaultFamily   = "chrome"
 )
 
 // Fingerprint 表示与账号长期绑定的 HTTP 客户端指纹
@@ -24,26 +24,37 @@ type Fingerprint struct {
 }
 
 type fingerprintPreset struct {
-	profile   profiles.ClientProfile
-	browser   string
-	version   string
-	userAgent string
+	profile        profiles.ClientProfile
+	browser        string
+	version        string
+	userAgent      string
+	secCHUA        string
+	browserHeaders [][2]string
 }
 
+// fingerprintPresets 按浏览器家族保存当前 TLS 模板与请求头身份
 var fingerprintPresets = map[string]fingerprintPreset{
-	"chrome_146": {
-		profile:   profiles.Chrome_146,
+	"chrome": {
+		profile:   profiles.Chrome_152,
 		browser:   "Chrome",
-		version:   "146",
-		userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+		version:   "153",
+		userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+		secCHUA:   `"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"`,
+		browserHeaders: [][2]string{
+			{"x-browser-channel", "stable"},
+			{"x-browser-year", "2026"},
+			{"x-browser-validation", "6sWHb8G4ZxDIKZivt/PCtKQKFEk="},
+			{"x-browser-copyright", "Copyright 2026 Google LLC. All Rights Reserved."},
+		},
 	},
-	"edge_146": {
+	"edge": {
 		profile:   profiles.Chrome_146,
 		browser:   "Edge",
 		version:   "146",
 		userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+		secCHUA:   `"Not=A?Brand";v="99", "Microsoft Edge";v="146", "Chromium";v="146"`,
 	},
-	"firefox_148": {
+	"firefox": {
 		profile:   profiles.Firefox_148,
 		browser:   "Firefox",
 		version:   "148",
@@ -51,16 +62,19 @@ var fingerprintPresets = map[string]fingerprintPreset{
 	},
 }
 
-// normalizeFingerprint 固定 TLS 模板并让 HTTP 身份与模板版本一致
-func normalizeFingerprint(value Fingerprint) (Fingerprint, profiles.ClientProfile, error) {
-	if strings.TrimSpace(value.TLSProfile) == "" {
-		value.TLSProfile = defaultTLSProfile
+// normalizeFingerprint 按浏览器家族选择当前 TLS 模板并让 HTTP 身份与模板一致
+func normalizeFingerprint(value Fingerprint) (Fingerprint, fingerprintPreset, error) {
+	family := strings.ToLower(strings.TrimSpace(value.TLSProfile))
+	family, _, _ = strings.Cut(family, "_")
+	if family == "" {
+		family = defaultFamily
 	}
-	preset, ok := fingerprintPresets[strings.ToLower(strings.TrimSpace(value.TLSProfile))]
+	preset, ok := fingerprintPresets[family]
 	if !ok {
-		return Fingerprint{}, profiles.ClientProfile{}, fmt.Errorf("unsupported TLS profile %q", value.TLSProfile)
+		return Fingerprint{}, fingerprintPreset{}, fmt.Errorf("unsupported TLS profile %q", value.TLSProfile)
 	}
 
+	value.TLSProfile = family
 	value.Browser = preset.browser
 	value.Version = preset.version
 	value.UserAgent = preset.userAgent
@@ -68,7 +82,7 @@ func normalizeFingerprint(value Fingerprint) (Fingerprint, profiles.ClientProfil
 	if strings.TrimSpace(value.Language) == "" {
 		value.Language = defaultLanguage
 	}
-	return value, preset.profile, nil
+	return value, preset, nil
 }
 
 // getClientOptions 返回账号固定的 TLS 客户端配置
@@ -85,28 +99,14 @@ func getClientOptions(profile profiles.ClientProfile, proxyURL string) []tls_cli
 	return options
 }
 
-// languageCode 返回协议载荷使用的语言代码
-func (f Fingerprint) languageCode() string {
-	language := strings.TrimSpace(strings.Split(f.Language, ",")[0])
-	language = strings.TrimSpace(strings.Split(language, ";")[0])
-	if language == "" {
-		return "en"
-	}
-	return language
-}
-
 // clientHints 返回与固定 TLS 模板一致的 Chromium 客户端提示
-func (f Fingerprint) clientHints() map[string]string {
-	if f.Browser == "Firefox" {
+func (p fingerprintPreset) clientHints() map[string]string {
+	if p.secCHUA == "" {
 		return nil
 	}
-	brand := "Google Chrome"
-	if f.Browser == "Edge" {
-		brand = "Microsoft Edge"
-	}
 	return map[string]string{
-		"Sec-CH-UA":          fmt.Sprintf(`"Not=A?Brand";v="99", "%s";v="%s", "Chromium";v="%s"`, brand, f.Version, f.Version),
+		"Sec-CH-UA":          p.secCHUA,
 		"Sec-CH-UA-Mobile":   "?0",
-		"Sec-CH-UA-Platform": fmt.Sprintf("%q", f.Platform),
+		"Sec-CH-UA-Platform": `"Windows"`,
 	}
 }

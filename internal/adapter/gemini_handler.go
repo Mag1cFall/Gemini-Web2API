@@ -273,7 +273,7 @@ func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGene
 		records = append(records, map[string]interface{}{"role": transcriptRole(content.Role), "content": text})
 		files = append(files, attachments...)
 	}
-	transcript, err := json.Marshal(map[string]interface{}{"messages": records})
+	transcript, err := renderTranscript(records)
 	if err != nil {
 		return "", nil, err
 	}
@@ -281,7 +281,7 @@ func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGene
 	if err != nil {
 		return "", nil, err
 	}
-	return string(transcript) + suffix, files, nil
+	return transcript + suffix, files, nil
 }
 
 func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart) (string, []gemini.FileData, error) {

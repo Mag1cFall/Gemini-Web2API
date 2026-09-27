@@ -248,7 +248,7 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	if len(records) == 0 {
 		records = append(records, map[string]interface{}{"role": "user", "content": "Hello"})
 	}
-	transcript, err := json.Marshal(map[string]interface{}{"messages": records})
+	transcript, err := renderTranscript(records)
 	if err != nil {
 		return "", nil, err
 	}
@@ -256,7 +256,7 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	if err != nil {
 		return "", nil, err
 	}
-	return string(transcript) + suffix, files, nil
+	return transcript + suffix, files, nil
 }
 
 func buildOpenAIResponse(responseID string, created int64, result generationResult, bridge ToolBridge, includeThoughts bool) (gin.H, error) {

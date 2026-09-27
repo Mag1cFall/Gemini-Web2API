@@ -68,6 +68,11 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 		tag, _ := stringAt(record, 0)
 		switch tag {
 		case "wrb.fr":
+			if code, ok := bardErrorCode(record); ok {
+				protocolErr = bardProtocolError(code)
+				d.sawError = true
+				return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
+			}
 			encoded, _ := stringAt(record, 2)
 			if encoded == "" {
 				return nil
@@ -117,6 +122,41 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 		return retryableProtocolError("gemini protocol stream ended without terminal frame", nil)
 	}
 	return nil
+}
+
+// bardErrorCode 读取 wrb.fr[5] 中 BardErrorInfo 携带的错误码
+func bardErrorCode(record []any) (int, bool) {
+	status, _ := arrayAt(record, 5)
+	details, _ := arrayAt(status, 2)
+	detail, _ := arrayAt(details, 0)
+	codes, _ := arrayAt(detail, 1)
+	return intAt(codes, 0)
+}
+
+// bardProtocolError 把 BardErrorInfo 错误码映射为公开状态与重试策略
+func bardProtocolError(code int) *ProtocolError {
+	err := &ProtocolError{HTTPStatus: 502, Code: code, Retryable: true}
+	switch code {
+	case 1037:
+		err.HTTPStatus = 429
+		err.Message = "Gemini Web 账号的当前模型用量已达上限 (1037)"
+	case 1050:
+		err.HTTPStatus = 400
+		err.Retryable = false
+		err.Message = "Gemini Web 模型与会话历史不一致 (1050)"
+	case 1052:
+		err.Retryable = false
+		err.Message = "Gemini Web 拒绝了模型请求头，模型暂不可用或协议已变化 (1052)"
+	case 1095:
+		err.HTTPStatus = 429
+		err.Message = "Gemini Web 暂时限制了该账号的请求频率 (1095)"
+	case 1060:
+		err.HTTPStatus = 403
+		err.Message = "Google 暂时限制了当前出口 IP (1060)"
+	default:
+		err.Message = fmt.Sprintf("Gemini Web 返回错误码 %d", code)
+	}
+	return err
 }
 
 func (d *FrameDecoder) reset() {

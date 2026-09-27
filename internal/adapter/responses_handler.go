@@ -32,6 +32,7 @@ type ResponsesTool struct {
 	PartialImages     *int            `json:"partial_images,omitempty"`
 	Quality           string          `json:"quality,omitempty"`
 	Size              string          `json:"size,omitempty"`
+	Tools             []ResponsesTool `json:"tools,omitempty"`
 }
 
 // ResponsesRequest 表示 OpenAI Responses 请求
@@ -263,17 +264,32 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 	imageTool := false
 	codeTool := false
 	webTool := false
+	addFunction := func(tool ResponsesTool, namespace string) error {
+		if tool.Name == "" {
+			return fmt.Errorf("function 工具 name 不能为空")
+		}
+		parameters := tool.Parameters
+		if len(parameters) == 0 {
+			parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: tool.Name, Description: tool.Description, Parameters: parameters, Namespace: namespace})
+		return nil
+	}
 	for _, tool := range request.Tools {
 		switch tool.Type {
 		case "function":
-			if tool.Name == "" {
-				return ToolBridge{}, fmt.Errorf("function 工具 name 不能为空")
+			if err := addFunction(tool, ""); err != nil {
+				return ToolBridge{}, err
 			}
-			parameters := tool.Parameters
-			if len(parameters) == 0 {
-				parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+		case "namespace":
+			for _, inner := range tool.Tools {
+				if inner.Type != "function" {
+					return ToolBridge{}, fmt.Errorf("namespace %q 中不支持的工具 %q", tool.Name, inner.Type)
+				}
+				if err := addFunction(inner, tool.Name); err != nil {
+					return ToolBridge{}, err
+				}
 			}
-			bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: tool.Name, Description: tool.Description, Parameters: parameters})
 		case "code_interpreter":
 			bridge.CodeExecution = true
 			codeTool = true
@@ -388,7 +404,11 @@ func buildResponsesObject(id string, created int64, previousResponseID string, r
 		output = append(output, gin.H{"id": "msg_" + id, "type": "message", "status": "completed", "role": "assistant", "content": parts})
 	}
 	for _, call := range calls {
-		output = append(output, gin.H{"id": "fc_" + call.ID, "type": "function_call", "status": "completed", "call_id": call.ID, "name": call.Name, "arguments": string(call.Arguments)})
+		item := gin.H{"id": "fc_" + call.ID, "type": "function_call", "status": "completed", "call_id": call.ID, "name": call.Name, "arguments": string(call.Arguments)}
+		if namespace := bridge.tool(call.Name).Namespace; namespace != "" {
+			item["namespace"] = namespace
+		}
+		output = append(output, item)
 	}
 	response := responseShell(id, result.Model, created, "completed")
 	if previousResponseID != "" {

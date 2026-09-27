@@ -1,16 +1,19 @@
 package gemini
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 )
 
 // Bootstrap 表示首页和模型目录共同产生的运行参数
 type Bootstrap struct {
-	SNlM0e  string
-	BL      string
-	FSID    string
-	Catalog ModelCatalog
+	SNlM0e string
+	BL     string
+	FSID   string
+	// Language 为首页 TuX5cc 给出的账号界面语言，用于 hl 与生成载荷语言槽
+	Language string
+	Catalog  ModelCatalog
 }
 
 var (
@@ -20,23 +23,31 @@ var (
 	buildPattern  = regexp.MustCompile(`(boq_assistant-bard-web-server_[a-zA-Z0-9._-]+)`)
 	fdrFJePattern = regexp.MustCompile(`"FdrFJe":"([^"]+)"`)
 	fsidPattern   = regexp.MustCompile(`"f\.sid":"([^"]+)"`)
+	localePattern = regexp.MustCompile(`"TuX5cc":"([^"]+)"`)
 )
+
+// errBootstrapSignedOut 表示首页缺少只签发给登录会话的 SNlM0e
+var errBootstrapSignedOut = errors.New("bootstrap is missing SNlM0e")
 
 // parseBootstrap 从当前首页提取所有必需动态参数
 func parseBootstrap(html string) (Bootstrap, error) {
 	bootstrap := Bootstrap{
-		SNlM0e: firstMatch(html, snlM0ePattern),
-		BL:     firstMatch(html, blPattern, dataBLPattern, buildPattern),
-		FSID:   firstMatch(html, fdrFJePattern, fsidPattern),
+		SNlM0e:   firstMatch(html, snlM0ePattern),
+		BL:       firstMatch(html, blPattern, dataBLPattern, buildPattern),
+		FSID:     firstMatch(html, fdrFJePattern, fsidPattern),
+		Language: firstMatch(html, localePattern),
 	}
 	if bootstrap.SNlM0e == "" {
-		return Bootstrap{}, fmt.Errorf("bootstrap is missing SNlM0e")
+		return Bootstrap{}, errBootstrapSignedOut
 	}
 	if bootstrap.BL == "" {
 		return Bootstrap{}, fmt.Errorf("bootstrap is missing bl")
 	}
 	if bootstrap.FSID == "" {
 		return Bootstrap{}, fmt.Errorf("bootstrap is missing FdrFJe/f.sid")
+	}
+	if bootstrap.Language == "" {
+		return Bootstrap{}, fmt.Errorf("bootstrap is missing TuX5cc")
 	}
 	return bootstrap, nil
 }

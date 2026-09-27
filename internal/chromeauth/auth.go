@@ -110,7 +110,7 @@ func ImportCookieHeader(ctx context.Context, options CookieImportOptions) (Impor
 			Source: auth.ImportSource{Browser: "cookie-header"},
 			Fingerprint: gemini.Fingerprint{
 				Browser: "Chrome", Version: "146", Platform: "Windows",
-				UserAgent: userAgent, Language: defaultImportLanguage, TLSProfile: "chrome_146",
+				UserAgent: userAgent, Language: defaultImportLanguage, TLSProfile: "chrome",
 			},
 		},
 	}
@@ -294,7 +294,7 @@ func importAccount(ctx context.Context, account Account, options ImportOptions, 
 			},
 			Fingerprint: gemini.Fingerprint{
 				Browser: "Chrome", Version: "146", Platform: "Windows",
-				UserAgent: userAgent, Language: language, TLSProfile: "chrome_146",
+				UserAgent: userAgent, Language: language, TLSProfile: "chrome",
 			},
 		},
 	}

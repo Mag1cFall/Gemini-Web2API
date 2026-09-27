@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
@@ -29,6 +31,7 @@ type Client struct {
 	httpClient  tls_client.HttpClient
 	accountID   string
 	fingerprint Fingerprint
+	preset      fingerprintPreset
 	clientID    string
 	saveHistory bool
 	reqID       atomic.Int64
@@ -60,11 +63,11 @@ func (c *Client) AcquireRequest(ctx context.Context) (func(), error) {
 
 // NewClient 创建固定 Cookie、代理和指纹的账号客户端
 func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client, error) {
-	fingerprint, profile, err := normalizeFingerprint(source.Fingerprint)
+	fingerprint, preset, err := normalizeFingerprint(source.Fingerprint)
 	if err != nil {
 		return nil, err
 	}
-	httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), getClientOptions(profile, proxyURL)...)
+	httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), getClientOptions(preset.profile, proxyURL)...)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
@@ -76,6 +79,7 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		httpClient:  httpClient,
 		accountID:   source.ID,
 		fingerprint: fingerprint,
+		preset:      preset,
 		clientID:    clientID,
 		saveHistory: saveHistory,
 		requestSlot: semaphore.NewWeighted(1),
@@ -129,7 +133,7 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	}
 	bootstrap, err := parseBootstrap(string(body))
 	if err != nil {
-		if strings.Contains(string(body), "accounts.google.com") {
+		if errors.Is(err, errBootstrapSignedOut) {
 			if allowRefresh && c.refresh != nil {
 				if err := c.refreshCookies(ctx); err != nil {
 					return err
@@ -166,6 +170,7 @@ func (c *Client) Stream(ctx context.Context, request GenerateRequest, emit func(
 }
 
 func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(Event) error, allowRefresh bool) error {
+	started := time.Now()
 	bootstrap, err := c.bootstrapSnapshot()
 	if err != nil {
 		return err
@@ -179,11 +184,11 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if err != nil {
 		return err
 	}
-	modelHeader, err := buildModelHeader(model.Hash, model.Mode, request.ThinkingMode, c.clientID)
+	contextID, err := newContextID()
 	if err != nil {
 		return err
 	}
-	payload, err := buildGeneratePayload(request, c.fingerprint.languageCode(), streamRequestID, !c.saveHistory)
+	payload, err := buildGeneratePayload(request, bootstrap.Language, streamRequestID, contextID, !c.saveHistory, model.Tier)
 	if err != nil {
 		return err
 	}
@@ -196,11 +201,15 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	query := req.URL.Query()
 	query.Set("bl", bootstrap.BL)
 	query.Set("f.sid", bootstrap.FSID)
-	query.Set("hl", c.fingerprint.languageCode())
+	query.Set("hl", bootstrap.Language)
 	query.Set("_reqid", fmt.Sprintf("%d", reqID))
 	query.Set("rt", "c")
 	req.URL.RawQuery = query.Encode()
 	c.applyXHRHeaders(req)
+	modelHeader, err := buildModelHeader(model, !c.saveHistory, request.ThinkingMode, c.clientID, requestTiming(time.Since(started), time.Now()))
+	if err != nil {
+		return err
+	}
 	req.Header.Set("x-goog-ext-525001261-jspb", modelHeader)
 	requestHeader, _ := json.Marshal([]any{streamRequestID, 1})
 	req.Header.Set("x-goog-ext-525005358-jspb", string(requestHeader))
@@ -237,7 +246,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if request.Conversation != nil {
 		decodeState = NewConversationStateFrom(request.Conversation.Snapshot())
 	}
-	guard := newModelGuard(model, emit)
+	guard := newModelGuard(model, newFailureTextGuard(emit).Emit)
 	err = NewFrameDecoder().Decode(resp.Body, decodeState, guard.Emit)
 	if err != nil {
 		if allowRefresh && !guard.Emitted() && isAuthenticationError(err) && c.refresh != nil {
@@ -279,6 +288,7 @@ func (c *Client) ResolveModel(id string) (Model, error) {
 }
 
 func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (ModelCatalog, error) {
+	started := time.Now()
 	encodedRequest, err := json.Marshal([]any{[]any{[]any{"otAQ7b", "[]", nil, "generic"}}})
 	if err != nil {
 		return ModelCatalog{}, err
@@ -293,13 +303,12 @@ func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (Mo
 	query.Set("source-path", "/app")
 	query.Set("bl", bootstrap.BL)
 	query.Set("f.sid", bootstrap.FSID)
-	query.Set("hl", c.fingerprint.languageCode())
+	query.Set("hl", bootstrap.Language)
 	query.Set("_reqid", fmt.Sprintf("%d", c.nextReqID()))
 	query.Set("rt", "c")
 	req.URL.RawQuery = query.Encode()
 	c.applyXHRHeaders(req)
-	genericHeader, _ := json.Marshal([]any{1, nil, nil, nil, nil, nil, nil, nil, []int{4, 5, 6, 8}, nil, nil, nil, nil, nil, nil, nil, c.clientID})
-	req.Header.Set("x-goog-ext-525001261-jspb", string(genericHeader))
+	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.clientID, requestTiming(time.Since(started), time.Now())))
 	req.Header.Set("x-goog-ext-73010989-jspb", "[]")
 
 	resp, err := c.httpClient.Do(req)
@@ -328,7 +337,7 @@ func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (Mo
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
 			return fmt.Errorf("decode model catalog payload: %w", err)
 		}
-		parsed, err := parseModelCatalog(payload, c.clientID)
+		parsed, err := parseModelCatalog(payload)
 		if err != nil {
 			return err
 		}
@@ -363,14 +372,14 @@ func (c *Client) bootstrapSnapshot() (Bootstrap, error) {
 
 func (c *Client) applyNavigationHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", c.fingerprint.UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 	req.Header.Set("Accept-Language", c.fingerprint.Language)
 	req.Header.Set("Sec-Fetch-Dest", "document")
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
 	req.Header.Set("Sec-Fetch-Site", "none")
 	req.Header.Set("Sec-Fetch-User", "?1")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	c.applyClientHints(req)
+	c.applyBrowserHeaders(req, "u=0, i")
 	c.applyHeaderOrder(req, true)
 }
 
@@ -385,14 +394,27 @@ func (c *Client) applyXHRHeaders(req *http.Request) {
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	c.applyClientHints(req)
+	c.applyBrowserHeaders(req, "u=1, i")
 	c.applyHeaderOrder(req, false)
 }
 
 func (c *Client) applyClientHints(req *http.Request) {
-	for name, value := range c.fingerprint.clientHints() {
+	for name, value := range c.preset.clientHints() {
 		req.Header.Set(name, value)
 	}
+}
+
+// applyBrowserHeaders 写入 Chromium 客户端提示、Google 域浏览器标识、压缩与优先级
+func (c *Client) applyBrowserHeaders(req *http.Request, priority string) {
+	c.applyClientHints(req)
+	if len(c.preset.browserHeaders) == 0 {
+		return
+	}
+	for _, header := range c.preset.browserHeaders {
+		req.Header.Set(header[0], header[1])
+	}
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("Priority", priority)
 }
 
 func (c *Client) applyHeaderOrder(req *http.Request, navigation bool) {
@@ -419,23 +441,26 @@ func (c *Client) applyHeaderOrder(req *http.Request, navigation bool) {
 		req.Header[http.HeaderOrderKey] = []string{
 			"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
 			"upgrade-insecure-requests", "user-agent", "accept",
+			"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
 			"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user",
-			"sec-fetch-dest", "accept-encoding", "accept-language", "cookie",
+			"sec-fetch-dest", "accept-encoding", "accept-language", "cookie", "priority",
 		}
 		return
 	}
 	req.Header[http.HeaderOrderKey] = []string{
-		"content-type", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
-		"user-agent", "accept", "origin", "x-goog-ext-525001261-jspb",
-		"x-goog-ext-525005358-jspb", "x-goog-ext-73010989-jspb",
-		"x-goog-ext-73010990-jspb", "x-same-domain", "sec-fetch-site",
-		"sec-fetch-mode", "sec-fetch-dest", "referer", "accept-encoding",
-		"accept-language", "cookie",
+		"content-length", "sec-ch-ua-platform", "x-goog-ext-525001261-jspb",
+		"x-goog-ext-525005358-jspb", "sec-ch-ua", "sec-ch-ua-mobile", "x-same-domain",
+		"x-goog-ext-73010990-jspb", "x-goog-ext-73010989-jspb", "user-agent",
+		"content-type", "accept", "origin",
+		"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+		"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
+		"accept-encoding", "accept-language", "cookie", "priority",
 	}
 }
 
+// nextReqID 按网页客户端规则在四位随机基数上逐次增加 100000
 func (c *Client) nextReqID() int64 {
-	return c.reqID.Add(1)
+	return c.reqID.Add(100000)
 }
 
 func (c *Client) displayAccountID() string {
@@ -504,12 +529,21 @@ func newProtocolID() (string, error) {
 	)), nil
 }
 
+// newContextID 返回生成请求 inner[4] 使用的 32 位十六进制上下文标识
+func newContextID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("create context id: %w", err)
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
 func initialReqID() (int64, error) {
 	var value [4]byte
 	if _, err := rand.Read(value[:]); err != nil {
 		return 0, fmt.Errorf("create initial request id: %w", err)
 	}
-	return int64(100000 + binary.BigEndian.Uint32(value[:])%900000), nil
+	return int64(1000 + binary.BigEndian.Uint32(value[:])%9000), nil
 }
 
 func httpStatusError(status int, operation string) *ProtocolError {

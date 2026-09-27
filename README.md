@@ -12,7 +12,7 @@
 - **流式输出**：文本与思考内容实时增量返回，并映射各协议的思考强度
 - **图片能力**：支持多模态输入、图片生成和图片编辑
 - **多账户负载均衡**：按模型可用性调度多个 Google 账户
-- **HTTP 代理**：支持全局代理和每账号固定代理
+- **代理**：支持 HTTP、HTTPS、SOCKS5 全局代理和每账号固定代理
 - **模型映射**：支持将外部模型名映射到当前 Gemini 模型
 - **纯协议运行**：完成账号配置后无需浏览器和前端脚本
 
@@ -90,6 +90,16 @@ PROXY_API_KEY=
 # HTTP、HTTPS 或 SOCKS5 代理
 PROXY=
 ```
+
+### 代理
+
+`PROXY` 是全局 HTTP、HTTPS 或 SOCKS5 代理，例如 `socks5://127.0.0.1:1080`、`http://127.0.0.1:7890`，setup 与服务请求都经过它。setup 会把本次使用的代理写入账号认证文件 `auth/<账号>/storage-state.json` 的 `geminiWeb2api.proxy`，服务运行时该账号固定使用这个代理，`PROXY` 只作用于没有固定代理的账号。也可以为单个账号指定代理：
+
+```powershell
+.\gemini-web2api.exe setup --email "name@example.com" --proxy "socks5://127.0.0.1:1080"
+```
+
+更换账号代理时，用新代理重新执行 setup，或修改认证文件中的 `geminiWeb2api.proxy`。代理出口需要位于 Gemini 支持的地区。
 
 ## API 端点
 

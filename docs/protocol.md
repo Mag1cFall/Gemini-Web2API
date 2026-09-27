@@ -53,6 +53,7 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | `SNlM0e` | `"SNlM0e":"..."` |
 | `bl` | `"bl":"..."`、`data-bl="..."`、`boq_assistant-bard-web-server_*` |
 | `f.sid` | `"FdrFJe":"..."`、`"f.sid":"..."` |
+| 界面语言 | `"TuX5cc":"..."`，取自账号语言设置，与请求的 `Accept-Language` 无关 |
 
 模型目录与 usage 使用同一种 BatchExecute 信封：
 
@@ -167,7 +168,7 @@ payload = [
 ```text
 Local State ──► App-Bound 主密钥
 Web Data   ──► v20 refresh token + wrapped binding key
-Preferences ─► 账号语言
+Preferences ─► Accept-Language
                        │
                        ▼
 OAuthMultilogin challenge
@@ -184,7 +185,7 @@ OAuthMultilogin directed response
 | `cookies` | 完整 Cookie、域、路径、到期时间与属性 |
 | `geminiWeb2api.id` | 本地账号标识 |
 | `proxy` | 账号固定出口 |
-| `fingerprint` | Chrome 146 请求模板与语言 |
+| `fingerprint` | 浏览器家族、请求模板与语言 |
 | `oauth` | Gaia ID、refresh token、wrapped binding key |
 
 ### Chrome 本地材料
@@ -315,11 +316,11 @@ HPKE 使用 Base mode、DHKEM(X25519, HKDF-SHA256)、HKDF-SHA256、AES-128-GCM�
     "source": {"browser":"chrome","profile":"Profile 1"},
     "fingerprint": {
       "browser": "Chrome",
-      "version": "146",
+      "version": "153",
       "platform": "Windows",
-      "user_agent": "...Chrome/146...",
+      "user_agent": "...Chrome/153...",
       "language": "en-US,en;q=0.9",
-      "tls_profile": "chrome_146"
+      "tls_profile": "chrome"
     },
     "oauth": {
       "gaiaId": "GAIA_ID",
@@ -336,7 +337,7 @@ Cookie Header 导入将普通 Cookie 绑定到 `.google.com`，将 `__Host-*` �
 
 | 请求 | 自动续签条件 |
 | --- | --- |
-| Bootstrap | HTTP `401/403`；首页解析失败且正文包含 `accounts.google.com` |
+| Bootstrap | HTTP `401/403`；首页缺少 `SNlM0e` |
 | 模型目录 | HTTP `401/403` |
 | Usage | HTTP `401/403`；登录页；空或缺失 `jSf9Qc` |
 | StreamGenerate | HTTP `401/403`；首个公开事件前收到帧内 `401/403` |
@@ -359,19 +360,19 @@ POST https://gemini.google.com/_/BardChatUi/data/
 | --- | --- | --- |
 | Query | `bl` | Bootstrap build label |
 | Query | `f.sid` | Bootstrap session ID |
-| Query | `hl` | 账号语言 |
-| Query | `_reqid` | 进程内递增请求号 |
+| Query | `hl` | 首页 `TuX5cc` 界面语言 |
+| Query | `_reqid` | 四位随机基数，每次请求增加 `100000` |
 | Query | `rt=c` | 分块响应模式 |
-| Form | `f.req` | 97 槽生成载荷 |
+| Form | `f.req` | 99 槽生成载荷 |
 | Form | `at` | `SNlM0e` token |
 
 ### 关键 header
 
-2026-08-24 的普通搜索与官网生图请求使用相同结构：
+生成请求与官网 Chrome 153 的 Temporary Chat 请求逐项一致：
 
 ```json
 x-goog-ext-525001261-jspb =
-[1,null,null,null,"MODEL_HASH",null,null,1,[4,5,6,8,4,5,6,8],null,null,2,null,null,MODEL_MODE,THINKING_MODE,"CLIENT_UUID"]
+[1,null,null,null,"MODEL_HASH",null,null,CHAT_MODE,[4,5,6,8,16,4,5,6,8,16],null,null,TIER,null,null,MODEL_MODE,THINKING_MODE,"CLIENT_UUID",null,null,[[ELAPSED_SECONDS,ELAPSED_NANOS],[UNIX_SECONDS,NANOS]]]
 
 x-goog-ext-525005358-jspb =
 ["REQUEST_UUID",1]
@@ -383,11 +384,28 @@ x-goog-ext-73010990-jspb = [0,0,0]
 | Header | 数组位置 | 内容 |
 | --- | ---: | --- |
 | `x-goog-ext-525001261-jspb` | `4` | 模型 hash |
-| 同上 | `7` | 2026-08-24 当前构建观测值 `1` |
+| 同上 | `7` | Temporary Chat `1`，普通会话 `0` |
+| 同上 | `8` | 能力数组 `[4,5,6,8,16,4,5,6,8,16]` |
+| 同上 | `11` | 模型目录行 `row[4]`，免费账号为 `1` |
 | 同上 | `14` | 模型 mode |
 | 同上 | `15` | 思考模式编号 |
 | 同上 | `16` | 协议客户端 UUID |
+| 同上 | `19` | 构造请求耗时与发送时间，秒为零时写 `null`，时间精确到毫秒 |
 | `x-goog-ext-525005358-jspb` | `0` | 本次生成 UUID |
+
+batchexecute 请求使用 `[1,null,null,null,null,null,null,null,[4,5,6,8,16],null,null,null,null,null,null,null,"CLIENT_UUID",null,null,TIMING]`。
+
+Chrome 家族账号使用 tls-client 的 `Chrome_152` TLS 模板与 Chrome 153 请求头；TLS 扩展与签名算法（含 `0x0904`–`0x0906`）、HTTP/2 设置与官网 Chrome 153 首次连接相同。XHR 请求头按官网顺序发送：
+
+```text
+content-length, sec-ch-ua-platform, x-goog-ext-525001261-jspb, x-goog-ext-525005358-jspb,
+sec-ch-ua, sec-ch-ua-mobile, x-same-domain, x-goog-ext-73010990-jspb, x-goog-ext-73010989-jspb,
+user-agent, content-type, accept, origin, x-browser-channel, x-browser-year,
+x-browser-validation, x-browser-copyright, sec-fetch-site, sec-fetch-mode, sec-fetch-dest,
+referer, accept-encoding, accept-language, cookie, priority
+```
+
+`sec-ch-ua` 为 `"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"`，`accept-encoding` 为 `gzip, deflate, br, zstd`，XHR 与首页导航的 `priority` 分别为 `u=1, i`、`u=0, i`。`x-browser-*` 四个头取官网 Chrome 153 的固定值。认证文件 `tls_profile` 按下划线前的浏览器家族选择模板。
 
 `THINKING_MODE` 为标准 `1`、扩展 `2`。每个账号的 `gemini.Client` 在生命周期内保持自己的客户端 UUID；生成 UUID 每次请求重新创建，并同时写入 `f.req[59]`。
 
@@ -396,18 +414,24 @@ x-goog-ext-73010990-jspb = [0,0,0]
 | 槽位 | 内容 |
 | ---: | --- |
 | `0` | 提示词、附件 URL 与文件名 |
-| `1` | 账号语言 |
-| `2` | `CID`、`RID`、`RCID` 会话三元组 |
-| `6` | 普通会话 `[0]`；Temporary Chat `[1]` |
-| `17` | 当前固定值 `[[0]]` |
+| `1` | 首页 `TuX5cc` 界面语言 |
+| `2` | `CID`、`RID`、`RCID` 会话三元组；Temporary Chat 首轮为 `null` |
+| `3` | 官网页面令牌；服务写 `null` |
+| `4` | 每次请求随机的 32 位十六进制上下文 ID |
+| `6` | `[0]` |
+| `17` | `[[0]]` |
+| `30` | `[4,16]` |
+| `41` | `[1]` |
 | `45` | Temporary Chat 标记 `1` |
-| `49` | 当前官网生成请求与最小编码器均为 `null` |
+| `49` | `0` |
 | `59` | 本次生成 UUID |
-| `61` | 当前固定空数组 |
-| `68` | 普通会话 `1`；Temporary Chat `2` |
+| `61` | 空数组 |
+| `67` | Temporary Chat `0` |
+| `68` | `1` |
 | `79` | 模型 mode |
 | `80` | 思考模式编号 |
-| `96` | 普通会话 `1`；Temporary Chat `0` |
+| `96` | 普通会话 `1`；Temporary Chat 首轮在 `TIER` 不小于 `2` 时为 `1`，其余为 `0` |
+| `98` | `1` |
 
 `GEMINI_SAVE_HISTORY=false` 使用 Temporary Chat。显式网页 session 保存三元组并固定到产生它的账号；无 session 请求相互独立。
 
@@ -418,7 +442,7 @@ x-goog-ext-73010990-jspb = [0,0,0]
 ```javascript
 fReq = JSON.stringify([
   null,
-  JSON.stringify(inner97)
+  JSON.stringify(inner99)
 ])
 ```
 
@@ -430,17 +454,17 @@ FILES = [
 ]
 ```
 
-当前最小可用编码器的完整 97 槽形态如下：
+服务编码器的完整 99 槽形态如下：
 
 ```jsonc
 [
   /* 00 */ [PROMPT,0,null,FILES_OR_NULL,null,null,0],
   /* 01 */ [HL],
-  /* 02 */ [CID,RID,RCID,null,null,null,null,null,null,""],
+  /* 02 */ TEMPORARY_FIRST_TURN ? null : [CID,RID,RCID,null,null,null,null,null,null,""],
   /* 03 */ null,
-  /* 04 */ null,
+  /* 04 */ CONTEXT_ID,
   /* 05 */ null,
-  /* 06 */ TEMPORARY_CHAT ? [1] : [0],
+  /* 06 */ [0],
   /* 07 */ 1,
   /* 08 */ null,
   /* 09 */ null,
@@ -464,7 +488,7 @@ FILES = [
   /* 27 */ 1,
   /* 28 */ null,
   /* 29 */ null,
-  /* 30 */ [4],
+  /* 30 */ [4,16],
   /* 31 */ null,
   /* 32 */ null,
   /* 33 */ null,
@@ -483,7 +507,7 @@ FILES = [
   /* 46 */ null,
   /* 47 */ null,
   /* 48 */ null,
-  /* 49 */ null,
+  /* 49 */ 0,
   /* 50 */ null,
   /* 51 */ null,
   /* 52 */ null,
@@ -502,7 +526,7 @@ FILES = [
   /* 65 */ null,
   /* 66 */ null,
   /* 67 */ TEMPORARY_CHAT ? 0 : null,
-  /* 68 */ TEMPORARY_CHAT ? 2 : 1,
+  /* 68 */ 1,
   /* 69 */ null,
   /* 70 */ null,
   /* 71 */ null,
@@ -530,17 +554,19 @@ FILES = [
   /* 93 */ null,
   /* 94 */ null,
   /* 95 */ null,
-  /* 96 */ TEMPORARY_CHAT ? 0 : 1
+  /* 96 */ TEMPORARY_CHAT ? (FIRST_TURN && TIER >= 2 ? 1 : 0) : 1,
+  /* 97 */ null,
+  /* 98 */ 1
 ]
 ```
 
-官网保存样本还在 `inner[3]` 携带 1531 字符的不透明页面令牌，在 `inner[4]` 携带 32 字符上下文 ID。该 Temporary Chat 样本的非 `null` 槽完整集合为：
+官网 Chrome 153 Temporary Chat 首轮的非 `null` 槽完整集合为：
 
 ```text
-0,1,2,3,4,6,7,10,11,17,18,27,30,41,45,53,59,61,67,68,79,80,91,96
+0,1,3,4,6,7,10,11,17,18,27,30,41,45,49,53,59,61,67,68,79,80,91,96,98
 ```
 
-当前最小 encoder 将 `inner[3]` 与 `inner[4]` 编码为 `null`，该载荷已通过纯协议重放。生成 header slot 7 在 2026-08-22 的普通文本 capture 中为 `0`，在 2026-08-24 的搜索与图片 capture 中为 `1`；当前编码值为 `1`。该槽只记录观测值，不赋予图片开关语义。
+`inner[3]` 是页面生成的约 1600 字符不透明令牌，服务写 `null`；带页面令牌的官网载荷与服务载荷在同一批计算题上的固定失败文字比例相同。官网 Temporary Chat 续接请求把 CID 写入 `inner[71]` 且 `inner[2]` 为空，服务续接写完整三元组，以便从任一历史响应分叉。
 
 ### 附件上传
 
@@ -760,6 +786,20 @@ https://lh3.googleusercontent.com/gg-dl/OPAQUE
 | 新会话首次失败 | 换账号后重新建立会话 |
 | 已建立显式会话失败 | 保持账号粘连并返回错误 |
 | 客户端参数错误 | 返回 `4xx`，账号保持健康 |
+| 正文整段为已知固定失败文字 | 按可重试上游错误在首个可见输出前换账号，不计入账号冷却；重试用尽返回 `502` 与失败文字 |
+
+生成流也可能只返回一条 `wrb.fr[2]` 为空的记录，错误码位于 `wrb.fr[5][2][0][1][0]`，形态为 `[8,null,[["type.googleapis.com/assistant.boq.bard.application.BardErrorInfo",[CODE]]]]`。服务按错误码返回：
+
+| 错误码 | 含义 | HTTP | 换账号重试 |
+| ---: | --- | ---: | --- |
+| `1037` | 账号当前模型用量已达上限 | 429 | 是 |
+| `1050` | 模型与会话历史不一致 | 400 | 否 |
+| `1052` | 模型请求头无效或模型暂不可用 | 502 | 否 |
+| `1060` | 出口 IP 被暂时限制 | 403 | 是 |
+| `1095` | 账号请求频率受限，约一分钟后恢复 | 429 | 是 |
+| 其他 | 上游临时错误，例如 `1013` | 502 | 是 |
+
+Gemini Web 也会在 HTTP 200、无错误帧的正常候选中以正文返回固定失败文字，例如 `Sorry, something went wrong. Please try your request again.`、`I encountered an error doing what you asked. Could you try again?`、`I seem to be encountering an error. Can I try something else for you?`、`I'm having a hard time fulfilling your request. Can I help you with something else instead?`。完整列表位于 `internal/gemini/failure_text.go`。主候选正文仍是其中某条文字的前缀时，服务暂缓转发该正文及其后的事件，正文出现前的思考等事件照常转发；正文一旦偏离即按原顺序放行，结束时整段相等则转为上表的上游错误。
 
 ## 6. API 投影
 
@@ -774,7 +814,7 @@ https://lh3.googleusercontent.com/gg-dl/OPAQUE
 
 ### 自定义工具
 
-适配器把各公开协议的消息序列编码为 `messages` JSON，并在存在自定义工具时追加工具文本契约。适配器解析模型返回的调用对象，再将客户端的 tool result 放入下一轮记录。该桥接运行在网页普通提示词层，工具可靠性取决于模型服从能力。
+只有一条纯文本用户消息时，适配器与官网一样直接发送原文；其余消息序列编码为 `messages` JSON。存在自定义工具时再追加工具文本契约。Responses 的 `namespace` 工具组展开为组内函数，模型返回的调用项回填所属 `namespace`。适配器解析模型返回的调用对象，再将客户端的 tool result 放入下一轮记录。该桥接运行在网页普通提示词层，工具可靠性取决于模型服从能力。
 
 实际提示形态为：
 
@@ -852,17 +892,18 @@ total_tokens = prompt_tokens + completion_tokens + thought_tokens
 | API system message | 编码为 `messages` 中的 `system` 记录，仍属于网页普通提示词 |
 | 任意客户端工具声明 | 通过提示协议桥接 |
 | 官网历史 | 默认 Temporary Chat；可配置保存 |
-| 语言与地区 | Profile 语言进入 header、query 与 payload；权限仍由账号决定 |
+| 语言与地区 | Profile 语言进入 `Accept-Language`；`hl` 与 `inner[1]` 使用首页 `TuX5cc` 账号界面语言；权限仍由账号决定 |
 | 前端更新 | 重新采集 Bootstrap、模型目录和最短生成流 |
+| 生成通道 | 部分账号的官网页面改用 `geminiweb-pa.clients6.google.com/v1/processSession` WebChannel：先以空提示词发送同一 99 槽载荷建立会话，再单独发送提示词；这些账号的 `StreamGenerate` 仍可用 |
 
 ### 已知与未知字段
 
 | 状态 | 内容 |
 | --- | --- |
 | 已解码 | `otAQ7b` 关键模型槽、`jSf9Qc` 用量、会话、正文、思考、phase、根级图片进度、代码、citations、生成媒体、generator tag、模型元数据与帧错误 |
-| 当前编码 | 生成 header、最小 97 槽载荷、附件上传、Temporary Chat 与会话三元组 |
+| 当前编码 | 生成 header、99 槽载荷、附件上传、Temporary Chat 与会话三元组 |
 | 仅检查存在 | `token_binding_directed_response` |
-| 视为不透明 | `inner[3]` 页面令牌、`inner[4]` 上下文 ID、上传 HTTP 200 响应正文 |
+| 视为不透明 | `inner[3]` 页面令牌、上传 HTTP 200 响应正文 |
 | 适配层合成 | 自定义工具调用、Responses `web_search_call`、签名与本地 token usage |
 | 尚未解码 | 官网搜索 query/lifecycle、Nano Banana Pro redo、隐藏思考、官方 thought signature、任意 function declaration 槽 |
 
@@ -875,18 +916,18 @@ total_tokens = prompt_tokens + completion_tokens + thought_tokens
 | `jSf9Qc` | 有 | tier、窗口 kind、ratio、seconds/nanos、overage bool | 未出现的 credits 行保持可选 |
 | OAuthMultilogin | 无完整响应 | 两阶段状态、challenge、JWS、Cookie HPKE 合同已实网通过 | challenge/OK 完整 JSON 与 directed response 内部字段 |
 | Multipart upload | 无完整请求 | endpoint、Push-ID、multipart `file`、opaque upload ID 已实网通过 | boundary、逐字响应与服务端 ID 结构 |
-| StreamGenerate | 有 | query、header、官网 raw 与最小 encoder 两套 97 槽 | 大量保留槽尚无语义名 |
+| StreamGenerate | 有 | query、header、官网 raw 与服务 encoder 两套 99 槽 | 大量保留槽尚无语义名 |
 | Thought | 有 | `candidate[37][0][0]` 累计快照 | 隐藏 thought 与官方签名不可观测 |
 | Code Execution | 无完整上游帧 | marker 语法与协议投影已端到端通过 | 当次 upstream 原始帧 |
 | Search | 有 | citations 位于 `candidate[2][1]` | query、开始、结束与 status 不在 raw 中 |
 | Generated media | 有 | `payload[2]["7"]` 进度、`candidate[12][7]`、尺寸、MIME、URL、placeholder、generator tag | Pro redo 与独立 Lite generator |
-| Session/model/error | 有 | CID/RID/RCID、payload 39/42、`er[5]`、`e` | 限额耗尽专用字段 |
+| Session/model/error | 有 | CID/RID/RCID、payload 39/42、`er[5]`、`wrb.fr[5]` BardErrorInfo、`e` | 1037 限额耗尽的原始帧 |
 
 协议变化时按以下顺序定位：
 
 1. **Bootstrap：** 检查 `SNlM0e`、`bl`、`f.sid`
 2. **模型：** 检查 `otAQ7b` 行结构、hash、mode、默认标记
-3. **请求：** 对比 header 数组和 97 槽载荷
+3. **请求：** 对比 header 数组和 99 槽载荷
 4. **响应：** 对比记录边界、候选快照、phase 与模型元数据
 5. **认证：** 检查响应 Cookie、登录跳转与 OAuthMultilogin
 6. **回归：** 使用官方 SDK 或 Coding Agent 完成一次真实流式请求

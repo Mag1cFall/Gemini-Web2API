@@ -12,7 +12,7 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Streaming**: streams text and reasoning deltas with protocol-specific thinking controls
 - **Images**: supports multimodal input, image generation, and image editing
 - **Multi-account balancing**: schedules Google accounts by model availability
-- **HTTP proxy**: supports a global proxy or a fixed per-account proxy
+- **Proxy**: supports a global HTTP, HTTPS or SOCKS5 proxy or a fixed per-account proxy
 - **Model aliases**: maps external model names to current Gemini models
 - **Protocol-only runtime**: runs without a browser or frontend scripts after account setup
 
@@ -90,6 +90,16 @@ PROXY_API_KEY=
 # HTTP, HTTPS, or SOCKS5 proxy
 PROXY=
 ```
+
+### Proxy
+
+`PROXY` is the global HTTP, HTTPS or SOCKS5 proxy, for example `socks5://127.0.0.1:1080` or `http://127.0.0.1:7890`. Both setup and service requests use it. Setup writes the proxy it used into `geminiWeb2api.proxy` of the account auth file `auth/<account>/storage-state.json`; at runtime that account always uses this proxy, and `PROXY` only applies to accounts without a fixed proxy. A proxy can also be set for one account:
+
+```powershell
+.\gemini-web2api.exe setup --email "name@example.com" --proxy "socks5://127.0.0.1:1080"
+```
+
+To change an account's proxy, run setup again with the new proxy or edit `geminiWeb2api.proxy` in its auth file. The proxy exit must be in a region where Gemini is available.
 
 ## API Endpoints
 
