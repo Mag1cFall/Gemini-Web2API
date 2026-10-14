@@ -9,8 +9,9 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **OpenAI compatible**: `/v1/chat/completions`, `/v1/responses`, `/v1/models`
 - **Claude compatible**: `/v1/messages`
 - **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`
-- **Streaming**: streams text and reasoning deltas with protocol-specific thinking controls
-- **Images**: supports multimodal input, image generation, and image editing
+- **Streaming**: streams text and reasoning deltas; each protocol's thinking controls map to the official Low, Medium, and High levels
+- **Images**: supports multimodal input, image generation, and image editing; generated images are returned at full size through the official "Download full size image" request
+- **Official tools**: Create video, Create music, Canvas, Deep Research, Guided Learning, and Task mode are available as separate model IDs
 - **Multi-account balancing**: schedules Google accounts by model availability
 - **Proxy**: supports a global HTTP, HTTPS or SOCKS5 proxy or a fixed per-account proxy
 - **Model aliases**: maps external model names to current Gemini models
@@ -21,12 +22,19 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 | Model ID | Name | Input window / capability | Default |
 | --- | --- | ---: | --- |
 | `gemini-3.8-flash` | 3.8 Flash | 32,768-1,048,576 | Yes |
-| `gemini-3.1-flash-image` | Nano Banana 2 | Image generation and editing |  |
 | `gemini-3.1-pro` | 3.1 Pro | 32,768-1,048,576 |  |
 | `gemini-3.5-flash-lite` | 3.5 Flash-Lite | 32,768-1,048,576 |  |
-| `gemini-3.6-flash` | 3.6 Flash | 32,768 |  |
+| `gemini-4-argon` | 4 Argon | 32,768-1,048,576 |  |
+| `gemini-auto` | Auto | Free accounts |  |
+| `gemini-3.8-flash-task`, `gemini-4-argon-task` | Task | Tasks performed on your behalf |  |
+| `gemini-3.1-flash-image` | Nano Banana 2 | Image generation and editing |  |
+| `gemini-video` | Video | Video generation |  |
+| `gemini-music` | Music | Music generation |  |
+| `gemini-canvas` | Canvas | Documents and code |  |
+| `gemini-deep-research` | Deep Research | Research reports |  |
+| `gemini-guided-learning` | Guided Learning | Guided learning |  |
 
-At startup, the service merges the live Gemini Web chat model catalog with the `gemini-3.1-flash-image` image capability ID; use `/v1/models` as the runtime source of truth. IDs are derived from official display names, so accounts receiving 3.8 Flash automatically expose `gemini-3.8-flash`. The `available_account_count` and `default` fields describe current account coverage and the default selection. The image ID works with conversational image requests and `/v1/images/*`. Context windows, model access, and quotas depend on the account's plan and region. A local Gemini tokenizer reports tokens for text input, visible output, and visible reasoning summaries. Account usage is available from `/v1/accounts/usage`.
+At startup, the service reads each account's live Gemini Web model catalog and official tools; use `/v1/models` as the runtime source of truth. IDs are derived from official display names, so new models appear automatically. The `available_account_count`, `default`, and `thinking_levels` fields describe current account coverage, the default selection, and the available thinking levels. Tool IDs appear only for accounts that have the corresponding official tool and run on that account's official default model. The image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` map to the official 1:1, 9:16, 3:4, 4:3, and 16:9 ratios. For video IDs, `imageConfig.aspectRatio` maps to the official landscape 16:9 and portrait 9:16. Task, Deep Research, and video requests use saved chats, which remain in the account history. Deep Research returns its research plan and progress as reasoning and the finished report as text, which usually takes over ten minutes; set the client request timeout longer than that. Context windows, model access, and quotas depend on the account's plan and region. A local Gemini tokenizer reports tokens for text input, visible output, and visible reasoning summaries. Account usage is available from `/v1/accounts/usage`.
 
 ## Quick Start
 
@@ -75,6 +83,8 @@ Setup creates `auth/<account>/storage-state.json` and verifies the live model ca
 ```
 
 The default auth directory is `auth`, and the default listener is `127.0.0.1:8007`. Linux and macOS can use existing cookies copied in an `auth` directory; device-bound renewal requires setup on the original Windows device.
+
+While running, the service rotates each account's sign-in cookies every 10 minutes, as the Gemini website does. Cookies that change in a response are written back to `auth/<account>/storage-state.json` and reused after a restart. Chrome-imported accounts renew automatically when their session expires.
 
 ### Optional configuration
 
@@ -180,7 +190,7 @@ internal/
 | `PROXY_API_KEY` | Local 2API access key | empty |
 | `PROXY` | Global HTTP, HTTPS, or SOCKS5 proxy | empty |
 | `MODEL_MAPPING` | External model name to current model ID mapping | empty |
-| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure | `2m` |
+| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure; accounts that fail startup initialization retry at this interval | `2m` |
 | `SESSION_TTL` | Lifetime of explicit session state | `30m` |
 | `INIT_TIMEOUT` | Per-account startup timeout | `20s` |
 

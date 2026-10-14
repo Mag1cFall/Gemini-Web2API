@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	userAgent             = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 	defaultImportLanguage = "en-US,en;q=0.9"
 	maxCookieAge          = 400 * 24 * time.Hour
 	storageFileName       = "storage-state.json"
@@ -107,11 +106,8 @@ func ImportCookieHeader(ctx context.Context, options CookieImportOptions) (Impor
 		Origins: []json.RawMessage{},
 		Metadata: auth.Metadata{
 			ID: id, Proxy: proxyURL,
-			Source: auth.ImportSource{Browser: "cookie-header"},
-			Fingerprint: gemini.Fingerprint{
-				Browser: "Chrome", Version: "146", Platform: "Windows",
-				UserAgent: userAgent, Language: defaultImportLanguage, TLSProfile: "chrome",
-			},
+			Source:   auth.ImportSource{Browser: "cookie-header"},
+			Language: defaultImportLanguage,
 		},
 	}
 	absPath, err := filepath.Abs(path)
@@ -292,10 +288,7 @@ func importAccount(ctx context.Context, account Account, options ImportOptions, 
 			OAuth: &auth.OAuthMaterial{
 				GaiaID: gaiaID, RefreshToken: token, WrappedBindingKey: wrappedKey,
 			},
-			Fingerprint: gemini.Fingerprint{
-				Browser: "Chrome", Version: "146", Platform: "Windows",
-				UserAgent: userAgent, Language: language, TLSProfile: "chrome",
-			},
+			Language: language,
 		},
 	}
 	absPath, err := filepath.Abs(path)
@@ -317,7 +310,7 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]Im
 		item := &pending[index]
 		source := gemini.AccountSource{
 			ID: item.state.Metadata.ID, Cookies: stateCookiesToGemini(item.state.Cookies),
-			Fingerprint: item.state.Metadata.Fingerprint,
+			Language: item.state.Metadata.Language,
 		}
 		source.Save = func(cookies []gemini.Cookie) error {
 			item.state.Cookies = geminiCookiesToState(cookies)

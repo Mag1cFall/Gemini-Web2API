@@ -180,15 +180,11 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 	for index := 0; index < request.N && len(images) < request.N; index++ {
 		responseID := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), index)
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, "", false, request.Model, responseID, true, gemini.ThinkingStandard,
-			func(client *gemini.Client, _ bool) (string, []gemini.FileData, error) {
+			c.Request.Context(), pool, "", false, request.Model, responseID, generationMedia{requireImage: true, aspectRatio: request.Size}, gemini.ThinkingLow,
+			func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 				files := make([]gemini.FileData, 0, len(inputs))
 				for _, input := range inputs {
-					fileID, err := client.UploadFile(c.Request.Context(), input.data, input.filename)
-					if err != nil {
-						return "", nil, err
-					}
-					files = append(files, gemini.FileData{URL: fileID, FileName: input.filename})
+					files = append(files, gemini.FileData{Data: input.data, FileName: input.filename})
 				}
 				return prompt, files, nil
 			}, nil, nil,
@@ -205,7 +201,7 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 			if image.Type != gemini.MediaGeneratedImage {
 				continue
 			}
-			data, err := result.Client.FetchMedia(c.Request.Context(), image.URL)
+			data, err := result.Client.FetchMediaContent(c.Request.Context(), image)
 			if err != nil {
 				writeOpenAIError(c, upstreamStatus(err), "image_download_error", err.Error())
 				return
@@ -227,8 +223,8 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 
 func defaultImageModel(pool *balancer.AccountPool) string {
 	for _, model := range availableModels(pool) {
-		if model.ID == flashImageModelID {
-			return flashImageModelID
+		if model.ID == gemini.ImageModelID {
+			return gemini.ImageModelID
 		}
 	}
 	return ""
@@ -236,9 +232,6 @@ func defaultImageModel(pool *balancer.AccountPool) string {
 
 func nonEmptyImageParameters(request ImageGenerationRequest) []string {
 	var result []string
-	if request.Size != "" {
-		result = append(result, "size")
-	}
 	if request.Quality != "" {
 		result = append(result, "quality")
 	}

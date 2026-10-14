@@ -53,10 +53,16 @@ func geminiUpstreamStatus(err error) string {
 	}
 }
 
+// writeOpenAIError 按 OpenAI 错误对象写入 message、type、param、code，请求错误的 type 为 invalid_request_error
 func writeOpenAIError(c *gin.Context, status int, code string, message string) {
+	errorType := "api_error"
+	if status >= 400 && status < 500 && status != http.StatusTooManyRequests {
+		errorType = "invalid_request_error"
+	}
 	c.JSON(status, gin.H{"error": gin.H{
 		"message": message,
-		"type":    "api_error",
+		"type":    errorType,
+		"param":   nil,
 		"code":    code,
 	}})
 }

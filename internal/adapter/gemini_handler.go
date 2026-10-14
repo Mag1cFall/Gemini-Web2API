@@ -123,7 +123,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeGeminiError(c, http.StatusServiceUnavailable, "UNAVAILABLE", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, includeThoughts, err := geminiRequestThinkingSettings(request)
+		thinkingLevel, includeThoughts, err := geminiRequestThinkingSettings(request)
 		if err != nil {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 			return
@@ -144,7 +144,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			projection := newStreamProjection(bridge, includeThoughts)
 			streamModel := config.MapModel(model)
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, false, thinkingMode,
+				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildGeminiPrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
@@ -177,7 +177,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, false, thinkingMode,
+			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildGeminiPrompt(c, client, request, continuation, bridge)
 			}, nil, nil,
@@ -238,7 +238,8 @@ func GeminiListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				"name": "models/" + model.ID, "displayName": model.DisplayName, "description": model.Description,
 				"supportedGenerationMethods": model.Capabilities, "default": model.Default,
 				"inputTokenLimit": model.MaxInputTokenLimit, "minInputTokenLimit": model.MinInputTokenLimit,
-				"availableAccountCount": model.AccountCount,
+				"availableAccountCount": model.AccountCount, "thinking": len(model.ThinkingLevels) > 0,
+				"thinkingLevels": thinkingLevelNames(model.ThinkingLevels),
 			})
 		}
 		c.JSON(http.StatusOK, gin.H{"models": data})
@@ -330,11 +331,7 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 				return "", nil, err
 			}
 			filename := fmt.Sprintf("file_%d%s", time.Now().UnixNano(), mimeTypeToExt(part.FileData.MimeType))
-			fileID, err := client.UploadFile(c.Request.Context(), data, filename)
-			if err != nil {
-				return "", nil, err
-			}
-			files = append(files, gemini.FileData{URL: fileID, FileName: filename})
+			files = append(files, gemini.FileData{Data: data, FileName: filename, MimeType: part.FileData.MimeType})
 			builder.WriteString("[File]")
 		}
 	}
@@ -350,11 +347,19 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 			return bridge, nil, err
 		}
 		for field := range config {
-			if field == "responseMimeType" || field == "responseJsonSchema" || field == "responseSchema" || field == "thinkingConfig" {
+			if field == "responseMimeType" || field == "responseJsonSchema" || field == "responseSchema" || field == "thinkingConfig" || field == "imageConfig" {
 				continue
 			}
 			unsupported = append(unsupported, "generationConfig."+field)
 		}
+		var imageConfig map[string]json.RawMessage
+		_ = json.Unmarshal(config["imageConfig"], &imageConfig)
+		for field := range imageConfig {
+			if field != "aspectRatio" {
+				unsupported = append(unsupported, "generationConfig.imageConfig."+field)
+			}
+		}
+		_ = json.Unmarshal(imageConfig["aspectRatio"], &bridge.AspectRatio)
 		var mime string
 		_ = json.Unmarshal(config["responseMimeType"], &mime)
 		bridge.JSONSchema = config["responseJsonSchema"]

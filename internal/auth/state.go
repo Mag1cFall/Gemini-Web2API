@@ -38,11 +38,11 @@ type OAuthMaterial struct {
 
 // Metadata 保存账号固定身份
 type Metadata struct {
-	ID          string             `json:"id"`
-	Proxy       string             `json:"proxy,omitempty"`
-	Source      ImportSource       `json:"source,omitempty"`
-	Fingerprint gemini.Fingerprint `json:"fingerprint"`
-	OAuth       *OAuthMaterial     `json:"oauth,omitempty"`
+	ID       string         `json:"id"`
+	Proxy    string         `json:"proxy,omitempty"`
+	Source   ImportSource   `json:"source,omitempty"`
+	Language string         `json:"language,omitempty"`
+	OAuth    *OAuthMaterial `json:"oauth,omitempty"`
 }
 
 // StorageState 是兼容 Playwright 的认证状态文件
@@ -200,9 +200,9 @@ func (f *File) Account(globalProxy string) LoadedAccount {
 		proxyURL = strings.TrimSpace(globalProxy)
 	}
 	source := gemini.AccountSource{
-		ID:          f.state.Metadata.ID,
-		Cookies:     toGeminiCookies(f.state.Cookies),
-		Fingerprint: f.state.Metadata.Fingerprint,
+		ID:       f.state.Metadata.ID,
+		Cookies:  toGeminiCookies(f.state.Cookies),
+		Language: f.state.Metadata.Language,
 	}
 	source.Save = f.SaveCookies
 	return LoadedAccount{

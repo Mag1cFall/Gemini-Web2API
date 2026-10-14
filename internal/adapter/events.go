@@ -202,7 +202,7 @@ func inlineResultMedia(ctx context.Context, result *generationResult) error {
 			if media.URL == "" || strings.HasPrefix(media.URL, "data:") {
 				continue
 			}
-			data, err := result.Client.FetchMedia(ctx, media.URL)
+			data, err := result.Client.FetchMediaContent(ctx, *media)
 			if err != nil {
 				return fmt.Errorf("下载生成媒体失败: %w", err)
 			}

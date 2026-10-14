@@ -101,7 +101,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, includeThoughts, err := openAIChatThinkingSettings(request)
+		thinkingLevel, includeThoughts, err := openAIChatThinkingSettings(request)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
@@ -136,7 +136,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			}
 			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, allowNewSession, request.Model, responseID, false, thinkingMode,
+				c.Request.Context(), pool, sessionKey, allowNewSession, request.Model, responseID, generationMedia{}, thinkingLevel,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildOpenAIChatPrompt(c, client, request, continuation, bridge)
 				},
@@ -188,7 +188,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, allowNewSession, request.Model, responseID, false, thinkingMode,
+			c.Request.Context(), pool, sessionKey, allowNewSession, request.Model, responseID, generationMedia{}, thinkingLevel,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildOpenAIChatPrompt(c, client, request, continuation, bridge)
 			},
@@ -388,7 +388,7 @@ func writeOpenAIUsageChunk(w io.Writer, id string, created int64, model string, 
 }
 
 func writeOpenAIStreamError(w io.Writer, code string, err error) error {
-	return writeSSEJSON(w, gin.H{"error": gin.H{"message": err.Error(), "type": "api_error", "code": code}})
+	return writeSSEJSON(w, gin.H{"error": gin.H{"message": err.Error(), "type": "api_error", "param": nil, "code": code}})
 }
 
 func writeSSEJSON(w io.Writer, payload interface{}) error {

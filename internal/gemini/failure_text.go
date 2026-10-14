@@ -15,9 +15,10 @@ var upstreamFailureTexts = []string{
 	"I encountered an error doing what you asked. Could you try again?",
 	"I seem to be encountering an error. Can I try something else for you?",
 	"I'm having a hard time fulfilling your request. Can I help you with something else instead?",
+	"Normally I can help with things like this, but I don't seem to have access to that content. You can try again or ask me for something else.",
 }
 
-// failureTextGuard 在主候选正文仍可能是固定失败文字时暂缓正文事件
+// failureTextGuard 在主候选正文仍可能是固定失败文字时暂缓正文事件，结束时最终正文整段为固定失败文字则返回可重试错误
 type failureTextGuard struct {
 	emit    func(Event) error
 	pending []Event
@@ -31,12 +32,17 @@ func newFailureTextGuard(emit func(Event) error) *failureTextGuard {
 
 // Emit 转发事件，正文可能是固定失败文字时暂存，结束时整段相等则返回可重试错误
 func (g *failureTextGuard) Emit(event Event) error {
+	if event.Kind == EventText && event.Candidate == 0 {
+		g.text = event.Snapshot
+	}
 	if g.decided {
+		if event.Kind == EventDone && isFailureText(g.text) {
+			return failureTextError(g.text)
+		}
 		return g.emit(event)
 	}
 	switch {
 	case event.Kind == EventText && event.Candidate == 0:
-		g.text = event.Snapshot
 		g.pending = append(g.pending, event)
 		if isFailureTextPrefix(g.text) {
 			return nil

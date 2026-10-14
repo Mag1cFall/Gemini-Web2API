@@ -22,7 +22,8 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 )
 
 const (
@@ -132,16 +133,7 @@ func fetchGoogleCookies(ctx context.Context, gaiaID string, token string, wrappe
 }
 
 func newOAuthClient(proxyURL string) (tls_client.HttpClient, error) {
-	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(30),
-		tls_client.WithClientProfile(profiles.Chrome_146),
-		tls_client.WithNotFollowRedirects(),
-		tls_client.WithCookieJar(tls_client.NewCookieJar()),
-	}
-	if proxyURL != "" {
-		options = append(options, tls_client.WithProxyUrl(proxyURL))
-	}
-	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+	client, err := gemini.NewHTTPClient(30, proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("创建 OAuth HTTP 客户端: %w", err)
 	}
@@ -156,7 +148,7 @@ func requestMultilogin(ctx context.Context, client tls_client.HttpClient, gaiaID
 	}
 	request.Header.Set("Authorization", "MultiOAuth "+authorization)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("User-Agent", gemini.ChromeUserAgent)
 	response, err := client.Do(request)
 	if err != nil {
 		return 0, multiloginResponse{}, fmt.Errorf("OAuthMultilogin 请求失败: %w", err)

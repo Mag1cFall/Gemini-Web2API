@@ -96,6 +96,28 @@ func (p *AccountPool) AddUnavailable(accountID string) {
 	})
 }
 
+// Recover 按间隔调用 init 重新初始化启动失败的账号，成功后把客户端加入调度并返回 true，ctx 结束时返回 false
+func (p *AccountPool) Recover(ctx context.Context, client *gemini.Client, accountID string, interval time.Duration, init func(context.Context) error) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+		if init(ctx) != nil {
+			continue
+		}
+		p.mu.Lock()
+		for index := range p.entries {
+			if p.entries[index].AccountID == accountID {
+				p.entries[index].Client, p.entries[index].Unavailable = client, false
+			}
+		}
+		p.mu.Unlock()
+		return true
+	}
+}
+
 // NextForModel 为新请求选择真正支持目标模型的健康账号
 func (p *AccountPool) NextForModel(sessionKey string, modelID string) (*gemini.Client, string) {
 	return p.NextForModelExcluding(sessionKey, modelID, nil)
@@ -333,12 +355,14 @@ func (p *AccountPool) nextAvailable(now time.Time, modelID string, excludedAccou
 		return nil
 	}
 
-	for offset := uint64(0); offset < uint64(len(p.entries)); offset++ {
-		idx := (p.index + offset) % uint64(len(p.entries))
-		entry := &p.entries[idx]
-		if eligible(entry) && entry.Client.ContextWindow() == maxContextWindow {
-			p.index = idx + 1
-			return entry
+	for _, idleOnly := range []bool{true, false} {
+		for offset := uint64(0); offset < uint64(len(p.entries)); offset++ {
+			idx := (p.index + offset) % uint64(len(p.entries))
+			entry := &p.entries[idx]
+			if eligible(entry) && entry.Client.ContextWindow() == maxContextWindow && (!idleOnly || !entry.Client.Busy()) {
+				p.index = idx + 1
+				return entry
+			}
 		}
 	}
 	return nil

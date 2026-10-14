@@ -130,21 +130,47 @@ func readProfileLanguage(chromeRoot string, profile string) (string, error) {
 	if languages == "" {
 		return "", fmt.Errorf("%s Preferences 缺少语言偏好", profile)
 	}
-	parts := strings.Split(languages, ",")
-	header := make([]string, 0, len(parts))
+	return chromeAcceptLanguage(languages), nil
+}
+
+// chromeAcceptLanguage 按 Chrome 规则在地区语言后补充基础语言，并按 0.1 递减写入 q 值
+func chromeAcceptLanguage(preference string) string {
+	parts := strings.Split(preference, ",")
+	languages := make([]string, 0, len(parts)*2)
+	seen := make(map[string]bool, len(parts)*2)
+	add := func(language string) {
+		if language != "" && !seen[language] {
+			seen[language] = true
+			languages = append(languages, language)
+		}
+	}
 	for index, part := range parts {
 		language := strings.TrimSpace(part)
-		if index == 0 {
-			header = append(header, language)
+		add(language)
+		base, _, regional := strings.Cut(language, "-")
+		if !regional {
 			continue
 		}
-		quality := 1 - float64(index)/10
-		if quality < 0.1 {
-			quality = 0.1
+		if index+1 < len(parts) {
+			if next, _, _ := strings.Cut(strings.TrimSpace(parts[index+1]), "-"); next == base {
+				continue
+			}
 		}
-		header = append(header, fmt.Sprintf("%s;q=%.1f", language, quality))
+		add(base)
 	}
-	return strings.Join(header, ","), nil
+	header := make([]string, 0, len(languages))
+	quality := 10
+	for index, language := range languages {
+		if index == 0 {
+			header = append(header, language)
+		} else {
+			header = append(header, fmt.Sprintf("%s;q=0.%d", language, quality))
+		}
+		if quality > 1 {
+			quality--
+		}
+	}
+	return strings.Join(header, ",")
 }
 
 func naturalLess(left string, right string) bool {

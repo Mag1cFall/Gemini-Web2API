@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
+	"time"
 )
 
 // Bootstrap 表示首页和模型目录共同产生的运行参数
@@ -13,17 +15,29 @@ type Bootstrap struct {
 	FSID   string
 	// Language 为首页 TuX5cc 给出的账号界面语言，用于 hl 与生成载荷语言槽
 	Language string
-	Catalog  ModelCatalog
+	// UploadURL、UploadPushID、UploadClientContext 为首页 h1eoVe、qKIAYe、Ylro7b 给出的附件上传端点与请求头
+	UploadURL           string
+	UploadPushID        string
+	UploadClientContext string
+	// UploadTermsWindow 为首页实验 45725082 给出的上传条款确认有效期
+	UploadTermsWindow time.Duration
+	// TermsToken 为首页 thykhd 给出的服务条款同意令牌
+	TermsToken  string
+	Catalog     ModelCatalog
+	Preferences Preferences
 }
 
 var (
 	snlM0ePattern = regexp.MustCompile(`"SNlM0e":"([^"]+)"`)
-	blPattern     = regexp.MustCompile(`"bl":"([^"]+)"`)
-	dataBLPattern = regexp.MustCompile(`data-bl="([^"]+)"`)
-	buildPattern  = regexp.MustCompile(`(boq_assistant-bard-web-server_[a-zA-Z0-9._-]+)`)
+	blPattern     = regexp.MustCompile(`"cfb2h":"([^"]+)"`)
 	fdrFJePattern = regexp.MustCompile(`"FdrFJe":"([^"]+)"`)
 	fsidPattern   = regexp.MustCompile(`"f\.sid":"([^"]+)"`)
 	localePattern = regexp.MustCompile(`"TuX5cc":"([^"]+)"`)
+	uploadPattern = regexp.MustCompile(`"h1eoVe":"([^"]+)"`)
+	pushIDPattern = regexp.MustCompile(`"qKIAYe":"([^"]+)"`)
+	pctxPattern   = regexp.MustCompile(`"Ylro7b":"([^"]+)"`)
+	thykhdPattern = regexp.MustCompile(`"thykhd":"([^"]+)"`)
+	termsPattern  = regexp.MustCompile(`"45725082\\?":(\d+)`)
 )
 
 // errBootstrapSignedOut 表示首页缺少只签发给登录会话的 SNlM0e
@@ -33,15 +47,23 @@ var errBootstrapSignedOut = errors.New("bootstrap is missing SNlM0e")
 func parseBootstrap(html string) (Bootstrap, error) {
 	bootstrap := Bootstrap{
 		SNlM0e:   firstMatch(html, snlM0ePattern),
-		BL:       firstMatch(html, blPattern, dataBLPattern, buildPattern),
+		BL:       firstMatch(html, blPattern),
 		FSID:     firstMatch(html, fdrFJePattern, fsidPattern),
 		Language: firstMatch(html, localePattern),
+
+		UploadURL:           firstMatch(html, uploadPattern),
+		UploadPushID:        firstMatch(html, pushIDPattern),
+		UploadClientContext: firstMatch(html, pctxPattern),
+		TermsToken:          firstMatch(html, thykhdPattern),
+	}
+	if seconds, err := strconv.ParseInt(firstMatch(html, termsPattern), 10, 64); err == nil {
+		bootstrap.UploadTermsWindow = time.Duration(seconds) * time.Second
 	}
 	if bootstrap.SNlM0e == "" {
 		return Bootstrap{}, errBootstrapSignedOut
 	}
 	if bootstrap.BL == "" {
-		return Bootstrap{}, fmt.Errorf("bootstrap is missing bl")
+		return Bootstrap{}, fmt.Errorf("bootstrap is missing cfb2h")
 	}
 	if bootstrap.FSID == "" {
 		return Bootstrap{}, fmt.Errorf("bootstrap is missing FdrFJe/f.sid")

@@ -8,11 +8,10 @@ import (
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
 )
 
 func (c *Client) replaceCookies(cookies []Cookie) error {
-	jar := tls_client.NewCookieJar()
+	jar := newCookieJar()
 	next := make(map[string]Cookie, len(cookies))
 	for _, cookie := range cookies {
 		cookie = normalizeCookie(cookie, "gemini.google.com")
@@ -41,11 +40,12 @@ func (c *Client) absorbResponseCookies(requestURL *url.URL, resp *http.Response)
 	c.cookieMu.Lock()
 	defer c.cookieMu.Unlock()
 	now := time.Now()
+	changed := false
 	for _, source := range setCookies {
 		cookie := Cookie{
 			Name:     source.Name,
 			Value:    source.Value,
-			Domain:   source.Domain,
+			Domain:   cookieDomain(source.Domain),
 			Path:     source.Path,
 			HTTPOnly: source.HttpOnly,
 			Secure:   source.Secure,
@@ -58,13 +58,21 @@ func (c *Client) absorbResponseCookies(requestURL *url.URL, resp *http.Response)
 		}
 		cookie = normalizeCookie(cookie, requestURL.Hostname())
 		key := cookieKey(cookie)
+		existing, exists := c.cookies[key]
 		if source.MaxAge < 0 || cookie.Expires > 0 && cookie.Expires <= now.Unix() {
-			delete(c.cookies, key)
+			if exists {
+				delete(c.cookies, key)
+				changed = true
+			}
+			continue
+		}
+		if exists && existing == cookie {
 			continue
 		}
 		c.cookies[key] = cookie
+		changed = true
 	}
-	if c.save == nil {
+	if !changed || c.save == nil {
 		return nil
 	}
 	if err := c.save(c.cookieSnapshotLocked()); err != nil {
@@ -113,11 +121,25 @@ func cookieURL(cookie Cookie) (*url.URL, error) {
 	return url.Parse("https://" + host + "/")
 }
 
+// cookieDomain 把 Set-Cookie 的 Domain 属性写成带前导点的域 Cookie，没有该属性时保持为空并按 host-only 处理
+func cookieDomain(attribute string) string {
+	attribute = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(attribute)), ".")
+	if attribute == "" {
+		return ""
+	}
+	return "." + attribute
+}
+
+// toHTTPCookie 转换为 jar 使用的 Cookie，只有带前导点的域 Cookie 写入 Domain 属性
 func toHTTPCookie(cookie Cookie) *http.Cookie {
+	domain := ""
+	if strings.HasPrefix(cookie.Domain, ".") {
+		domain = cookie.Domain
+	}
 	result := &http.Cookie{
 		Name:     cookie.Name,
 		Value:    cookie.Value,
-		Domain:   cookie.Domain,
+		Domain:   domain,
 		Path:     cookie.Path,
 		Secure:   cookie.Secure,
 		HttpOnly: cookie.HTTPOnly,

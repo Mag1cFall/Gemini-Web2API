@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,13 +32,13 @@ const (
 type Client struct {
 	httpClient  tls_client.HttpClient
 	accountID   string
-	fingerprint Fingerprint
-	preset      fingerprintPreset
+	language    string
 	clientID    string
 	saveHistory bool
 	reqID       atomic.Int64
 	contextSize atomic.Int64
 	requestSlot *semaphore.Weighted
+	busy        atomic.Int32
 
 	bootstrapMu sync.RWMutex
 	bootstrap   *Bootstrap
@@ -53,21 +55,31 @@ func (c *Client) ContextWindow() int {
 	return int(c.contextSize.Load())
 }
 
-// AcquireRequest 独占同一账号的完整上游请求链
-func (c *Client) AcquireRequest(ctx context.Context) (func(), error) {
-	if err := c.requestSlot.Acquire(ctx, 1); err != nil {
-		return nil, err
-	}
-	return func() { c.requestSlot.Release(1) }, nil
+// Busy 报告账号请求槽是否被占用或有请求在排队
+func (c *Client) Busy() bool {
+	return c.busy.Load() > 0
 }
 
-// NewClient 创建固定 Cookie、代理和指纹的账号客户端
-func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client, error) {
-	fingerprint, preset, err := normalizeFingerprint(source.Fingerprint)
-	if err != nil {
+// AcquireRequest 独占同一账号的完整上游请求链，后台生成的轮询阶段让出
+func (c *Client) AcquireRequest(ctx context.Context) (func(), error) {
+	c.busy.Add(1)
+	if err := c.requestSlot.Acquire(ctx, 1); err != nil {
+		c.busy.Add(-1)
 		return nil, err
 	}
-	httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), getClientOptions(preset.profile, proxyURL)...)
+	return func() {
+		c.requestSlot.Release(1)
+		c.busy.Add(-1)
+	}, nil
+}
+
+// NewClient 创建固定 Cookie、代理和语言的账号客户端
+func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client, error) {
+	language := strings.TrimSpace(source.Language)
+	if language == "" {
+		language = defaultLanguage
+	}
+	httpClient, err := NewHTTPClient(600, proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
@@ -78,8 +90,7 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 	client := &Client{
 		httpClient:  httpClient,
 		accountID:   source.ID,
-		fingerprint: fingerprint,
-		preset:      preset,
+		language:    language,
 		clientID:    clientID,
 		saveHistory: saveHistory,
 		requestSlot: semaphore.NewWeighted(1),
@@ -99,7 +110,7 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 	return client, nil
 }
 
-// Init 刷新首页动态参数并获取当前账号模型目录
+// Init 刷新首页动态参数并获取当前账号模型目录与偏好
 func (c *Client) Init(ctx context.Context) error {
 	return c.init(ctx, true)
 }
@@ -148,6 +159,10 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 		return err
 	}
 	catalog, err := c.fetchModelCatalog(ctx, bootstrap)
+	var preferences Preferences
+	if err == nil {
+		preferences, err = c.fetchPreferences(ctx, bootstrap)
+	}
 	if err != nil {
 		if allowRefresh && isAuthenticationError(err) && c.refresh != nil {
 			if err := c.refreshCookies(ctx); err != nil {
@@ -155,17 +170,23 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 			}
 			return c.init(ctx, false)
 		}
-		return retryableProtocolError(fmt.Sprintf("account %q initialize models: %v", c.displayAccountID(), err), err)
+		return retryableProtocolError(fmt.Sprintf("account %q initialize models and preferences: %v", c.displayAccountID(), err), err)
 	}
 	bootstrap.Catalog = catalog
+	bootstrap.Preferences = preferences
 	c.bootstrapMu.Lock()
 	c.bootstrap = &bootstrap
 	c.bootstrapMu.Unlock()
 	return nil
 }
 
-// Stream 执行一次生成并只输出规范事件
+// Stream 执行一次生成并只输出规范事件，Deep Research 按官网计划、确认与报告流程执行
 func (c *Client) Stream(ctx context.Context, request GenerateRequest, emit func(Event) error) error {
+	if bootstrap, err := c.bootstrapSnapshot(); err == nil {
+		if model, err := c.resolveRequestModel(bootstrap.Catalog, request.Model); err == nil && model.Feature == FeatureDeepResearch {
+			return c.deepResearch(ctx, request, model, emit)
+		}
+	}
 	return c.stream(ctx, request, emit, true)
 }
 
@@ -180,6 +201,37 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		return err
 	}
 	request.ModelMode = model.Mode
+	request.ThinkingLevel = model.thinkingLevel(request.ThinkingLevel)
+	if model.Feature != 0 {
+		request.Feature = model.Feature
+	}
+	request.tools = bootstrap.Catalog.toolSelection(request.Feature, request.AspectRatio)
+	temporaryChat := !c.saveHistory && !request.Feature.savedChatOnly()
+	taskTerms := false
+	if request.Feature == FeatureTask {
+		if taskTerms, err = c.onboardTask(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
+			return err
+		}
+	}
+	request.Files = append([]FileData(nil), request.Files...)
+	if slices.ContainsFunc(request.Files, func(file FileData) bool { return file.URL == "" }) {
+		if err := c.acceptUploadTerms(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
+			return err
+		}
+	}
+	for index := range request.Files {
+		file := &request.Files[index]
+		if file.URL == "" {
+			if *file, err = c.uploadFile(ctx, bootstrap, *file); err != nil {
+				return err
+			}
+		}
+		if file.FileID == "" {
+			if file.FileID, err = c.processFile(ctx, bootstrap, model, request.ThinkingLevel, *file); err != nil {
+				return err
+			}
+		}
+	}
 	streamRequestID, err := newProtocolID()
 	if err != nil {
 		return err
@@ -188,12 +240,15 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if err != nil {
 		return err
 	}
-	payload, err := buildGeneratePayload(request, bootstrap.Language, streamRequestID, contextID, !c.saveHistory, model.Tier)
+	previousMode := request.Conversation.Snapshot().ModelMode
+	if previousMode == 0 {
+		previousMode = selectedModelMode(bootstrap.Catalog, bootstrap.Preferences)
+	}
+	payload, err := buildGeneratePayload(request, bootstrap.Language, bootstrap.Preferences, streamRequestID, contextID, temporaryChat, model.Mode != previousMode)
 	if err != nil {
 		return err
 	}
-	form := url.Values{"f.req": {payload}, "at": {bootstrap.SNlM0e}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointGenerate, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointGenerate, strings.NewReader(protocolForm(payload, bootstrap.SNlM0e)))
 	if err != nil {
 		return err
 	}
@@ -206,7 +261,14 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	query.Set("rt", "c")
 	req.URL.RawQuery = query.Encode()
 	c.applyXHRHeaders(req)
-	modelHeader, err := buildModelHeader(model, !c.saveHistory, request.ThinkingMode, c.clientID, requestTiming(time.Since(started), time.Now()))
+	chatMode := any(0)
+	if temporaryChat {
+		chatMode = 1
+	}
+	if request.researchConfirm {
+		chatMode = nil
+	}
+	modelHeader, err := buildModelHeader(model, chatMode, request.ThinkingLevel, c.clientID, bootstrap.BL, requestTiming(time.Since(started), time.Now()))
 	if err != nil {
 		return err
 	}
@@ -242,12 +304,29 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		}
 		return protocolErr
 	}
-	decodeState := NewConversationState()
-	if request.Conversation != nil {
-		decodeState = NewConversationStateFrom(request.Conversation.Snapshot())
+	if taskTerms {
+		if err := c.acceptTaskTerms(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
+			return err
+		}
 	}
-	guard := newModelGuard(model, newFailureTextGuard(emit).Emit)
-	err = NewFrameDecoder().Decode(resp.Body, decodeState, guard.Emit)
+	next := request.Conversation.Snapshot()
+	next.Turns++
+	decodeState := NewConversationStateFrom(next)
+	withDownload := func(event Event) error {
+		if event.Media != nil && event.Media.download != nil {
+			event.Media.download.mode, event.Media.download.level, event.Media.download.temporaryChat = model.Mode, request.ThinkingLevel, temporaryChat
+		}
+		return emit(event)
+	}
+	guard := newModelGuard(model, newFailureTextGuard(withDownload).Emit)
+	decoder := NewFrameDecoder()
+	err = decoder.Decode(resp.Body, decodeState, guard.Emit)
+	if err == nil && decoder.background && !request.researchConfirm {
+		err = c.awaitTurn(ctx, decodeState, model, request.ThinkingLevel, nil, guard.Emit)
+	}
+	if request.researchPlan != nil {
+		*request.researchPlan = decoder.researchConfirm
+	}
 	if err != nil {
 		if allowRefresh && !guard.Emitted() && isAuthenticationError(err) && c.refresh != nil {
 			if err := c.refreshCookies(ctx); err != nil {
@@ -264,7 +343,9 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		return err
 	}
 	if request.Conversation != nil {
-		request.Conversation.Update(decodeState.Snapshot())
+		snapshot := decodeState.Snapshot()
+		snapshot.ModelMode = model.Mode
+		request.Conversation.Update(snapshot)
 	}
 	return nil
 }
@@ -288,70 +369,100 @@ func (c *Client) ResolveModel(id string) (Model, error) {
 }
 
 func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (ModelCatalog, error) {
-	started := time.Now()
-	encodedRequest, err := json.Marshal([]any{[]any{[]any{"otAQ7b", "[]", nil, "generic"}}})
+	payload, err := c.batchExecute(ctx, bootstrap, batchRequest{rpcID: "otAQ7b", payload: "[]", sourcePath: "/app", language: catalogLanguage, extension: "[]"})
 	if err != nil {
 		return ModelCatalog{}, err
 	}
-	form := url.Values{"f.req": {string(encodedRequest)}, "at": {bootstrap.SNlM0e}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointBatch, strings.NewReader(form.Encode()))
+	return parseModelCatalog(payload)
+}
+
+// batchRequest 是一次 batchexecute RPC 的参数，mode 与 level 为页面当前选中的模型 mode 与思考强度，页面加载阶段为零
+type batchRequest struct {
+	rpcID      string
+	payload    string
+	sourcePath string
+	language   string
+	extension  string
+	mode       int
+	level      ThinkingLevel
+	// conversation 表示会话内请求，请求头第 7 槽写 Temporary Chat 状态，功能编号与生成请求相同重复两遍
+	conversation  bool
+	temporaryChat bool
+	// untimed 表示请求头计时槽的耗时为空数组，页面发送 UVb0T 时如此
+	untimed bool
+}
+
+// batchExecute 以页面 XHR 发送单个 batchexecute RPC 并返回其 payload
+func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call batchRequest) ([]any, error) {
+	started := time.Now()
+	rpcID := call.rpcID
+	encodedRequest, err := pageJSON([]any{[]any{[]any{rpcID, call.payload, nil, "generic"}}})
 	if err != nil {
-		return ModelCatalog{}, err
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointBatch, strings.NewReader(protocolForm(encodedRequest, bootstrap.SNlM0e)))
+	if err != nil {
+		return nil, err
 	}
 	query := req.URL.Query()
-	query.Set("rpcids", "otAQ7b")
-	query.Set("source-path", "/app")
+	query.Set("rpcids", rpcID)
+	query.Set("source-path", call.sourcePath)
 	query.Set("bl", bootstrap.BL)
 	query.Set("f.sid", bootstrap.FSID)
-	query.Set("hl", bootstrap.Language)
+	query.Set("hl", call.language)
 	query.Set("_reqid", fmt.Sprintf("%d", c.nextReqID()))
 	query.Set("rt", "c")
 	req.URL.RawQuery = query.Encode()
 	c.applyXHRHeaders(req)
-	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.clientID, requestTiming(time.Since(started), time.Now())))
-	req.Header.Set("x-goog-ext-73010989-jspb", "[]")
+	timing := requestTiming(time.Since(started), time.Now())
+	if call.untimed {
+		timing[0] = []any{}
+	}
+	header := buildGenericHeader(c.clientID, bootstrap.BL, call.mode, call.level, timing)
+	if call.conversation {
+		header = buildConversationHeader(c.clientID, bootstrap.BL, call.temporaryChat, call.mode, call.level, timing)
+	}
+	req.Header.Set("x-goog-ext-525001261-jspb", header)
+	req.Header.Set("x-goog-ext-73010989-jspb", call.extension)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return ModelCatalog{}, transportProtocolError("model catalog request", err)
+		return nil, transportProtocolError(rpcID+" request", err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
-		return ModelCatalog{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return ModelCatalog{}, httpStatusError(resp.StatusCode, "model catalog")
+		return nil, httpStatusError(resp.StatusCode, rpcID)
 	}
 
-	var catalog ModelCatalog
+	var payload []any
 	found := false
 	err = scanProtocolRecords(resp.Body, func(record []any) error {
 		tag, _ := stringAt(record, 0)
-		rpcID, _ := stringAt(record, 1)
-		if tag != "wrb.fr" || rpcID != "otAQ7b" {
+		recordID, _ := stringAt(record, 1)
+		if tag != "wrb.fr" || recordID != rpcID {
 			return nil
 		}
 		encoded, _ := stringAt(record, 2)
-		var payload []any
+		if encoded == "" {
+			return rpcStatusError(rpcID, record)
+		}
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("decode model catalog payload: %w", err)
+			return fmt.Errorf("decode %s payload: %w", rpcID, err)
 		}
-		parsed, err := parseModelCatalog(payload)
-		if err != nil {
-			return err
-		}
-		catalog = parsed
 		found = true
 		return nil
 	})
 	if err != nil {
-		return ModelCatalog{}, err
+		return nil, err
 	}
 	if !found {
-		return ModelCatalog{}, retryableProtocolError("model catalog response has no otAQ7b payload", nil)
+		return nil, retryableProtocolError(fmt.Sprintf("%s response has no payload", rpcID), nil)
 	}
-	return catalog, nil
+	return payload, nil
 }
 
 func (c *Client) resolveRequestModel(catalog ModelCatalog, id string) (Model, error) {
@@ -370,92 +481,80 @@ func (c *Client) bootstrapSnapshot() (Bootstrap, error) {
 	return *c.bootstrap, nil
 }
 
+// navigationHeaderOrder 是 Chrome 稳定版打开首页的请求头顺序
+var navigationHeaderOrder = []string{
+	"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-full-version", "sec-ch-ua-arch",
+	"sec-ch-ua-platform", "sec-ch-ua-platform-version", "sec-ch-ua-model", "sec-ch-ua-bitness",
+	"sec-ch-ua-wow64", "sec-ch-ua-full-version-list", "sec-ch-ua-form-factors",
+	"upgrade-insecure-requests", "user-agent", "accept",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest",
+	"accept-encoding", "accept-language", "cookie", "priority",
+}
+
+// xhrHeaderOrder 是 Chrome 稳定版页面 batchexecute 与 StreamGenerate XHR 的请求头顺序
+var xhrHeaderOrder = []string{
+	"content-length", "sec-ch-ua-full-version-list", "sec-ch-ua-platform", "sec-ch-ua",
+	"sec-ch-ua-bitness", "sec-ch-ua-model", "sec-ch-ua-mobile", "x-same-domain",
+	"sec-ch-ua-wow64", "sec-ch-ua-form-factors", "sec-ch-ua-arch", "x-goog-ext-73010989-jspb",
+	"sec-ch-ua-full-version", "content-type", "x-goog-ext-525001261-jspb",
+	"x-goog-ext-525005358-jspb", "x-goog-ext-73010990-jspb", "user-agent",
+	"sec-ch-ua-platform-version", "accept", "origin",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
+	"accept-encoding", "accept-language", "cookie", "priority",
+}
+
+// pseudoHeaderOrder 是 Chrome 的 HTTP/2 伪头顺序
+var pseudoHeaderOrder = []string{":method", ":authority", ":scheme", ":path"}
+
 func (c *Client) applyNavigationHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", c.fingerprint.UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Set("Accept-Language", c.fingerprint.Language)
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	c.applyBrowserHeaders(req, "u=0, i")
-	c.applyHeaderOrder(req, true)
+	applyChromeHeaders(req, c.language, true)
+	req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("sec-fetch-dest", "document")
+	req.Header.Set("sec-fetch-mode", "navigate")
+	req.Header.Set("sec-fetch-site", "none")
+	req.Header.Set("sec-fetch-user", "?1")
+	req.Header.Set("upgrade-insecure-requests", "1")
+	req.Header.Set("priority", "u=0, i")
+	req.Header[http.HeaderOrderKey] = navigationHeaderOrder
+	req.Header[http.PHeaderOrderKey] = pseudoHeaderOrder
 }
 
 func (c *Client) applyXHRHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", c.fingerprint.UserAgent)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", c.fingerprint.Language)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	req.Header.Set("Origin", "https://gemini.google.com")
-	req.Header.Set("Referer", "https://gemini.google.com/")
-	req.Header.Set("X-Same-Domain", "1")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	c.applyBrowserHeaders(req, "u=1, i")
-	c.applyHeaderOrder(req, false)
+	applyChromeHeaders(req, c.language, true)
+	req.Header.Set("accept", "*/*")
+	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("content-type", "application/x-www-form-urlencoded;charset=UTF-8")
+	req.Header.Set("origin", "https://gemini.google.com")
+	req.Header.Set("referer", "https://gemini.google.com/")
+	req.Header.Set("x-same-domain", "1")
+	req.Header.Set("sec-fetch-dest", "empty")
+	req.Header.Set("sec-fetch-mode", "cors")
+	req.Header.Set("sec-fetch-site", "same-origin")
+	req.Header.Set("priority", "u=1, i")
+	req.Header[http.HeaderOrderKey] = xhrHeaderOrder
+	req.Header[http.PHeaderOrderKey] = pseudoHeaderOrder
 }
 
-func (c *Client) applyClientHints(req *http.Request) {
-	for name, value := range c.preset.clientHints() {
-		req.Header.Set(name, value)
+// formEscaper 把 url.QueryEscape 的结果改写为浏览器 encodeURIComponent 的形式
+var formEscaper = strings.NewReplacer("+", "%20", "%21", "!", "%27", "'", "%28", "(", "%29", ")", "%2A", "*")
+
+// pageJSON 按页面 JSON.stringify 编码，HTML 字符保持原样
+func pageJSON(value any) (string, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return "", err
 	}
+	return strings.TrimSuffix(buffer.String(), "\n"), nil
 }
 
-// applyBrowserHeaders 写入 Chromium 客户端提示、Google 域浏览器标识、压缩与优先级
-func (c *Client) applyBrowserHeaders(req *http.Request, priority string) {
-	c.applyClientHints(req)
-	if len(c.preset.browserHeaders) == 0 {
-		return
-	}
-	for _, header := range c.preset.browserHeaders {
-		req.Header.Set(header[0], header[1])
-	}
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-	req.Header.Set("Priority", priority)
-}
-
-func (c *Client) applyHeaderOrder(req *http.Request, navigation bool) {
-	req.Header[http.PHeaderOrderKey] = []string{":method", ":authority", ":scheme", ":path"}
-	if c.fingerprint.Browser == "Firefox" {
-		if navigation {
-			req.Header[http.HeaderOrderKey] = []string{
-				"user-agent", "accept", "accept-language", "accept-encoding",
-				"upgrade-insecure-requests", "sec-fetch-dest", "sec-fetch-mode",
-				"sec-fetch-site", "sec-fetch-user", "cookie",
-			}
-			return
-		}
-		req.Header[http.HeaderOrderKey] = []string{
-			"user-agent", "accept", "accept-language", "accept-encoding",
-			"content-type", "origin", "x-goog-ext-525001261-jspb",
-			"x-goog-ext-525005358-jspb", "x-goog-ext-73010989-jspb",
-			"x-goog-ext-73010990-jspb", "x-same-domain", "sec-fetch-dest",
-			"sec-fetch-mode", "sec-fetch-site", "referer", "cookie",
-		}
-		return
-	}
-	if navigation {
-		req.Header[http.HeaderOrderKey] = []string{
-			"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
-			"upgrade-insecure-requests", "user-agent", "accept",
-			"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
-			"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user",
-			"sec-fetch-dest", "accept-encoding", "accept-language", "cookie", "priority",
-		}
-		return
-	}
-	req.Header[http.HeaderOrderKey] = []string{
-		"content-length", "sec-ch-ua-platform", "x-goog-ext-525001261-jspb",
-		"x-goog-ext-525005358-jspb", "sec-ch-ua", "sec-ch-ua-mobile", "x-same-domain",
-		"x-goog-ext-73010990-jspb", "x-goog-ext-73010989-jspb", "user-agent",
-		"content-type", "accept", "origin",
-		"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
-		"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
-		"accept-encoding", "accept-language", "cookie", "priority",
-	}
+// protocolForm 按网页 XHR 的字段顺序与编码构造 f.req、at 表单，末尾带 &
+func protocolForm(request string, token string) string {
+	return "f.req=" + formEscaper.Replace(url.QueryEscape(request)) + "&at=" + formEscaper.Replace(url.QueryEscape(token)) + "&"
 }
 
 // nextReqID 按网页客户端规则在四位随机基数上逐次增加 100000
@@ -560,6 +659,15 @@ func transportProtocolError(operation string, err error) error {
 		return err
 	}
 	return retryableProtocolError(fmt.Sprintf("gemini %s: %v", operation, err), err)
+}
+
+// rpcStatusError 把没有载荷的 wrb.fr 记录第 5 项的 RPC 状态转为协议错误，会话失效时状态为 7（PERMISSION_DENIED），按 HTTP 403 处理
+func rpcStatusError(rpcID string, record []any) *ProtocolError {
+	status, _ := arrayAt(record, 5)
+	if code, _ := intAt(status, 0); code == 7 {
+		return httpStatusError(http.StatusForbidden, rpcID)
+	}
+	return retryableProtocolError(fmt.Sprintf("%s returned no payload, status %v", rpcID, status), nil)
 }
 
 func retryableProtocolError(message string, cause error) *ProtocolError {

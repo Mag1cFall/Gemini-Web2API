@@ -76,7 +76,7 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, includeThoughts, err := responsesThinkingSettings(request)
+		thinkingLevel, includeThoughts, err := responsesThinkingSettings(request)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
@@ -106,7 +106,7 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			}
 			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, bridge.RequireImageGeneration, thinkingMode,
+				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{requireImage: bridge.RequireImageGeneration, aspectRatio: bridge.AspectRatio}, thinkingLevel,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildResponsesPrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
@@ -149,7 +149,7 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, bridge.RequireImageGeneration, thinkingMode,
+			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{requireImage: bridge.RequireImageGeneration, aspectRatio: bridge.AspectRatio}, thinkingLevel,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildResponsesPrompt(c, client, request, continuation, bridge)
 			}, nil, nil,
@@ -299,6 +299,7 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 		case "image_generation":
 			imageTool = true
 			bridge.ImageGeneration = true
+			bridge.AspectRatio = tool.Size
 		default:
 			return ToolBridge{}, fmt.Errorf("不支持的 Responses 工具 %q", tool.Type)
 		}
@@ -915,9 +916,6 @@ func unsupportedResponsesParameters(request ResponsesRequest) []string {
 		}
 		if tool.Quality != "" {
 			fields = append(fields, prefix+"quality")
-		}
-		if tool.Size != "" {
-			fields = append(fields, prefix+"size")
 		}
 	}
 	return fields

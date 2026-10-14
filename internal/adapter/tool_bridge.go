@@ -36,6 +36,8 @@ type ToolBridge struct {
 	RequireCodeExecution   bool
 	RequireWebSearch       bool
 	RequireImageGeneration bool
+	// AspectRatio 为生图请求的宽高比
+	AspectRatio string
 }
 
 // PromptSuffix 返回追加到用户提示词的协议约束

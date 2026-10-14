@@ -79,7 +79,7 @@ func ListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		data := make([]gin.H, 0, len(models))
 		for _, model := range models {
 			owner := "google"
-			if model.ID == flashImageModelID {
+			if model.Feature != 0 {
 				owner = "gemini-web2api"
 			}
 			data = append(data, gin.H{
@@ -87,10 +87,20 @@ func ListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				"display_name": model.DisplayName, "description": model.Description,
 				"context_window": model.MaxInputTokenLimit, "min_context_window": model.MinInputTokenLimit,
 				"max_context_window": model.MaxInputTokenLimit, "available_account_count": model.AccountCount,
+				"thinking_levels": thinkingLevelNames(model.ThinkingLevels),
 			})
 		}
 		c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 	}
+}
+
+// thinkingLevelNames 返回模型可选思考强度的小写名称
+func thinkingLevelNames(levels []gemini.ThinkingLevel) []string {
+	names := make([]string, 0, len(levels))
+	for _, level := range levels {
+		names = append(names, level.String())
+	}
+	return names
 }
 
 func writeAuthError(c *gin.Context) {
@@ -111,24 +121,7 @@ type availableModel struct {
 	AccountCount       int
 }
 
-const flashImageModelID = "gemini-3.1-flash-image"
-
 func availableModels(pool *balancer.AccountPool) []availableModel {
-	models := discoveredModels(pool)
-	if provider, ok := imageProviderModel(models, nil); ok {
-		imageModel := provider
-		imageModel.ID = flashImageModelID
-		imageModel.DisplayName = "Nano Banana 2"
-		imageModel.Description = "Gemini Web image generation and editing"
-		imageModel.Default = false
-		imageModel.Capabilities = []string{"generateContent", "streamGenerateContent"}
-		models = append(models, imageModel)
-	}
-	sortAvailableModels(models)
-	return models
-}
-
-func discoveredModels(pool *balancer.AccountPool) []availableModel {
 	byID := make(map[string]availableModel)
 	defaultVotes := make(map[string]int)
 	accountCounts := make(map[string]int)
@@ -175,45 +168,4 @@ func sortAvailableModels(models []availableModel) {
 		}
 		return models[left].ID < models[right].ID
 	})
-}
-
-func imageProviderModel(models []availableModel, ready func(string) bool) (availableModel, bool) {
-	var selected availableModel
-	selectedRank := 0
-	found := false
-	for _, model := range models {
-		id := strings.ToLower(model.ID)
-		if !strings.Contains(id, "flash") || ready != nil && !ready(model.ID) {
-			continue
-		}
-		rank := 1
-		if !strings.Contains(id, "flash-lite") {
-			rank = 2
-		}
-		if model.Default && !strings.Contains(id, "flash-lite") {
-			rank = 3
-		}
-		if !found || rank > selectedRank || rank == selectedRank && model.AccountCount > selected.AccountCount ||
-			rank == selectedRank && model.AccountCount == selected.AccountCount && model.ID > selected.ID {
-			selected = model
-			selectedRank = rank
-			found = true
-		}
-	}
-	return selected, found
-}
-
-func resolveImageProvider(pool *balancer.AccountPool, modelID string) (string, bool) {
-	if !strings.EqualFold(strings.TrimSpace(modelID), flashImageModelID) {
-		return "", false
-	}
-	models := discoveredModels(pool)
-	if _, ok := imageProviderModel(models, nil); !ok {
-		return "", true
-	}
-	provider, ok := imageProviderModel(models, pool.HasReadyModel)
-	if !ok {
-		return "", true
-	}
-	return provider.ID, true
 }

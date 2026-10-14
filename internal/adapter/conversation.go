@@ -60,6 +60,14 @@ func (r *conversationRegistry) get(key string) (*gemini.ConversationState, strin
 	return gemini.NewConversationStateFrom(entry.snapshot), entry.accountID, entry.contextTokens, true
 }
 
+// isLatest 判断快照是否为其网页会话中最新一轮的回答
+func (r *conversationRegistry) isLatest(snapshot gemini.ConversationSnapshot) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	latest, ok := r.states[snapshot.CID]
+	return !ok || latest.snapshot.RCID == snapshot.RCID
+}
+
 func (r *conversationRegistry) put(state *gemini.ConversationState, accountID string, contextTokens int, keys ...string) {
 	if state == nil {
 		return

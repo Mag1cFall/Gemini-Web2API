@@ -161,10 +161,7 @@ func bootstrapAccounts(parent context.Context, cfg config.Config) (*balancer.Acc
 
 			client, err := gemini.NewClient(account.Source, account.ProxyURL, cfg.SaveHistory)
 			if err == nil {
-				err = client.Init(ctx)
-			}
-			if err == nil {
-				_, err = client.FetchUsage(ctx)
+				err = initAccount(ctx, client)
 			}
 			results <- bootstrapResult{
 				index: index, accountID: account.ID,
@@ -182,14 +179,60 @@ func bootstrapAccounts(parent context.Context, cfg config.Config) (*balancer.Acc
 		if result.err != nil {
 			pool.AddUnavailable(result.accountID)
 			log.Printf("账号 %q 初始化失败: %v", result.accountID, result.err)
+			if result.client != nil {
+				go recoverAccount(parent, pool, cfg, result.client, result.accountID)
+			}
 			continue
 		}
 		pool.Add(result.client, result.accountID)
+		go rotateAccountCookies(parent, result.client, result.accountID)
 	}
 	if pool.Size() == 0 {
 		return nil, fmt.Errorf("没有账号完成 Gemini Web 协议初始化")
 	}
 	return pool, nil
+}
+
+// initAccount 初始化账号的首页参数、模型目录、偏好与用量
+func initAccount(ctx context.Context, client *gemini.Client) error {
+	if err := client.Init(ctx); err != nil {
+		return err
+	}
+	_, err := client.FetchUsage(ctx)
+	return err
+}
+
+// recoverAccount 按账号冷却间隔重新初始化启动失败的账号，成功后加入调度并开始轮换 Cookie
+func recoverAccount(ctx context.Context, pool *balancer.AccountPool, cfg config.Config, client *gemini.Client, accountID string) {
+	recovered := pool.Recover(ctx, client, accountID, cfg.AccountCooldown, func(ctx context.Context) error {
+		initContext, cancel := context.WithTimeout(ctx, cfg.InitTimeout)
+		defer cancel()
+		err := initAccount(initContext, client)
+		if err != nil && ctx.Err() == nil {
+			log.Printf("账号 %q 重新初始化失败: %v", accountID, err)
+		}
+		return err
+	})
+	if recovered {
+		log.Printf("账号 %q 重新初始化完成", accountID)
+		rotateAccountCookies(ctx, client, accountID)
+	}
+}
+
+// rotateAccountCookies 在初始化后立即轮换一次账号 Cookie，之后按轮换页给出的间隔轮换直到服务退出
+func rotateAccountCookies(ctx context.Context, client *gemini.Client, accountID string) {
+	rotator := gemini.NewCookieRotator(client)
+	for {
+		next, err := rotator.Rotate(ctx)
+		if err != nil && ctx.Err() == nil {
+			log.Printf("账号 %q 轮换 Cookie 失败: %v", accountID, err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(next):
+		}
+	}
 }
 
 // newRouter 注册公开健康检查和全部兼容 API

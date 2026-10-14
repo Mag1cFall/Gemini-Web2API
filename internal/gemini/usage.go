@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 	"time"
 
@@ -59,8 +58,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	if err != nil {
 		return UsageInfo{}, err
 	}
-	form := url.Values{"f.req": {string(encodedRequest)}, "at": {bootstrap.SNlM0e}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointBatch, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointBatch, strings.NewReader(protocolForm(string(encodedRequest), bootstrap.SNlM0e)))
 	if err != nil {
 		return UsageInfo{}, err
 	}
@@ -74,7 +72,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	query.Set("rt", "c")
 	req.URL.RawQuery = query.Encode()
 	c.applyXHRHeaders(req)
-	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.clientID, requestTiming(time.Since(started), time.Now())))
+	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.clientID, bootstrap.BL, 0, 0, requestTiming(time.Since(started), time.Now())))
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 
 	resp, err := c.httpClient.Do(req)

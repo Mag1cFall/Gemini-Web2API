@@ -16,9 +16,9 @@ type Cookie struct {
 
 // AccountSource 表示账号固定身份和 Cookie 持久化入口
 type AccountSource struct {
-	ID          string
-	Cookies     []Cookie
-	Fingerprint Fingerprint
-	Save        func([]Cookie) error
-	Refresh     func(context.Context) ([]Cookie, error)
+	ID       string
+	Cookies  []Cookie
+	Language string
+	Save     func([]Cookie) error
+	Refresh  func(context.Context) ([]Cookie, error)
 }

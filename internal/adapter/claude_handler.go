@@ -39,7 +39,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusServiceUnavailable, "overloaded_error", "No account is ready for the requested model")
 			return
 		}
-		thinkingMode, includeThoughts, err := claudeThinkingSettings(request)
+		thinkingLevel, includeThoughts, err := claudeThinkingSettings(request)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
@@ -61,7 +61,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			thinkingOpen := false
 			thinkingBlock := 0
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, false, thinkingMode,
+				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildClaudePrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
@@ -150,7 +150,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, false, thinkingMode,
+			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildClaudePrompt(c, client, request, continuation, bridge)
 			}, nil, nil,
@@ -272,7 +272,7 @@ func writeClaudeModelList(c *gin.Context, models []availableModel) {
 			"id": model.ID, "type": "model", "display_name": model.DisplayName,
 			"created_at": "1970-01-01T00:00:00Z", "default": model.Default,
 			"context_window": model.MaxInputTokenLimit, "min_context_window": model.MinInputTokenLimit,
-			"available_account_count": model.AccountCount,
+			"available_account_count": model.AccountCount, "thinking_levels": thinkingLevelNames(model.ThinkingLevels),
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": data, "has_more": false, "first_id": firstModelID(models), "last_id": lastModelID(models)})

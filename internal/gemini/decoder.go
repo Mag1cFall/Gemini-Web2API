@@ -30,6 +30,10 @@ type FrameDecoder struct {
 	sawComplete   bool
 	sawError      bool
 	sawEnd        bool
+	// background 表示生成流以后台生成记录结束，成品由 hNvQHb 读取
+	background bool
+	// researchConfirm 为 Deep Research 计划卡片上确认按钮的文字
+	researchConfirm string
 }
 
 type codeEventKey struct {
@@ -93,22 +97,10 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 			return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
 		case "e":
 			d.sawEnd = true
-			if !d.sawComplete && !d.sawError {
-				return retryableProtocolError("gemini protocol ended without a completed candidate", nil)
+			if d.background && !d.sawComplete && !d.sawError {
+				return nil
 			}
-			for candidateIndex := range d.texts {
-				if err := d.flushText(candidateIndex, emit); err != nil {
-					return err
-				}
-			}
-			finish := FinishUnknown
-			if d.sawComplete {
-				finish = FinishStop
-			}
-			if d.sawError {
-				finish = FinishError
-			}
-			return emit(Event{Kind: EventDone, FinishReason: finish, Session: activeState.Snapshot()})
+			return d.finish(activeState, emit)
 		}
 		return nil
 	})
@@ -122,6 +114,33 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 		return retryableProtocolError("gemini protocol stream ended without terminal frame", nil)
 	}
 	return nil
+}
+
+// decodeTurn 解析 hNvQHb 读取到的已完成回答
+func (d *FrameDecoder) decodeTurn(payload []any, state *ConversationState, emit func(Event) error) error {
+	d.reset()
+	d.lastSession = state.Snapshot()
+	if err := d.decodePayload(payload, state, emit); err != nil {
+		return err
+	}
+	return d.finish(state, emit)
+}
+
+// finish 在回答结束时发布剩余正文与结束原因
+func (d *FrameDecoder) finish(state *ConversationState, emit func(Event) error) error {
+	if !d.sawComplete && !d.sawError {
+		return retryableProtocolError("gemini protocol ended without a completed candidate", nil)
+	}
+	for candidateIndex := range d.texts {
+		if err := d.flushText(candidateIndex, emit); err != nil {
+			return err
+		}
+	}
+	finish := FinishStop
+	if d.sawError {
+		finish = FinishError
+	}
+	return emit(Event{Kind: EventDone, FinishReason: finish, Session: state.Snapshot()})
 }
 
 // bardErrorCode 读取 wrb.fr[5] 中 BardErrorInfo 携带的错误码
@@ -173,6 +192,7 @@ func (d *FrameDecoder) reset() {
 	d.sawComplete = false
 	d.sawError = false
 	d.sawEnd = false
+	d.background = false
 }
 
 func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, emit func(Event) error) error {
@@ -223,6 +243,12 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 		}
 		phaseValue, _ := intPath(candidate, 8, 0)
 		phase := Phase(phaseValue)
+		if plan, ok := richContentField(candidate, 55); ok {
+			d.researchConfirm, _ = stringPath(plan, 3, 0)
+		}
+		if _, ok := richContentField(candidate, 57); ok && phase != PhaseComplete {
+			d.background = true
+		}
 		if phase == PhaseComplete {
 			if err := d.flushText(candidateIndex, emit); err != nil {
 				return err
@@ -238,7 +264,7 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 		if err := d.decodeCitations(candidate, candidateIndex, emit); err != nil {
 			return err
 		}
-		if err := d.decodeMedia(candidate, candidateIndex, emit); err != nil {
+		if err := d.decodeMedia(candidate, candidateIndex, state.Snapshot(), emit); err != nil {
 			return err
 		}
 		candidateIndex++
@@ -261,7 +287,10 @@ func (d *FrameDecoder) decodeImageProgress(payload []any, emit func(Event) error
 	tool, _ := stringPath(raw, 1, 0)
 	category, _ := intPath(raw, 1, 3, 1, 7, 0)
 	status, _ := intPath(raw, 1, 2)
-	if tool != "data_analysis_tool" || category != 20 {
+	if tool == "video_generation" {
+		d.background = true
+	}
+	if tool != "data_analysis_tool" || category != 20 && category != 23 {
 		return nil
 	}
 	phase := PhaseUnknown
@@ -288,6 +317,13 @@ func (d *FrameDecoder) sessionFromPayload(payload []any, current ConversationSna
 	}
 	if rid, ok := stringAt(values, 1); ok && rid != "" {
 		current.RID = rid
+	}
+	if len(payload) > 2 {
+		if sparse, ok := payload[2].(map[string]any); ok {
+			if token, ok := sparse["26"].(string); ok && token != "" {
+				current.Token = token
+			}
+		}
 	}
 	return current
 }
@@ -320,7 +356,7 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 
 func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit func(Event) error) error {
 	raw, _ := stringPath(candidate, 1, 0)
-	text, codes := parseStructuredContent(raw)
+	text, codes := parseStructuredContent(expandDocuments(candidate, raw))
 	seen := make(map[codeEventKey]struct{}, len(codes))
 	for _, code := range codes {
 		key := codeEventKey{Candidate: candidateIndex, Index: code.Index, Type: code.Type}
@@ -385,7 +421,8 @@ func (d *FrameDecoder) decodeCitations(candidate []any, candidateIndex int, emit
 	return emit(Event{Kind: EventCitations, Candidate: candidateIndex, Citations: next})
 }
 
-func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, emit func(Event) error) error {
+func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, session ConversationSnapshot, emit func(Event) error) error {
+	rcid, _ := stringAt(candidate, 0)
 	if raw, ok := richContentField(candidate, 7); ok {
 		if itemsValue, ok := valuePath(raw, 0); ok {
 			if items, ok := itemsValue.([]any); ok {
@@ -401,10 +438,12 @@ func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, emit fun
 					width, _ := intPath(item, 0, 3, 15, 0)
 					height, _ := intPath(item, 0, 3, 15, 1)
 					sizeBytes, _ := intPath(item, 0, 3, 15, 2)
+					entry, _ := item.([]any)
 					if err := d.emitMedia(candidateIndex, &Media{
 						Type: MediaGeneratedImage, URL: mediaURL, Title: fmt.Sprintf("[Generated Image %d]", index+1),
 						FileName: fileName, MIMEType: mimeType, Generator: generator, Placeholder: placeholder,
 						Width: width, Height: height, SizeBytes: sizeBytes, Offset: mediaPlaceholderOffset(candidate, placeholder),
+						download: &imageDownload{entry: entry, cid: session.CID, rid: session.RID, rcid: rcid, index: index},
 					}, emit); err != nil {
 						return err
 					}
@@ -412,7 +451,35 @@ func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, emit fun
 			}
 		}
 	}
+	if raw, ok := richContentField(candidate, 59); ok {
+		file, _ := valuePath(raw, 0, 0, 0, 0)
+		placeholder, _ := stringPath(candidate, 1, 0)
+		placeholder = generatedVideoPattern.FindString(placeholder)
+		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedVideo, file, placeholder, emit); err != nil {
+			return err
+		}
+	}
+	if raw, ok := richContentField(candidate, 86); ok {
+		file, _ := valuePath(raw, 0, 1)
+		placeholder, _ := stringPath(raw, 6, 0)
+		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedAudio, file, placeholder, emit); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// emitGeneratedFile 发布视频与音乐条目中的成品文件，下载地址为条目链接列表的第 2 项
+func (d *FrameDecoder) emitGeneratedFile(candidate []any, candidateIndex int, mediaType MediaType, file any, placeholder string, emit func(Event) error) error {
+	mediaURL, _ := stringPath(file, 7, 1)
+	fileName, _ := stringPath(file, 2)
+	mimeType, _ := stringPath(file, 11)
+	width, _ := intPath(file, 17, 1)
+	height, _ := intPath(file, 17, 2)
+	return d.emitMedia(candidateIndex, &Media{
+		Type: mediaType, URL: mediaURL, Title: fileName, FileName: fileName, MIMEType: mimeType,
+		Placeholder: placeholder, Width: width, Height: height, Offset: mediaPlaceholderOffset(candidate, placeholder),
+	}, emit)
 }
 
 func (d *FrameDecoder) emitMedia(candidateIndex int, media *Media, emit func(Event) error) error {
@@ -434,7 +501,8 @@ func isGeneratedImagePlaceholder(value string) bool {
 
 var (
 	structuredCodePattern = regexp.MustCompile("(?m)^```([^?`\\r\\n]*)\\?(code_reference|code_stdout|code_stderr)&code_event_index=(\\d+)\\r?\\n")
-	artifactPattern       = regexp.MustCompile("(?m)^https?://googleusercontent\\.com/image_generation_content/\\S+\\s*")
+	artifactPattern       = regexp.MustCompile("(?m)^https?://googleusercontent\\.com/(image_generation_content|generated_video_content|generated_music_content)/\\S+\\s*")
+	generatedVideoPattern = regexp.MustCompile(`https?://googleusercontent\.com/generated_video_content/\S+`)
 )
 
 func parseStructuredContent(raw string) (string, []codeSnapshot) {
@@ -557,6 +625,56 @@ func hasJSPBValue(value any) bool {
 	default:
 		return true
 	}
+}
+
+// documentChipPattern 匹配正文中 Canvas 文档的占位链接
+var documentChipPattern = regexp.MustCompile(`http://googleusercontent\.com/immersive_entry_chip/\d+`)
+
+// researchPlanPattern 匹配正文中 Deep Research 计划卡片的占位链接
+var researchPlanPattern = regexp.MustCompile(`http://googleusercontent\.com/deep_research_confirmation_content/\d+`)
+
+// expandDocuments 把 Deep Research 计划占位链接换成计划标题与步骤；回答完成后把文档占位链接换成 candidate[30] 的文档内容，完成前正文截止到第一个文档占位链接
+func expandDocuments(candidate []any, raw string) string {
+	if plan, ok := richContentField(candidate, 55); ok {
+		raw = researchPlanPattern.ReplaceAllStringFunc(raw, func(string) string {
+			title, _ := stringPath(plan, 0)
+			lines := []string{title}
+			steps, _ := valuePath(plan, 1)
+			stepValues, _ := steps.([]any)
+			for _, step := range stepValues {
+				label, _ := stringPath(step, 1)
+				detail, _ := stringPath(step, 2)
+				lines = append(lines, strings.TrimSpace(label+"\n"+detail))
+			}
+			return strings.Join(lines, "\n\n")
+		})
+	}
+	chips := documentChipPattern.FindAllStringIndex(raw, -1)
+	if len(chips) == 0 {
+		return raw
+	}
+	if phase, _ := intPath(candidate, 8, 0); Phase(phase) != PhaseComplete {
+		return raw[:chips[0][0]]
+	}
+	documentIDs := make(map[string]string)
+	if links, ok := richContentField(candidate, 56); ok {
+		entries, _ := links.([]any)
+		for _, entry := range entries {
+			chip, _ := stringPath(entry, 0, 0)
+			documentID, _ := stringPath(entry, 1)
+			documentIDs[chip] = documentID
+		}
+	}
+	contents := make(map[string]string)
+	documents, _ := arrayAt(candidate, 30)
+	for _, document := range documents {
+		documentID, _ := stringPath(document, 0)
+		content, _ := stringPath(document, 4)
+		contents[documentID] = content
+	}
+	return documentChipPattern.ReplaceAllStringFunc(raw, func(chip string) string {
+		return contents[documentIDs[chip]]
+	})
 }
 
 func mediaPlaceholderOffset(candidate []any, placeholder string) int {

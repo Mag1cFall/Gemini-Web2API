@@ -9,8 +9,9 @@
 - **OpenAI 兼容**：`/v1/chat/completions`、`/v1/responses`、`/v1/models`
 - **Claude 兼容**：`/v1/messages`
 - **Gemini 兼容**：`/v1beta/models/{model}:generateContent`、`:streamGenerateContent`
-- **流式输出**：文本与思考内容实时增量返回，并映射各协议的思考强度
-- **图片能力**：支持多模态输入、图片生成和图片编辑
+- **流式输出**：文本与思考内容实时增量返回，各协议的思考强度映射到官网 Low、Medium、High
+- **图片能力**：支持多模态输入、图片生成和图片编辑，生成图返回官网“下载原图”的原尺寸图片
+- **官网工具**：Create video、Create music、Canvas、Deep Research、Guided Learning 与 Task 模式以独立模型 ID 提供
 - **多账户负载均衡**：按模型可用性调度多个 Google 账户
 - **代理**：支持 HTTP、HTTPS、SOCKS5 全局代理和每账号固定代理
 - **模型映射**：支持将外部模型名映射到当前 Gemini 模型
@@ -21,12 +22,19 @@
 | 模型 ID | 名称 | 输入窗口 / 能力 | 默认 |
 | --- | --- | ---: | --- |
 | `gemini-3.8-flash` | 3.8 Flash | 32,768–1,048,576 | 是 |
-| `gemini-3.1-flash-image` | Nano Banana 2 | 图片生成与编辑 |  |
 | `gemini-3.1-pro` | 3.1 Pro | 32,768–1,048,576 |  |
 | `gemini-3.5-flash-lite` | 3.5 Flash-Lite | 32,768–1,048,576 |  |
-| `gemini-3.6-flash` | 3.6 Flash | 32,768 |  |
+| `gemini-4-argon` | 4 Argon | 32,768–1,048,576 |  |
+| `gemini-auto` | Auto | 免费账号 |  |
+| `gemini-3.8-flash-task`、`gemini-4-argon-task` | Task | 代为执行任务 |  |
+| `gemini-3.1-flash-image` | Nano Banana 2 | 图片生成与编辑 |  |
+| `gemini-video` | Video | 视频生成 |  |
+| `gemini-music` | Music | 音乐生成 |  |
+| `gemini-canvas` | Canvas | 文档与代码 |  |
+| `gemini-deep-research` | Deep Research | 研究报告 |  |
+| `gemini-guided-learning` | Guided Learning | 引导式学习 |  |
 
-服务启动时将 Gemini Web 动态聊天模型目录与 `gemini-3.1-flash-image` 图片能力 ID 合并，运行后以 `/v1/models` 为准。模型 ID 根据官网显示名称生成，账号收到 3.8 Flash 后自动公开 `gemini-3.8-flash`；各模型的 `available_account_count` 和 `default` 反映当前账号覆盖与默认选择。图片 ID 可用于对话生图和 `/v1/images/*`。上下文窗口、模型权限和配额由 Gemini 网页账号的套餐与地区决定。服务按 Gemini tokenizer 返回文本输入、可见输出和思考摘要的 token usage；账号用量通过 `/v1/accounts/usage` 查看。
+服务启动时读取各账号的 Gemini Web 模型目录与官网工具，运行后以 `/v1/models` 为准。模型 ID 根据官网显示名称生成，账号收到新模型后自动公开对应 ID；各模型的 `available_account_count`、`default` 和 `thinking_levels` 反映当前账号覆盖、默认选择与可选思考强度。工具 ID 只在账号具备对应官网工具时出现，由该账号的官网默认模型执行。图片 ID 可用于对话生图和 `/v1/images/*`，`size`、`imageConfig.aspectRatio` 对应官网的 1:1、9:16、3:4、4:3、16:9 五种比例。视频 ID 的 `imageConfig.aspectRatio` 对应官网的横向 16:9 与竖向 9:16。Task、Deep Research 与视频请求使用普通会话，对话保存在账号历史中；Deep Research 的研究计划与进度作为思考内容返回，完成后的报告作为正文返回，通常需要十几分钟，客户端的请求超时需长于这一时长。上下文窗口、模型权限和配额由 Gemini 网页账号的套餐与地区决定。服务按 Gemini tokenizer 返回文本输入、可见输出和思考摘要的 token usage；账号用量通过 `/v1/accounts/usage` 查看。
 
 ## 快速开始
 
@@ -75,6 +83,8 @@ Windows 首次使用时，直接运行交互式配置：
 ```
 
 默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以在现有 Cookie 有效期内使用已经生成的 `auth` 目录；设备绑定续签仍需在原 Windows 设备执行。
+
+服务运行期间每 10 分钟为每个账号轮换一次登录 Cookie，与 Gemini 网页相同；响应中变化的 Cookie 写回 `auth/<账号>/storage-state.json`，重启后直接沿用。Chrome 导入的账号在登录态失效时自动续签。
 
 ### 可选配置
 
@@ -180,7 +190,7 @@ internal/
 | `PROXY_API_KEY` | 本地 2API 访问密钥 | 空 |
 | `PROXY` | 全局 HTTP、HTTPS 或 SOCKS5 代理 | 空 |
 | `MODEL_MAPPING` | 外部模型名到当前模型 ID 的映射 | 空 |
-| `ACCOUNT_COOLDOWN` | 账号失败后的冷却时间 | `2m` |
+| `ACCOUNT_COOLDOWN` | 账号失败后的冷却时间，启动初始化失败的账号按此间隔重试 | `2m` |
 | `SESSION_TTL` | 显式会话状态的存活时间 | `30m` |
 | `INIT_TIMEOUT` | 单账号启动初始化超时 | `20s` |
 

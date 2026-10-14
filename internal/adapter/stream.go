@@ -12,6 +12,14 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 )
 
+// generationMedia 是请求对生成媒体的要求
+type generationMedia struct {
+	// requireImage 表示请求必须返回生成图片
+	requireImage bool
+	// aspectRatio 为生成媒体的宽高比
+	aspectRatio string
+}
+
 type generationResult struct {
 	Accumulator    *EventAccumulator
 	Client         *gemini.Client
@@ -127,9 +135,6 @@ func streamEventName(kind gemini.EventKind) string {
 
 func modelStatus(pool *balancer.AccountPool, modelName string) (bool, bool) {
 	modelID := config.MapModel(modelName)
-	if providerModel, imageModel := resolveImageProvider(pool, modelID); imageModel {
-		return true, providerModel != "" && pool.HasReadyModel(providerModel)
-	}
 	return pool.HasModel(modelID), pool.HasReadyModel(modelID)
 }
 
@@ -140,20 +145,13 @@ func runGeneration(
 	allowNewSession bool,
 	modelName string,
 	responseID string,
-	imageGeneration bool,
-	thinkingMode gemini.ThinkingMode,
+	media generationMedia,
+	thinkingLevel gemini.ThinkingLevel,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 	hasVisibleOutput func() bool,
 ) (generationResult, string, error) {
-	publicModel := config.MapModel(modelName)
-	requestedModel := publicModel
-	if providerModel, imageModel := resolveImageProvider(pool, requestedModel); imageModel {
-		if providerModel == "" {
-			return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 503, Message: fmt.Sprintf("模型 %q 当前没有可用的网页协调模型", modelName), Retryable: true}
-		}
-		requestedModel = providerModel
-	}
+	requestedModel := config.MapModel(modelName)
 	if !pool.HasModel(requestedModel) {
 		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 404, Message: fmt.Sprintf("模型 %q 不可用", modelName)}
 	}
@@ -198,11 +196,11 @@ func runGeneration(
 		}
 		result, err := runGenerationWithClient(
 			ctx, pool, client, accountID, sessionKey, newSession, requestedModel, responseID,
-			imageGeneration, thinkingMode, prepare, onEvent,
+			media, thinkingLevel, prepare, onEvent,
 		)
 		if err == nil {
 			pool.ReportSuccess(accountID)
-			result.Model = publicModel
+			result.Model = requestedModel
 			return result, accountID, nil
 		}
 		lastErr = err
@@ -236,8 +234,8 @@ func runGenerationWithClient(
 	allowNewSession bool,
 	requestedModel string,
 	responseID string,
-	imageGeneration bool,
-	thinkingMode gemini.ThinkingMode,
+	media generationMedia,
+	thinkingLevel gemini.ThinkingLevel,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 ) (generationResult, error) {
@@ -253,6 +251,7 @@ func runGenerationWithClient(
 	}
 	var conversation *gemini.ConversationState
 	continuation := false
+	branch := false
 	contextTokens := 0
 	if sessionKey != "" {
 		var boundAccountID string
@@ -267,6 +266,7 @@ func runGenerationWithClient(
 			boundAccountID = accountID
 		} else {
 			continuation = true
+			branch = !conversations.isLatest(conversation.Snapshot())
 		}
 		if boundAccountID != accountID {
 			return generationResult{}, &gemini.ProtocolError{HTTPStatus: 409, Message: "会话绑定账号已变化，请开始新会话"}
@@ -280,9 +280,6 @@ func runGenerationWithClient(
 		}
 		return generationResult{}, &gemini.ProtocolError{HTTPStatus: 400, Message: err.Error()}
 	}
-	if imageGeneration {
-		prompt = "Generate or edit an image according to this request:\n\n" + prompt
-	}
 	promptTokens := contextTokens + tokencount.Content(prompt)
 	if contextWindow := client.ContextWindow(); contextWindow > 0 && promptTokens > contextWindow {
 		return generationResult{}, &accountContextError{err: &gemini.ProtocolError{
@@ -290,14 +287,21 @@ func runGenerationWithClient(
 			Message:    fmt.Sprintf("账号上下文窗口为 %d tokens，当前请求需要 %d tokens", contextWindow, promptTokens),
 		}}
 	}
+	feature := gemini.Feature(0)
+	if media.requireImage {
+		feature = gemini.FeatureImage
+	}
 	accumulator := NewEventAccumulator()
 	initialUsageSent := false
 	err = client.Stream(ctx, gemini.GenerateRequest{
-		Prompt:       prompt,
-		Model:        model.ID,
-		ThinkingMode: thinkingMode,
-		Files:        files,
-		Conversation: conversation,
+		Prompt:        prompt,
+		Model:         model.ID,
+		ThinkingLevel: thinkingLevel,
+		Feature:       feature,
+		AspectRatio:   media.aspectRatio,
+		Files:         files,
+		Conversation:  conversation,
+		Branch:        branch,
 	}, func(event gemini.Event) error {
 		if event.Kind == gemini.EventMetadata && event.Metadata != nil {
 			metadata := *event.Metadata
@@ -324,7 +328,7 @@ func runGenerationWithClient(
 	if err != nil {
 		return generationResult{}, err
 	}
-	if imageGeneration {
+	if media.requireImage {
 		generatedImage := false
 		for _, media := range accumulator.Primary().Media {
 			if media.Type == gemini.MediaGeneratedImage {
@@ -355,7 +359,9 @@ func runGenerationWithClient(
 	}
 
 	if conversation == nil && accumulator.Session.CID != "" {
-		conversation = gemini.NewConversationStateFrom(accumulator.Session)
+		session := accumulator.Session
+		session.ModelMode = model.Mode
+		conversation = gemini.NewConversationStateFrom(session)
 	}
 	if conversation != nil {
 		snapshot := conversation.Snapshot()

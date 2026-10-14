@@ -125,11 +125,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
 		}
 		filename := fmt.Sprintf("image_%d.bin", time.Now().UnixNano())
-		fileID, err := client.UploadFile(ctx, data, filename)
-		if err != nil {
-			return "", nil, fmt.Errorf("上传远程图片失败: %w", err)
-		}
-		return "[Image]", &gemini.FileData{URL: fileID, FileName: filename}, nil
+		return "[Image]", &gemini.FileData{Data: data, FileName: filename}, nil
 	}
 
 	var source struct {
@@ -148,11 +144,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
 		}
 		filename := fmt.Sprintf("image_%d%s", time.Now().UnixNano(), mimeTypeToExt(source.MediaType))
-		fileID, err := client.UploadFile(ctx, data, filename)
-		if err != nil {
-			return "", nil, fmt.Errorf("上传远程图片失败: %w", err)
-		}
-		return "[Image]", &gemini.FileData{URL: fileID, FileName: filename}, nil
+		return "[Image]", &gemini.FileData{Data: data, FileName: filename, MimeType: source.MediaType}, nil
 	}
 	if imageURL != "" {
 		mime, data, ok := strings.Cut(strings.TrimPrefix(imageURL, "data:"), ",")
@@ -171,11 +163,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 		return "", nil, fmt.Errorf("图片 base64 解码失败: %w", err)
 	}
 	filename := fmt.Sprintf("image_%d%s", time.Now().UnixNano(), mimeTypeToExt(source.MediaType))
-	fileID, err := client.UploadFile(ctx, data, filename)
-	if err != nil {
-		return "", nil, fmt.Errorf("上传图片失败: %w", err)
-	}
-	return "[Image]", &gemini.FileData{URL: fileID, FileName: filename}, nil
+	return "[Image]", &gemini.FileData{Data: data, FileName: filename, MimeType: source.MediaType}, nil
 }
 
 func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client *gemini.Client) (string, *gemini.FileData, error) {
@@ -223,11 +211,7 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 		if filename == "" {
 			filename = fmt.Sprintf("file_%d%s", time.Now().UnixNano(), mimeTypeToExt(source.MediaType))
 		}
-		fileID, err := client.UploadFile(ctx, data, filename)
-		if err != nil {
-			return "", nil, fmt.Errorf("上传远程文件失败: %w", err)
-		}
-		return "[File]", &gemini.FileData{URL: fileID, FileName: filename}, nil
+		return "[File]", &gemini.FileData{Data: data, FileName: filename, MimeType: source.MediaType}, nil
 	}
 	if strings.HasPrefix(fileURL, "data:") && source.Data == "" {
 		source.Data = fileURL
@@ -253,11 +237,7 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 	if filename == "" {
 		filename = fmt.Sprintf("file_%d%s", time.Now().UnixNano(), mimeTypeToExt(source.MediaType))
 	}
-	fileID, err := client.UploadFile(ctx, data, filename)
-	if err != nil {
-		return "", nil, fmt.Errorf("上传文件失败: %w", err)
-	}
-	return "[File]", &gemini.FileData{URL: fileID, FileName: filename}, nil
+	return "[File]", &gemini.FileData{Data: data, FileName: filename, MimeType: source.MediaType}, nil
 }
 
 func mediaFormatMIME(format string) string {
