@@ -108,7 +108,7 @@ func (r *CookieRotator) rotateSession(ctx context.Context) (bool, error) {
 			return !first, nil
 		}
 		if c.refresh == nil {
-			return false, retryableProtocolError(fmt.Sprintf("account %q is not signed in", c.displayAccountID()), nil)
+			return false, retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
 		}
 	} else if !isAuthenticationError(err) || c.refresh == nil {
 		return false, err
@@ -198,7 +198,7 @@ func (c *Client) loadRotationPage(ctx context.Context) (cookieRotation, error) {
 	}
 	match := rotationInitPattern.FindSubmatch(body)
 	if match == nil {
-		return cookieRotation{}, retryableProtocolError(fmt.Sprintf("account %q rotate cookies page has no init parameters", c.displayAccountID()), nil)
+		return cookieRotation{}, retryableProtocolError("rotate cookies page has no init parameters", nil)
 	}
 	fields := make([]any, 4)
 	fields[1] = string(match[1])
@@ -223,7 +223,7 @@ func (c *Client) loadRotationPage(ctx context.Context) (cookieRotation, error) {
 func (c *Client) doRotationRequest(req *http.Request, operation string) ([]byte, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, transportProtocolError(fmt.Sprintf("account %q %s", c.displayAccountID(), operation), err)
+		return nil, transportProtocolError(operation, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
@@ -234,7 +234,7 @@ func (c *Client) doRotationRequest(req *http.Request, operation string) ([]byte,
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, httpStatusError(resp.StatusCode, operation)
+		return nil, responseStatusError(resp, operation)
 	}
 	return body, nil
 }

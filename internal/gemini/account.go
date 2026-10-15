@@ -21,4 +21,6 @@ type AccountSource struct {
 	Language string
 	Save     func([]Cookie) error
 	Refresh  func(context.Context) ([]Cookie, error)
+	// Concurrency 是账号同时进行的上游请求数，零按 1 处理
+	Concurrency int
 }

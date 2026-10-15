@@ -9,6 +9,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 )
 
@@ -147,10 +148,53 @@ func runGeneration(
 	responseID string,
 	media generationMedia,
 	thinkingLevel gemini.ThinkingLevel,
+	bridge ToolBridge,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 	hasVisibleOutput func() bool,
 ) (generationResult, string, error) {
+	trace := logging.FromContext(ctx)
+	result, accountID, err := runGenerationAttempts(ctx, pool, sessionKey, allowNewSession, modelName, responseID, media, thinkingLevel, prepare, onEvent, hasVisibleOutput)
+	err = cancelledError(ctx, err)
+	if err != nil {
+		trace.Fail(upstreamStatus(err), err.Error())
+		return result, accountID, err
+	}
+	if usage := result.Accumulator.Usage; usage != nil {
+		trace.SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
+	}
+	trace.SetResult(result.ProviderModel, result.ConversationID, string(result.Accumulator.FinishReason))
+	if len(bridge.Definitions) > 0 {
+		if _, calls, err := bridge.Parse(result.Accumulator.Primary().Text); err == nil {
+			trace.SetToolCalls(len(calls))
+		}
+	}
+	return result, accountID, nil
+}
+
+// cancelledError 在管理端取消请求时把失败换成 499 取消错误，其余错误原样返回
+func cancelledError(ctx context.Context, err error) error {
+	if err != nil && errors.Is(context.Cause(ctx), logging.ErrCancelled) {
+		return &gemini.ProtocolError{HTTPStatus: logging.StatusClientClosed, Message: logging.ErrCancelled.Error()}
+	}
+	return err
+}
+
+func runGenerationAttempts(
+	ctx context.Context,
+	pool *balancer.AccountPool,
+	sessionKey string,
+	allowNewSession bool,
+	modelName string,
+	responseID string,
+	media generationMedia,
+	thinkingLevel gemini.ThinkingLevel,
+	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
+	onEvent func(gemini.Event) error,
+	hasVisibleOutput func() bool,
+) (generationResult, string, error) {
+	trace := logging.FromContext(ctx)
+	trace.SetResponseID(responseID)
 	requestedModel := config.MapModel(modelName)
 	if !pool.HasModel(requestedModel) {
 		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 404, Message: fmt.Sprintf("模型 %q 不可用", modelName)}
@@ -199,27 +243,33 @@ func runGeneration(
 			media, thinkingLevel, prepare, onEvent,
 		)
 		if err == nil {
-			pool.ReportSuccess(accountID)
+			pool.ReportSuccess(accountID, requestedModel)
 			result.Model = requestedModel
 			return result, accountID, nil
 		}
 		lastErr = err
 		lastAccountID = accountID
+		if ctx.Err() != nil {
+			return generationResult{}, accountID, err
+		}
 		if isAccountContextError(err) {
 			if sessionKey != "" && !newSession {
 				return generationResult{}, accountID, err
 			}
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
 			continue
 		}
 		usedRequestAttempts++
 		if retryableAccountError(err) && !isOutputMismatchError(err) {
-			pool.ReportFailure(accountID)
+			pool.ReportFailure(accountID, requestedModel, err)
 		}
 		if usedRequestAttempts >= requestAttempts || !retryableAccountError(err) ||
 			hasVisibleOutput != nil && hasVisibleOutput() {
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, false)
 			return generationResult{}, accountID, err
 		}
+		trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 		excludedAccountIDs[accountID] = struct{}{}
 	}
 	return generationResult{}, lastAccountID, lastErr
@@ -239,11 +289,14 @@ func runGenerationWithClient(
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 ) (generationResult, error) {
+	trace := logging.FromContext(ctx)
+	trace.SetStage("等待账号 " + accountID)
 	releaseRequest, err := client.AcquireRequest(ctx)
 	if err != nil {
 		return generationResult{}, err
 	}
 	defer releaseRequest()
+	trace.AccountReady(accountID, requestedModel)
 
 	model, err := client.ResolveModel(requestedModel)
 	if err != nil {
@@ -273,6 +326,7 @@ func runGenerationWithClient(
 		}
 	}
 	prompt, files, err := prepare(client, continuation)
+	trace.SetMedia(len(files))
 	if err != nil {
 		var protocolErr *gemini.ProtocolError
 		if errors.As(err, &protocolErr) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -303,6 +357,12 @@ func runGenerationWithClient(
 		Conversation:  conversation,
 		Branch:        branch,
 	}, func(event gemini.Event) error {
+		switch event.Kind {
+		case gemini.EventText, gemini.EventThought, gemini.EventCode, gemini.EventMedia, gemini.EventImageProgress:
+			if event.Candidate == 0 {
+				trace.UpstreamEvent(string(event.Kind))
+			}
+		}
 		if event.Kind == gemini.EventMetadata && event.Metadata != nil {
 			metadata := *event.Metadata
 			metadata.ModelName = actualProviderModel(client, model.ID, event.Metadata)
@@ -326,6 +386,9 @@ func runGenerationWithClient(
 		return nil
 	})
 	if err != nil {
+		if usage := estimatedUsage(accumulator, promptTokens); usage.CompletionTokens+usage.ThoughtTokens > 0 {
+			trace.SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
+		}
 		return generationResult{}, err
 	}
 	if media.requireImage {
@@ -341,16 +404,7 @@ func runGenerationWithClient(
 		}
 	}
 	if accumulator.Usage == nil {
-		primary := accumulator.Primary()
-		completionTokens := tokencount.Text(primary.Text)
-		for _, code := range primary.Codes {
-			completionTokens += tokencount.Text(code.Content)
-		}
-		thoughtTokens := tokencount.Text(primary.Thought)
-		accumulator.Usage = &gemini.Usage{
-			PromptTokens: promptTokens, CompletionTokens: completionTokens, ThoughtTokens: thoughtTokens,
-			TotalTokens: promptTokens + completionTokens + thoughtTokens,
-		}
+		accumulator.Usage = estimatedUsage(accumulator, promptTokens)
 	}
 	nextContextTokens := accumulator.Usage.TotalTokens
 	primary := accumulator.Primary()
@@ -396,6 +450,20 @@ func runGenerationWithClient(
 		ResponseID:     responseID,
 		ProviderModel:  providerModel,
 	}, nil
+}
+
+// estimatedUsage 按已收到的正文、代码与思考的本地计数估算用量
+func estimatedUsage(accumulator *EventAccumulator, promptTokens int) *gemini.Usage {
+	primary := accumulator.Primary()
+	completionTokens := tokencount.Text(primary.Text)
+	for _, code := range primary.Codes {
+		completionTokens += tokencount.Text(code.Content)
+	}
+	thoughtTokens := tokencount.Text(primary.Thought)
+	return &gemini.Usage{
+		PromptTokens: promptTokens, CompletionTokens: completionTokens, ThoughtTokens: thoughtTokens,
+		TotalTokens: promptTokens + completionTokens + thoughtTokens,
+	}
 }
 
 func retryableAccountError(err error) bool {

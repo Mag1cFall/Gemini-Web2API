@@ -156,7 +156,7 @@ func (c *Client) doUpload(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, httpStatusError(resp.StatusCode, "upload")
+		return nil, responseStatusError(resp, "upload")
 	}
 	return resp, nil
 }
@@ -189,7 +189,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	c.applyXHRHeaders(req)
 	req.Header[http.HeaderOrderKey] = processFileHeaderOrder
 	header, err := json.Marshal([]any{
-		1, nil, nil, nil, model.Hash, nil, nil, nil, clientFeatures, nil, nil, nil, nil, nil, model.Mode, int(level), c.clientID,
+		1, nil, nil, nil, model.Hash, nil, nil, nil, c.features(), nil, nil, nil, nil, nil, model.Mode, int(level), c.clientID,
 		[]string{bootstrap.BL}, nil, requestTiming(time.Since(started), time.Now()),
 	})
 	if err != nil {
@@ -207,7 +207,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", httpStatusError(resp.StatusCode, "process file")
+		return "", responseStatusError(resp, "process file")
 	}
 	fileID := ""
 	err = scanProtocolRecords(resp.Body, func(record []any) error {
@@ -215,6 +215,9 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 			return nil
 		}
 		encoded, _ := stringAt(record, 2)
+		if encoded == "" {
+			return rpcStatusError("process file", record)
+		}
 		var payload []any
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
 			return fmt.Errorf("decode process file payload: %w", err)

@@ -10,6 +10,7 @@ import (
 
 // Bootstrap 表示首页和模型目录共同产生的运行参数
 type Bootstrap struct {
+	// SNlM0e 为登录会话的表单令牌，访客会话为空
 	SNlM0e string
 	BL     string
 	FSID   string
@@ -40,10 +41,13 @@ var (
 	termsPattern  = regexp.MustCompile(`"45725082\\?":(\d+)`)
 )
 
+// ErrSignedOut 表示账号会话已失效且未能续签，需要重新导入
+var ErrSignedOut = errors.New("Gemini Web 会话已失效")
+
 // errBootstrapSignedOut 表示首页缺少只签发给登录会话的 SNlM0e
 var errBootstrapSignedOut = errors.New("bootstrap is missing SNlM0e")
 
-// parseBootstrap 从当前首页提取所有必需动态参数
+// parseBootstrap 从当前首页提取所有必需动态参数，访客首页没有 SNlM0e
 func parseBootstrap(html string) (Bootstrap, error) {
 	bootstrap := Bootstrap{
 		SNlM0e:   firstMatch(html, snlM0ePattern),
@@ -58,9 +62,6 @@ func parseBootstrap(html string) (Bootstrap, error) {
 	}
 	if seconds, err := strconv.ParseInt(firstMatch(html, termsPattern), 10, 64); err == nil {
 		bootstrap.UploadTermsWindow = time.Duration(seconds) * time.Second
-	}
-	if bootstrap.SNlM0e == "" {
-		return Bootstrap{}, errBootstrapSignedOut
 	}
 	if bootstrap.BL == "" {
 		return Bootstrap{}, fmt.Errorf("bootstrap is missing cfb2h")

@@ -151,7 +151,8 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	}
 	if len(b.JSONSchema) > 0 {
 		if err := validateJSONSchema(b.JSONSchema, []byte(trimmed)); err != nil {
-			return "", nil, fmt.Errorf("模型返回内容不符合 JSON Schema: %w", err)
+			head := []rune(trimmed)
+			return "", nil, fmt.Errorf("模型返回内容不符合 JSON Schema: %w；返回内容开头：%q", err, string(head[:min(len(head), 200)]))
 		}
 		return trimmed, nil, nil
 	}

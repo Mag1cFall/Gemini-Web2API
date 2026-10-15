@@ -10,6 +10,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 	"github.com/gin-gonic/gin"
 )
@@ -68,6 +69,14 @@ type ChatRequest struct {
 	FrequencyPenalty    *float64           `json:"frequency_penalty,omitempty"`
 	Seed                *int               `json:"seed,omitempty"`
 	N                   *int               `json:"n,omitempty"`
+	WebSearchOptions    json.RawMessage    `json:"web_search_options,omitempty"`
+	Audio               *ChatAudioOptions  `json:"audio,omitempty"`
+}
+
+// ChatAudioOptions 表示 OpenAI Chat 的音频输出参数
+type ChatAudioOptions struct {
+	Format string `json:"format"`
+	Voice  string `json:"voice"`
 }
 
 // ChatStreamOptions 表示 OpenAI Chat 流选项
@@ -84,12 +93,14 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
+		logging.FromContext(c.Request.Context()).Begin("chat", request.Model, request.Stream, len(request.Messages), len(request.Tools))
+		bindScope(c, pool, request.Model)
 		if request.Model == "" || len(request.Messages) == 0 {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "model and messages are required")
 			return
 		}
-		if request.N != nil && *request.N != 1 {
-			writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "Only n=1 is supported")
+		n, ok := choiceCount(c, request.N)
+		if !ok {
 			return
 		}
 		knownModel, readyModel := modelStatus(pool, request.Model)
@@ -120,66 +131,83 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		responseID := fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
 
-		if request.Stream {
-			setSSEHeaders(c)
-			streamModel := config.MapModel(request.Model)
-			roleSent := false
-			writeRole := func() error {
-				if roleSent {
-					return nil
-				}
-				roleSent = true
-				return writeOpenAIRole(c.Writer, responseID, created, streamModel)
+		generate := func(choice int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
+			key, allowNew := sessionKey, allowNewSession
+			if choice > 0 {
+				key, allowNew = "", true
 			}
-			if err := writeRole(); err != nil {
-				return
-			}
-			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, allowNewSession, request.Model, responseID, generationMedia{}, thinkingLevel,
+				c.Request.Context(), pool, key, allowNew, request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildOpenAIChatPrompt(c, client, request, continuation, bridge)
 				},
-				func(event gemini.Event) error {
-					return projection.project(event, func(event gemini.Event) error {
-						if err := writeRole(); err != nil {
-							return err
-						}
-						delta := gin.H{"content": event.Delta}
-						if event.Kind == gemini.EventThought {
-							delta = gin.H{"reasoning_content": event.Delta}
-						}
-						return writeOpenAIDelta(c.Writer, responseID, created, streamModel, delta)
-					}, func(err error) error {
-						return writeOpenAIStreamError(c.Writer, "upstream_rewrite", err)
-					})
-				},
-				projection.hasVisibleOutput,
+				onEvent, hasVisibleOutput,
 			)
 			c.Set("account_id", accountID)
-			if err != nil {
-				if !projection.errorSent {
-					_ = writeOpenAIStreamError(c.Writer, openAIUpstreamCode(err), err)
+			return result, err
+		}
+		var usage *gemini.Usage
+
+		if request.Stream {
+			setSSEHeaders(c)
+			defer startKeepalive(c, openAIKeepalive)()
+			streamModel := config.MapModel(request.Model)
+			for choice := range n {
+				roleSent := false
+				writeRole := func() error {
+					if roleSent {
+						return nil
+					}
+					roleSent = true
+					return writeOpenAIRole(c.Writer, responseID, created, streamModel, choice)
 				}
-				return
+				if err := writeRole(); err != nil {
+					return
+				}
+				projection := newStreamProjection(bridge, includeThoughts)
+				result, err := generate(choice,
+					func(event gemini.Event) error {
+						return projection.project(event, func(event gemini.Event) error {
+							if err := writeRole(); err != nil {
+								return err
+							}
+							delta := gin.H{"content": event.Delta}
+							if event.Kind == gemini.EventThought {
+								delta = gin.H{"reasoning_content": event.Delta}
+							}
+							return writeOpenAIDelta(c.Writer, responseID, created, streamModel, choice, delta)
+						}, func(err error) error {
+							return writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "upstream_rewrite", err)
+						})
+					},
+					projection.hasVisibleOutput,
+				)
+				if err != nil {
+					if !projection.errorSent {
+						_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
+					}
+					return
+				}
+				streamModel = result.Model
+				if err := writeRole(); err != nil {
+					return
+				}
+				if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+					_ = writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "media_download_error", streamFailure(c, err))
+					return
+				}
+				if err := writeProjectedOpenAI(c.Writer, responseID, created, streamModel, choice, result.Accumulator, bridge, projection, request.Audio); err != nil {
+					_ = writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "output_validation_error", streamFailure(c, err))
+					return
+				}
+				if err := writeOpenAIFinish(c.Writer, responseID, created, streamModel, choice, result, bridge); err != nil {
+					return
+				}
+				usage = addUsage(usage, result.Accumulator.Usage)
 			}
-			streamModel = result.Model
-			if err := writeRole(); err != nil {
-				return
-			}
-			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-				_ = writeOpenAIStreamError(c.Writer, "media_download_error", err)
-				return
-			}
-			if err := writeProjectedOpenAI(c.Writer, responseID, created, streamModel, result.Accumulator, bridge, projection); err != nil {
-				_ = writeOpenAIStreamError(c.Writer, "output_validation_error", err)
-				return
-			}
-			if err := writeOpenAIFinish(c.Writer, responseID, created, streamModel, result, bridge); err != nil {
-				return
-			}
-			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && result.Accumulator.Usage != nil {
-				if err := writeOpenAIUsageChunk(c.Writer, responseID, created, streamModel, result.Accumulator.Usage); err != nil {
+			recordChoiceUsage(c, n, usage)
+			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && usage != nil {
+				if err := writeOpenAIUsageChunk(c.Writer, responseID, created, streamModel, usage); err != nil {
 					return
 				}
 			}
@@ -187,29 +215,69 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
-		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, allowNewSession, request.Model, responseID, generationMedia{}, thinkingLevel,
-			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-				return buildOpenAIChatPrompt(c, client, request, continuation, bridge)
-			},
-			nil, nil,
-		)
-		c.Set("account_id", accountID)
-		if err != nil {
-			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
-			return
+		var response gin.H
+		for choice := range n {
+			result, err := generate(choice, nil, nil)
+			if err != nil {
+				writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
+				return
+			}
+			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+				writeOpenAIError(c, http.StatusBadGateway, "media_download_error", err.Error())
+				return
+			}
+			built, err := buildOpenAIResponse(responseID, created, result, bridge, includeThoughts, request.Audio)
+			if err != nil {
+				writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
+				return
+			}
+			usage = addUsage(usage, result.Accumulator.Usage)
+			if response == nil {
+				response = built
+				continue
+			}
+			next := built["choices"].([]gin.H)[0]
+			next["index"] = choice
+			response["choices"] = append(response["choices"].([]gin.H), next)
 		}
-
-		if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-			writeOpenAIError(c, http.StatusBadGateway, "media_download_error", err.Error())
-			return
-		}
-		response, err := buildOpenAIResponse(responseID, created, result, bridge, includeThoughts)
-		if err != nil {
-			writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
-			return
+		recordChoiceUsage(c, n, usage)
+		if usage != nil {
+			response["usage"] = openAIUsage(usage)
 		}
 		c.JSON(http.StatusOK, response)
+	}
+}
+
+// choiceCount 返回请求的 n，缺省为 1；小于 1 时与 OpenAI 一样返回 400 并报告 false
+func choiceCount(c *gin.Context, n *int) (int, bool) {
+	if n == nil {
+		return 1, true
+	}
+	if *n < 1 {
+		writeOpenAIError(c, http.StatusBadRequest, "integer_below_min_value", fmt.Sprintf("Invalid 'n': integer below minimum value. Expected a value >= 1, but got %d instead.", *n))
+		return 0, false
+	}
+	return *n, true
+}
+
+// addUsage 返回两次生成用量之和，其中一个为空时返回另一个
+func addUsage(total *gemini.Usage, usage *gemini.Usage) *gemini.Usage {
+	if total == nil {
+		return usage
+	}
+	if usage == nil {
+		return total
+	}
+	return &gemini.Usage{
+		PromptTokens: total.PromptTokens + usage.PromptTokens, CompletionTokens: total.CompletionTokens + usage.CompletionTokens,
+		ThoughtTokens: total.ThoughtTokens + usage.ThoughtTokens, TotalTokens: total.TotalTokens + usage.TotalTokens,
+	}
+}
+
+// recordChoiceUsage 在逐个生成多个 choice 后把各次用量之和记入请求跟踪
+func recordChoiceUsage(c *gin.Context, n int, usage *gemini.Usage) {
+	if n > 1 && usage != nil {
+		logging.FromContext(c.Request.Context()).SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
 	}
 }
 
@@ -259,15 +327,22 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	return transcript + suffix, files, nil
 }
 
-func buildOpenAIResponse(responseID string, created int64, result generationResult, bridge ToolBridge, includeThoughts bool) (gin.H, error) {
+func buildOpenAIResponse(responseID string, created int64, result generationResult, bridge ToolBridge, includeThoughts bool, audioOptions *ChatAudioOptions) (gin.H, error) {
 	primary := result.Accumulator.Primary()
 	content, calls, err := bridge.Parse(primary.Text)
 	if err != nil {
 		return nil, err
 	}
 	calls = assignToolCallIDs(calls, responseID)
-	content = renderCandidateMarkdown(content, primary, 0)
+	audio, markdownOutput, err := openAIAudioOutput(responseID, primary, content, audioOptions)
+	if err != nil {
+		return nil, err
+	}
+	content = renderCandidateMarkdown(content, markdownOutput, 0)
 	message := gin.H{"role": "assistant", "content": content}
+	if audio != nil {
+		message["audio"] = audio
+	}
 	finishReason := "stop"
 	if includeThoughts && primary.Thought != "" {
 		message["reasoning_content"] = primary.Thought
@@ -291,10 +366,15 @@ func buildOpenAIResponse(responseID string, created int64, result generationResu
 	return response, nil
 }
 
-func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, accumulator *EventAccumulator, bridge ToolBridge, projection *streamProjection) error {
+func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, choice int, accumulator *EventAccumulator, bridge ToolBridge, projection *streamProjection, audioOptions *ChatAudioOptions) error {
 	primary := accumulator.Primary()
+	parsed, _, _ := bridge.Parse(primary.Text)
+	audio, markdownOutput, err := openAIAudioOutput(id, primary, parsed, audioOptions)
+	if err != nil {
+		return err
+	}
 	if projection.includeThought && projection.bufferThought && primary.Thought != "" {
-		if err := writeOpenAIDelta(w, id, created, model, gin.H{"reasoning_content": primary.Thought}); err != nil {
+		if err := writeOpenAIDelta(w, id, created, model, choice, gin.H{"reasoning_content": primary.Thought}); err != nil {
 			return err
 		}
 	}
@@ -304,9 +384,9 @@ func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, a
 			return err
 		}
 		calls = assignToolCallIDs(calls, id)
-		content = renderCandidateMarkdown(content, primary, projection.textRunes)
+		content = renderCandidateMarkdown(content, markdownOutput, projection.textRunes)
 		if content != "" {
-			if err := writeOpenAIDelta(w, id, created, model, gin.H{"content": content}); err != nil {
+			if err := writeOpenAIDelta(w, id, created, model, choice, gin.H{"content": content}); err != nil {
 				return err
 			}
 		}
@@ -315,15 +395,19 @@ func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, a
 				"index": index, "id": call.ID, "type": "function",
 				"function": gin.H{"name": call.Name, "arguments": string(call.Arguments)},
 			}}}
-			if err := writeOpenAIDelta(w, id, created, model, delta); err != nil {
+			if err := writeOpenAIDelta(w, id, created, model, choice, delta); err != nil {
 				return err
 			}
 		}
 	}
-	fullContent, _, _ := bridge.Parse(primary.Text)
-	fullContent = renderCandidateMarkdown(fullContent, primary, 0)
+	if audio != nil {
+		if err := writeOpenAIDelta(w, id, created, model, choice, gin.H{"audio": audio}); err != nil {
+			return err
+		}
+	}
+	fullContent := renderCandidateMarkdown(parsed, markdownOutput, 0)
 	if annotations := openAICitationAnnotations(fullContent, primary.Citations); len(annotations) > 0 {
-		if err := writeOpenAIDelta(w, id, created, model, gin.H{"annotations": annotations}); err != nil {
+		if err := writeOpenAIDelta(w, id, created, model, choice, gin.H{"annotations": annotations}); err != nil {
 			return err
 		}
 	}
@@ -354,18 +438,18 @@ func citationRange(text string, citation gemini.Citation) (int, int) {
 	return start, end
 }
 
-func writeOpenAIRole(w io.Writer, id string, created int64, model string) error {
-	return writeOpenAIDelta(w, id, created, model, gin.H{"role": "assistant", "content": ""})
+func writeOpenAIRole(w io.Writer, id string, created int64, model string, choice int) error {
+	return writeOpenAIDelta(w, id, created, model, choice, gin.H{"role": "assistant", "content": ""})
 }
 
-func writeOpenAIDelta(w io.Writer, id string, created int64, model string, delta gin.H) error {
+func writeOpenAIDelta(w io.Writer, id string, created int64, model string, choice int, delta gin.H) error {
 	return writeSSEJSON(w, gin.H{
 		"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
-		"choices": []gin.H{{"index": 0, "delta": delta, "finish_reason": nil}},
+		"choices": []gin.H{{"index": choice, "delta": delta, "finish_reason": nil}},
 	})
 }
 
-func writeOpenAIFinish(w io.Writer, id string, created int64, model string, result generationResult, bridge ToolBridge) error {
+func writeOpenAIFinish(w io.Writer, id string, created int64, model string, choice int, result generationResult, bridge ToolBridge) error {
 	finishReason := "stop"
 	primary := result.Accumulator.Primary()
 	_, calls, _ := bridge.Parse(primary.Text)
@@ -375,7 +459,7 @@ func writeOpenAIFinish(w io.Writer, id string, created int64, model string, resu
 	chunk := gin.H{
 		"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
 		"provider_model": result.ProviderModel, "conversation_id": result.ConversationID, "response_id": result.ResponseID,
-		"choices": []gin.H{{"index": 0, "delta": gin.H{}, "finish_reason": finishReason}},
+		"choices": []gin.H{{"index": choice, "delta": gin.H{}, "finish_reason": finishReason}},
 	}
 	return writeSSEJSON(w, chunk)
 }
@@ -387,8 +471,9 @@ func writeOpenAIUsageChunk(w io.Writer, id string, created int64, model string, 
 	})
 }
 
-func writeOpenAIStreamError(w io.Writer, code string, err error) error {
-	return writeSSEJSON(w, gin.H{"error": gin.H{"message": err.Error(), "type": "api_error", "param": nil, "code": code}})
+// writeOpenAIStreamError 在已开始的流中写入 OpenAI 错误对象
+func writeOpenAIStreamError(w io.Writer, status int, code string, err error) error {
+	return writeSSEJSON(w, gin.H{"error": openAIErrorObject(status, code, err.Error())})
 }
 
 func writeSSEJSON(w io.Writer, payload interface{}) error {
@@ -418,6 +503,9 @@ func setSSEHeaders(c *gin.Context) {
 
 func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice)}
+	if len(request.WebSearchOptions) > 0 && string(request.WebSearchOptions) != "null" {
+		bridge.WebSearch = true
+	}
 	for _, tool := range request.Tools {
 		if tool.Type != "function" || tool.Function.Name == "" {
 			return ToolBridge{}, fmt.Errorf("仅支持 function 工具")

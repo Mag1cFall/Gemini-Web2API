@@ -27,6 +27,8 @@ type Model struct {
 	ThinkingLevels []ThinkingLevel
 	// Feature 为该 ID 在生成请求中选中的官网工具，普通对话模型为零
 	Feature Feature
+	// Gem 为 Gem 条目的 Gem ID，写入生成请求 19 槽
+	Gem string
 }
 
 // ImageModelID 是官网 Create image 工具的公开模型 ID
@@ -59,6 +61,8 @@ type ModelCatalog struct {
 	defaultIndex int
 	// options 为 payload[19] 中各工具的选项组
 	options map[Feature][]toolOption
+	// personalIntelligence 表示 payload[21] 给出了 Personal Intelligence 开关，访客与未开放该功能的账号没有
+	personalIntelligence bool
 }
 
 // toolOption 是官网工具选项组中的一项，id 写入生成请求 55 槽；source 表示属于 Sources 多选组（组槽 2 为 2）
@@ -246,7 +250,8 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 	sort.SliceStable(models, func(left, right int) bool {
 		return models[left].ID < models[right].ID
 	})
-	catalog := ModelCatalog{models: models, lookup: make(map[string]int), defaultIndex: -1, options: parseToolOptions(payload)}
+	_, personalIntelligence := arrayAt(payload, 21)
+	catalog := ModelCatalog{models: models, lookup: make(map[string]int), defaultIndex: -1, options: parseToolOptions(payload), personalIntelligence: personalIntelligence}
 	for index, model := range models {
 		catalog.lookup[strings.ToLower(model.ID)] = index
 		catalog.lookup[strings.ToLower(model.DisplayName)] = index
@@ -269,6 +274,9 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 		}
 		entry := defaultModel
 		entry.ID, entry.DisplayName, entry.Description, entry.Default, entry.Feature = tool.id, tool.displayName, tool.description, false, tool.feature
+		if tool.feature == FeatureVideo {
+			entry.Capabilities = append(slices.Clone(entry.Capabilities), "predictLongRunning")
+		}
 		catalog.add(entry)
 	}
 	taskLevels := parseThinkingLevels(payload, 2)
@@ -281,6 +289,14 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 		catalog.add(entry)
 	}
 	return catalog, nil
+}
+
+// removeTools 去掉目录末尾的官网工具与 Task 条目，用于官网工具菜单全部禁用的访客会话
+func (c *ModelCatalog) removeTools() {
+	for index := len(c.models) - 1; index >= 0 && c.models[index].Feature != 0; index-- {
+		delete(c.lookup, strings.ToLower(c.models[index].ID))
+		c.models = c.models[:index]
+	}
 }
 
 // add 追加只按公开 ID 查找的官网工具条目
@@ -343,14 +359,21 @@ func (m Model) thinkingLevel(requested ThinkingLevel) ThinkingLevel {
 	return selected
 }
 
-// clientFeatures 是网页客户端在模型扩展头第 8 槽声明的功能编号
+// clientFeatures 是登录页面在模型扩展头第 8 槽声明的功能编号
 var clientFeatures = []int{4, 5, 6, 8, 16, 19, 20}
 
+// guestClientFeatures 是访客页面在模型扩展头第 8 槽声明的功能编号
+var guestClientFeatures = []int{4, 6, 16, 19, 20}
+
 // buildModelHeader 构造包含模型、会话类型、思考强度、构建标签与请求计时的生成请求头，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
-func buildModelHeader(model Model, chatMode any, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) (string, error) {
+func buildModelHeader(features []int, model Model, chatMode any, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) (string, error) {
+	var levelSlot any
+	if thinkingLevel != 0 {
+		levelSlot = int(thinkingLevel)
+	}
 	header, err := json.Marshal([]any{
 		1, nil, nil, nil, model.Hash, nil, nil, chatMode,
-		slices.Concat(clientFeatures, clientFeatures), nil, nil, model.Tier, nil, nil, model.Mode, int(thinkingLevel), clientID,
+		slices.Concat(features, features), nil, nil, model.Tier, nil, nil, model.Mode, levelSlot, clientID,
 		[]string{buildLabel}, nil, timing,
 	})
 	if err != nil {
@@ -360,7 +383,7 @@ func buildModelHeader(model Model, chatMode any, thinkingLevel ThinkingLevel, cl
 }
 
 // buildGenericHeader 构造 batchexecute 请求使用的客户端头，mode 与 level 为零时对应槽为空
-func buildGenericHeader(clientID string, buildLabel string, mode int, level ThinkingLevel, timing []any) string {
+func buildGenericHeader(features []int, clientID string, buildLabel string, mode int, level ThinkingLevel, timing []any) string {
 	var modeSlot, levelSlot any
 	if mode != 0 {
 		modeSlot = mode
@@ -368,18 +391,18 @@ func buildGenericHeader(clientID string, buildLabel string, mode int, level Thin
 	if level != 0 {
 		levelSlot = int(level)
 	}
-	header, _ := json.Marshal([]any{1, nil, nil, nil, nil, nil, nil, nil, clientFeatures, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}, nil, timing})
+	header, _ := json.Marshal([]any{1, nil, nil, nil, nil, nil, nil, nil, features, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}, nil, timing})
 	return string(header)
 }
 
 // buildConversationHeader 构造会话内 batchexecute 请求的客户端头，第 7 槽为 Temporary Chat 状态，不写模型 hash 与层级
-func buildConversationHeader(clientID string, buildLabel string, temporaryChat bool, mode int, level ThinkingLevel, timing []any) string {
+func buildConversationHeader(features []int, clientID string, buildLabel string, temporaryChat bool, mode int, level ThinkingLevel, timing []any) string {
 	chatMode := 0
 	if temporaryChat {
 		chatMode = 1
 	}
 	header, _ := json.Marshal([]any{
-		1, nil, nil, nil, nil, nil, nil, chatMode, slices.Concat(clientFeatures, clientFeatures),
+		1, nil, nil, nil, nil, nil, nil, chatMode, slices.Concat(features, features),
 		nil, nil, nil, nil, nil, mode, int(level), clientID, []string{buildLabel}, nil, timing,
 	})
 	return string(header)

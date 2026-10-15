@@ -16,7 +16,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func defaultChromeRoot() (string, error) {
+// DefaultChromeRoot 返回本机 Chrome User Data 目录
+func DefaultChromeRoot() (string, error) {
 	localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
 	if localAppData == "" {
 		return "", fmt.Errorf("环境变量 LOCALAPPDATA 为空")

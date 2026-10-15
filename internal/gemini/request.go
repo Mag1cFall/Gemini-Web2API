@@ -70,6 +70,8 @@ type GenerateRequest struct {
 	ModelMode     int
 	ThinkingLevel ThinkingLevel
 	Feature       Feature
+	// Gem 为在 Gem 中对话时的 Gem ID
+	Gem string
 	// AspectRatio 为生成媒体请求的宽高比，例如 16:9 或 1536x1024，空值使用官网默认
 	AspectRatio string
 	// tools 为工具选中的选项，工具没有选项组时为 nil
@@ -78,8 +80,10 @@ type GenerateRequest struct {
 	researchConfirm bool
 	// researchPlan 接收 Deep Research 计划卡片上确认按钮的文字
 	researchPlan *string
-	Files        []FileData
-	Conversation *ConversationState
+	// personalIntelligence 表示账号目录提供 Personal Intelligence 开关
+	personalIntelligence bool
+	Files                []FileData
+	Conversation         *ConversationState
 	// Branch 表示从会话中较早的回答继续，官网对应编辑该回答之后的提问
 	Branch bool
 }

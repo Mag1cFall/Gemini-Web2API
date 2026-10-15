@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Name=Gemini-Web2API
+Comment=Gemini Web API proxy and desktop console
+Exec=gemini-web2api
+Terminal=false
+Type=Application
+Icon=gemini-web2api
+Categories=Development;Network;
+StartupWMClass=gemini-web2api

@@ -45,7 +45,14 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			if file != nil {
 				files = append(files, *file)
 			}
-		case "document", "input_file", "input_audio", "audio", "input_video", "video":
+		case "document", "input_file", "input_audio", "audio", "input_video", "video", "file":
+			if partType == "file" && len(part["file"]) > 0 {
+				var nested map[string]json.RawMessage
+				if err := json.Unmarshal(part["file"], &nested); err != nil {
+					return "", nil, fmt.Errorf("file 内容段格式无效: %w", err)
+				}
+				part = nested
+			}
 			label, file, err := decodeFilePart(ctx, part, client)
 			if err != nil {
 				return "", nil, err
@@ -54,6 +61,8 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			if file != nil {
 				files = append(files, *file)
 			}
+		case "server_tool_use", "web_search_tool_result":
+			appendTranscriptObject(&builder, part)
 		case "tool_use":
 			var id, name string
 			var input json.RawMessage
@@ -106,6 +115,9 @@ func decodeMarkdownImages(ctx context.Context, text string, client *gemini.Clien
 }
 
 func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, client *gemini.Client) (string, *gemini.FileData, error) {
+	if file, ok, err := referencedFile(ctx, part); ok || err != nil {
+		return "[Image]", file, err
+	}
 	var imageURL string
 	if raw := part["image_url"]; len(raw) > 0 {
 		if json.Unmarshal(raw, &imageURL) != nil {
@@ -118,6 +130,9 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 	}
 	if imageURL == "" {
 		_ = json.Unmarshal(part["url"], &imageURL)
+	}
+	if isYouTubeURL(imageURL) {
+		return "\n" + imageURL + "\n", nil, nil
 	}
 	if imageURL != "" && !strings.HasPrefix(imageURL, "data:") {
 		data, err := client.FetchMedia(ctx, imageURL)
@@ -167,6 +182,9 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 }
 
 func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client *gemini.Client) (string, *gemini.FileData, error) {
+	if file, ok, err := referencedFile(ctx, part); ok || err != nil {
+		return "[File]", file, err
+	}
 	var source struct {
 		Type      string `json:"type"`
 		MediaType string `json:"media_type"`
@@ -202,6 +220,9 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 	_ = json.Unmarshal(part["filename"], &filename)
 	if fileURL == "" {
 		fileURL = source.URL
+	}
+	if isYouTubeURL(fileURL) {
+		return "\n" + fileURL + "\n", nil, nil
 	}
 	if fileURL != "" && !strings.HasPrefix(fileURL, "data:") {
 		data, err := client.FetchMedia(ctx, fileURL)

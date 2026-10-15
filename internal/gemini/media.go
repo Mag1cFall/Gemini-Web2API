@@ -75,7 +75,7 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, httpStatusError(resp.StatusCode, "media fetch")
+			return nil, responseStatusError(resp, "media fetch")
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()

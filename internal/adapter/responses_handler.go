@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 	"github.com/gin-gonic/gin"
 )
@@ -52,10 +55,16 @@ type ResponsesRequest struct {
 	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
 	Truncation         string          `json:"truncation,omitempty"`
 	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
+	Store              *bool           `json:"store,omitempty"`
+	Background         bool            `json:"background,omitempty"`
+	Metadata           json.RawMessage `json:"metadata,omitempty"`
 }
 
-// ResponsesHandler 处理 OpenAI Responses API
-func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
+// ResponsesHandler 处理 OpenAI Responses API，store 不为 false 的响应写入账本库，background 为 true 时立即返回 queued
+func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
+	useStore(store)
+	configureSessionStore(pool, store)
+	failInterruptedResponses(store)
 	return func(c *gin.Context) {
 		var request ResponsesRequest
 		err := decodeRequest(c, &request)
@@ -63,6 +72,10 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
+		if !request.Background || request.Stream {
+			logging.FromContext(c.Request.Context()).Begin("responses", request.Model, request.Stream, responsesInputCount(request.Input), len(request.Tools))
+		}
+		bindScope(c, pool, request.Model)
 		if request.Model == "" || len(request.Input) == 0 {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "model and input are required")
 			return
@@ -96,17 +109,46 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		sessionKey := conversationKey(request.PreviousResponseID, conversationID, c.GetHeader("X-Conversation-ID"))
 		responseID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
+		media := generationMedia{requireImage: bridge.RequireImageGeneration, aspectRatio: bridge.AspectRatio}
+		if request.Background && !request.Stream {
+			startBackgroundResponse(c, pool, store, request, responsesRun{
+				id: responseID, created: created, sessionKey: sessionKey, media: media,
+				thinkingLevel: thinkingLevel, bridge: bridge, includeThoughts: includeThoughts,
+			})
+			return
+		}
+		ctx := c.Request.Context()
 
 		if request.Stream {
 			setSSEHeaders(c)
+			if request.Background {
+				requestContext := ctx
+				detached, cancel := context.WithCancelCause(context.WithoutCancel(requestContext))
+				defer cancel(nil)
+				logging.FromContext(requestContext).Detach(cancel)
+				ctx = detached
+				responseJobs.Lock()
+				responseJobs.jobs[responseID] = &responseJob{cancel: func() { cancel(nil) }}
+				responseJobs.Unlock()
+				defer finishResponseJob(responseID)
+				c.Writer = &detachedWriter{ResponseWriter: c.Writer}
+				running := responseShell(responseID, config.MapModel(request.Model), created, "in_progress")
+				applyRequestFields(running, request)
+				saveResponse(ctx, store, request, responseID, created, running)
+			}
+			defer startKeepalive(c, openAIKeepalive)()
 			writer := responseSequenceWriter{writer: c.Writer}
 			streamModel := config.MapModel(request.Model)
-			if err := writer.start(responseID, streamModel, created); err != nil {
+			startStatus := "in_progress"
+			if request.Background {
+				startStatus = "queued"
+			}
+			if err := writer.startWith(responseID, streamModel, created, startStatus, request); err != nil {
 				return
 			}
 			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{requireImage: bridge.RequireImageGeneration, aspectRatio: bridge.AspectRatio}, thinkingLevel,
+				ctx, pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, media, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildResponsesPrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
@@ -129,27 +171,34 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			c.Set("account_id", accountID)
 			if err != nil {
 				if !projection.errorSent {
-					_ = writer.fail(err)
+					_ = writer.fail(streamFailure(c, err))
 				}
+				saveFailedResponse(ctx, store, request, responseID, created, publicError(c, err))
 				return
 			}
-			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-				_ = writer.fail(err)
+			if err := inlineResultMedia(ctx, &result); err != nil {
+				_ = writer.fail(streamFailure(c, err))
+				saveFailedResponse(ctx, store, request, responseID, created, publicError(c, err))
 				return
 			}
 			response, err := buildResponsesObject(responseID, created, request.PreviousResponseID, result, bridge, includeThoughts)
 			if err != nil {
-				_ = writer.fail(err)
+				_ = writer.fail(streamFailure(c, err))
+				saveFailedResponse(ctx, store, request, responseID, created, publicError(c, err))
 				return
 			}
+			applyRequestFields(response, request)
+			if !finishResponseJob(responseID) {
+				saveResponse(ctx, store, request, responseID, created, response)
+			}
 			if err := writer.finishProjected(response, result.Accumulator, projection); err != nil {
-				_ = writer.fail(err)
+				_ = writer.fail(streamFailure(c, err))
 			}
 			return
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{requireImage: bridge.RequireImageGeneration, aspectRatio: bridge.AspectRatio}, thinkingLevel,
+			ctx, pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, media, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildResponsesPrompt(c, client, request, continuation, bridge)
 			}, nil, nil,
@@ -169,6 +218,8 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
 			return
 		}
+		applyRequestFields(response, request)
+		saveResponse(ctx, store, request, responseID, created, response)
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
 		c.JSON(http.StatusOK, response)
@@ -176,7 +227,11 @@ func ResponsesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 }
 
 func buildResponsesPrompt(c *gin.Context, client *gemini.Client, request ResponsesRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
-	messages, err := responsesMessages(request.Input)
+	input, err := expandCompaction(request.Input)
+	if err != nil {
+		return "", nil, err
+	}
+	messages, err := responsesMessages(input)
 	if err != nil {
 		return "", nil, err
 	}
@@ -539,8 +594,10 @@ func responseShell(id string, model string, created int64, status string) gin.H 
 }
 
 type responseSequenceWriter struct {
-	writer             http.ResponseWriter
-	sequence           int
+	writer   http.ResponseWriter
+	sequence int
+	// startAt 是开始写出的事件序号，流式取回保存的响应时为 starting_after 加 1
+	startAt            int
 	responseID         string
 	model              string
 	created            int64
@@ -557,6 +614,9 @@ func (w *responseSequenceWriter) emit(eventType string, payload gin.H) error {
 	payload["type"] = eventType
 	payload["sequence_number"] = w.sequence
 	w.sequence++
+	if w.sequence <= w.startAt {
+		return nil
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -568,14 +628,23 @@ func (w *responseSequenceWriter) emit(eventType string, payload gin.H) error {
 }
 
 func (w *responseSequenceWriter) start(responseID string, model string, created int64) error {
+	return w.startWith(responseID, model, created, "in_progress", ResponsesRequest{})
+}
+
+// startWith 发送 response.created 与 response.in_progress，后台响应的 created 状态为 queued
+func (w *responseSequenceWriter) startWith(responseID string, model string, created int64, status string, request ResponsesRequest) error {
 	w.responseID = responseID
 	w.model = model
 	w.created = created
 	w.outputIndexes = make(map[string]int)
-	if err := w.emit("response.created", gin.H{"response": responseShell(responseID, model, created, "in_progress")}); err != nil {
+	shell := responseShell(responseID, model, created, status)
+	applyRequestFields(shell, request)
+	if err := w.emit("response.created", gin.H{"response": shell}); err != nil {
 		return err
 	}
-	return w.emit("response.in_progress", gin.H{"response": responseShell(responseID, model, created, "in_progress")})
+	running := responseShell(responseID, model, created, "in_progress")
+	applyRequestFields(running, request)
+	return w.emit("response.in_progress", gin.H{"response": running})
 }
 
 func (w *responseSequenceWriter) live(event gemini.Event) error {

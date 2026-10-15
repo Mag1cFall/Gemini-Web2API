@@ -55,6 +55,7 @@ type ContentBlock struct {
 	IsError   *bool                   `json:"is_error,omitempty"`
 	Source    *ImageSource            `json:"source,omitempty"`
 	Data      string                  `json:"data,omitempty"`
+	Citations []map[string]any        `json:"citations,omitempty"`
 }
 
 type ImageSource struct {
@@ -93,10 +94,16 @@ type ClaudeResponse struct {
 }
 
 type Usage struct {
-	InputTokens              int  `json:"input_tokens"`
-	OutputTokens             int  `json:"output_tokens"`
-	CacheReadInputTokens     *int `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
+	InputTokens              int            `json:"input_tokens"`
+	OutputTokens             int            `json:"output_tokens"`
+	CacheReadInputTokens     *int           `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens *int           `json:"cache_creation_input_tokens,omitempty"`
+	ServerToolUse            *ServerToolUse `json:"server_tool_use,omitempty"`
+}
+
+// ServerToolUse 统计服务端工具的调用次数
+type ServerToolUse struct {
+	WebSearchRequests int `json:"web_search_requests"`
 }
 
 func ParseMessageContent(raw json.RawMessage) ([]ContentBlock, string, error) {

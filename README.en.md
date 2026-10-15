@@ -6,13 +6,18 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 
 ## Features
 
-- **OpenAI compatible**: `/v1/chat/completions`, `/v1/responses`, `/v1/models`
-- **Claude compatible**: `/v1/messages`
-- **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`
+- **OpenAI compatible**: `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/files`, `/v1/audio/*`, `/v1/videos`, `/v1/models`
+- **Claude compatible**: `/v1/messages`, Files API
+- **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:predictLongRunning`, Files API
 - **Streaming**: streams text and reasoning deltas; each protocol's thinking controls map to the official Low, Medium, and High levels
 - **Images**: supports multimodal input, image generation, and image editing; generated images are returned at full size through the official "Download full size image" request
 - **Official tools**: Create video, Create music, Canvas, Deep Research, Guided Learning, and Task mode are available as separate model IDs
-- **Multi-account balancing**: schedules Google accounts by model availability
+- **Multi-account balancing**: schedules Google accounts by model availability; usage and rate limits cool down only the affected model, with configurable concurrency and routing strategy
+- **Guest session**: when no account is available, serves the models the Gemini website offers without sign-in (currently `gemini-3.5-flash-lite`, without website tools or attachment uploads) through a signed-out session; ready accounts are always preferred
+- **Console and desktop app**: the web console shows live logs, active requests, usage and cost statistics, account import and management, the model catalog, settings, and a playground; desktop apps for Windows, macOS, and Linux add a tray icon, single instance, and launch at login
+- **Run logs**: colored columnar console logs that record each request's start, account selection, uploads, first output, account switches, waits, and completion
+- **Request ledger**: SQLite stores per-request usage, with statistics by model, account, and protocol and cost estimates at Gemini API prices
+- **Gems**: each account's Gems are available as `gem-<Gem ID>` model IDs
 - **Proxy**: supports a global HTTP, HTTPS or SOCKS5 proxy or a fixed per-account proxy
 - **Model aliases**: maps external model names to current Gemini models
 - **Protocol-only runtime**: runs without a browser or frontend scripts after account setup
@@ -34,13 +39,21 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 | `gemini-deep-research` | Deep Research | Research reports |  |
 | `gemini-guided-learning` | Guided Learning | Guided learning |  |
 
-At startup, the service reads each account's live Gemini Web model catalog and official tools; use `/v1/models` as the runtime source of truth. IDs are derived from official display names, so new models appear automatically. The `available_account_count`, `default`, and `thinking_levels` fields describe current account coverage, the default selection, and the available thinking levels. Tool IDs appear only for accounts that have the corresponding official tool and run on that account's official default model. The image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` map to the official 1:1, 9:16, 3:4, 4:3, and 16:9 ratios. For video IDs, `imageConfig.aspectRatio` maps to the official landscape 16:9 and portrait 9:16. Task, Deep Research, and video requests use saved chats, which remain in the account history. Deep Research returns its research plan and progress as reasoning and the finished report as text, which usually takes over ten minutes; set the client request timeout longer than that. Context windows, model access, and quotas depend on the account's plan and region. A local Gemini tokenizer reports tokens for text input, visible output, and visible reasoning summaries. Account usage is available from `/v1/accounts/usage`.
+- **Model catalog**: at startup the service reads each account's live Gemini Web model catalog and official tools; `/v1/models` is the runtime source of truth. IDs are derived from official display names, so new models appear automatically
+- **Catalog fields**: `available_account_count` is the number of usable accounts, `default` marks the default model, and `thinking_levels` lists the available thinking levels
+- **Tool models**: tool IDs appear only for accounts that have the corresponding official tool and run on that account's official default model
+- **Images**: the image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` support 1:1, 9:16, 3:4, 4:3, and 16:9
+- **Video**: for video IDs, `imageConfig.aspectRatio` supports landscape 16:9 and portrait 9:16
+- **Chat history**: Task, Deep Research, and video requests use saved chats, which remain in the account history
+- **Deep Research**: the research plan and progress are returned as reasoning and the report as text; a run usually takes over ten minutes, so set the client request timeout longer than that
+- **Quotas**: context windows, model access, and quotas depend on the account's plan and region; account usage is available from `/v1/accounts/usage`
+- **Token usage**: text input, visible output, and reasoning summaries are counted with a local Gemini tokenizer; the token counting endpoints estimate images, audio, video, and PDFs with the Gemini API counting rules
 
 ## Quick Start
 
 ### One-click Windows start
 
-Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases), extract it, and double-click `start.bat`, or invoke it from cmd, PowerShell, or Git Bash. The script starts the executable in the same directory, building from source with Go 1.25.0+ when the executable is absent. An invocation without arguments starts interactive setup when no account state exists; an invocation with arguments passes them directly to the executable.
+Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases), extract it, and double-click `start.bat`, or invoke it from cmd, PowerShell, or Git Bash. The script starts the executable in the same directory, building the console frontend with pnpm and then the source with Go 1.25.0+ when the executable is absent. An invocation without arguments starts interactive setup when no account state exists, then starts the service and opens the console in the browser; an invocation with arguments passes them directly to the executable.
 
 ```powershell
 .\start.bat
@@ -48,11 +61,28 @@ Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1
 .\start.bat setup --email "name@example.com"
 ```
 
+### Desktop app
+
+Download the desktop build for your system from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases):
+
+| System | Package | Data directory |
+| --- | --- | --- |
+| Windows | `desktop-…-windows-amd64.zip` | Folder containing `gemini-web2api.exe` |
+| macOS | `darwin-universal.dmg` | `~/Library/Application Support/Gemini-Web2API` |
+| Linux | `AppImage` or `deb` | `~/.config/Gemini-Web2API` |
+
+- On Windows the desktop app is portable: unzip it and double-click `gemini-web2api.exe`; the window uses the system WebView2 runtime
+- The desktop app opens the console in a window and stays in the tray after the window closes; the tray menu copies the API address and toggles launch at login
+- Import accounts from local Chrome, cookies, or remote pairing on the console's Import account page
+- `.env`, `auth/`, and `data/` live in the data directory listed above
+
 ### Manual start
 
-Build the executable:
+Build the console frontend, then the executable:
 
 ```bash
+pnpm -C web install
+pnpm -C web build
 go build -o gemini-web2api.exe ./cmd/gemini-web2api
 ```
 
@@ -76,6 +106,18 @@ You can also paste the one-line value of a request's `Cookie` header. This state
 .\gemini-web2api.exe setup --cookie "SAPISID=...; __Secure-1PSID=..." --id account-name
 ```
 
+Import a cookie JSON exported by a browser extension or a Netscape `cookies.txt` file with `--cookie-file`:
+
+```powershell
+.\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name
+```
+
+When the service runs on a server without Chrome, generate a pairing token on the console's Import account page, then upload accounts from a computer signed in to Chrome. The token is read from standard input. Remote addresses other than the local machine require HTTPS; through an SSH tunnel such as `ssh -L 8007:127.0.0.1:8007 <server>`, use `http://127.0.0.1:8007`:
+
+```powershell
+.\gemini-web2api.exe setup --email "name@example.com" --remote https://example.com
+```
+
 Setup creates `auth/<account>/storage-state.json` and verifies the live model catalog. Chrome import also saves the device-bound material needed to renew cookies after Chrome exits. Daily startup is:
 
 ```powershell
@@ -94,12 +136,23 @@ The executable automatically reads `.env` from the current directory. Setup and 
 # Use Gemini Temporary Chat without writing website history
 GEMINI_SAVE_HISTORY=false
 
-# Local 2API access key
+# Local 2API access keys, comma-separated
 PROXY_API_KEY=
 
 # HTTP, HTTPS, or SOCKS5 proxy
 PROXY=
 ```
+
+### Docker
+
+```bash
+docker compose up -d
+```
+
+- `docker-compose.yml` uses `ghcr.io/mag1cfall/gemini-web2api:latest` and mounts the data directory at `./data`, which holds `.env`, `auth/`, and the request ledger
+- Set `PROXY_API_KEY` when the port is reachable from other hosts; opening the console from outside the container requires `ADMIN_AUTH_ENABLED=true` and `ADMIN_PASSWORD`
+- Add accounts with the console's cookie import or remote pairing, or copy `auth/<account>/` from another computer to `data/auth/`
+- Run `docker compose restart` after editing `data/.env`
 
 ### Proxy
 
@@ -116,29 +169,71 @@ To change an account's proxy, run setup again with the new proxy or edit `gemini
 ### OpenAI compatible
 
 ```text
-POST /v1/chat/completions
-POST /v1/responses
-POST /v1/images/generations
-POST /v1/images/edits
-GET  /v1/models
+POST   /v1/chat/completions
+POST   /v1/completions
+POST   /v1/responses
+GET    /v1/responses/{id}
+DELETE /v1/responses/{id}
+GET    /v1/responses/{id}/input_items
+POST   /v1/responses/{id}/cancel
+POST   /v1/responses/input_tokens
+POST   /v1/responses/compact
+POST   /v1/images/generations
+POST   /v1/images/edits
+POST   /v1/audio/speech
+POST   /v1/audio/transcriptions
+POST   /v1/audio/translations
+POST   /v1/videos
+GET    /v1/videos
+GET    /v1/videos/{id}
+GET    /v1/videos/{id}/content
+DELETE /v1/videos/{id}
+POST   /v1/files
+GET    /v1/files
+GET    /v1/files/{id}
+GET    /v1/files/{id}/content
+DELETE /v1/files/{id}
+GET    /v1/models
 ```
+
+- **Responses**: stored in `data/requests.db` by default and can be retrieved, have their input items listed, and be deleted; `store: false` skips storage. `background: true` returns `queued` immediately for later polling or cancellation
+- **Continuation**: `previous_response_id` and conversation IDs keep working across service restarts within `SESSION_TTL`
+- **Files**: uploaded files are stored in `data/files/` and referenced from generation requests by `file_id`
+- **Speech**: `/v1/audio/speech` uses the website's read-aloud feature and returns mp3, opus, wav, flac, or pcm; `voice` and `speed` have no effect
+- **Transcription and translation**: performed by the selected chat model
+- **Video**: `/v1/videos` uses `gemini-video`
+- **Capabilities Gemini Web lacks**: the Embeddings, Moderations, and Realtime endpoints return 404 `model_not_found`
 
 ### Claude compatible
 
 ```text
-POST /v1/messages
-POST /v1/messages/count_tokens
-GET  /v1/models
+POST   /v1/messages
+POST   /v1/messages/count_tokens
+POST   /v1/files
+GET    /v1/files
+GET    /v1/files/{id}
+DELETE /v1/files/{id}
+GET    /v1/models
 ```
+
+`/v1/files` requests with an `anthropic-version` or `anthropic-beta` header follow the Anthropic Files API; messages reference them with `source.file_id`.
 
 ### Gemini compatible
 
 ```text
-POST /v1beta/models/{model}:generateContent
-POST /v1beta/models/{model}:streamGenerateContent?alt=sse
-POST /v1beta/models/{model}:countTokens
-GET  /v1beta/models
+POST   /v1beta/models/{model}:generateContent
+POST   /v1beta/models/{model}:streamGenerateContent?alt=sse
+POST   /v1beta/models/{model}:countTokens
+POST   /v1beta/models/{model}:predictLongRunning
+GET    /v1beta/operations/{id}
+POST   /upload/v1beta/files
+GET    /v1beta/files
+GET    /v1beta/files/{name}
+DELETE /v1beta/files/{name}
+GET    /v1beta/models
 ```
+
+`streamGenerateContent` without `alt=sse` returns a JSON array. Uploaded files are referenced with `fileData.fileUri`, and YouTube links are read as video content the same way as on the website. `predictLongRunning` uses `gemini-video`.
 
 ### Service status
 
@@ -149,7 +244,15 @@ GET  /v1/accounts/health
 GET  /v1/accounts/usage
 ```
 
-Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, and `x-goog-api-key`.
+Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, `x-goog-api-key`, and `x-api-key`. Without `PROXY_API_KEY`, only web pages opened from a local address can call the API from a browser; pages on other sites need a key configured on the service and sent with each request.
+
+### Console
+
+Open `http://127.0.0.1:8007/` in a browser for the console, which uses the `/api/*` endpoints.
+
+- **Remote access**: only local connections are accepted by default; with `ADMIN_AUTH_ENABLED=true`, `ADMIN_PASSWORD`, and `LISTEN_ADDR` on an externally reachable address, other devices can sign in
+- **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service; in nginx, use `proxy_set_header Host $host;`
+- **Applying settings**: settings saved in the console are written back to `.env`; the listen address, auth paths, and log format take effect after a restart, and everything else applies immediately
 
 ## Example
 
@@ -172,12 +275,25 @@ Use `http://127.0.0.1:8007/v1` as the OpenAI SDK base URL. Claude and Google Gen
 ```text
 cmd/gemini-web2api/  # Program entry point
 internal/
+  accounts/          # Account initialization, renewal, cookie rotation, and runtime changes
   adapter/           # OpenAI, Claude, and Gemini projections
+  admin/             # Console API
+  app/               # Configuration, instance lock, and service lifecycle
   auth/              # Account state loading and persistence
   balancer/          # Multi-account scheduling
-  chromeauth/        # Chrome account setup
+  chromeauth/        # Chrome and cookie account import
+  claude/            # Claude protocol types and stream events
   config/            # Service configuration
+  desktop/           # Desktop window and tray
   gemini/            # Gemini Web protocol client
+  logging/           # Run logs and request tracing
+  pricing/           # Equivalent API prices
+  requestdb/         # Request ledger
+  streamio/          # HTTP stream flushing
+  tokencount/        # Local Gemini tokenizer counting
+  webui/             # Embedded console pages
+web/                 # Console frontend source
+build/               # Desktop icons and packaging configuration
 ```
 
 ## Environment Variables
@@ -187,15 +303,50 @@ internal/
 | `GEMINI_SAVE_HISTORY` | Write conversations to Gemini Web history | `false` |
 | `GEMINI_AUTH_STATES` | Auth file or directory, comma-separated | `auth` |
 | `LISTEN_ADDR` | Service listener | `127.0.0.1:8007` |
-| `PROXY_API_KEY` | Local 2API access key | empty |
+| `PROXY_API_KEY` | Local 2API access keys, comma-separated | empty |
 | `PROXY` | Global HTTP, HTTPS, or SOCKS5 proxy | empty |
 | `MODEL_MAPPING` | External model name to current model ID mapping | empty |
-| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure; accounts that fail startup initialization retry at this interval | `2m` |
+| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure | `2m` |
 | `SESSION_TTL` | Lifetime of explicit session state | `30m` |
 | `INIT_TIMEOUT` | Per-account startup timeout | `20s` |
+| `PER_ACCOUNT_CONCURRENCY` | Concurrent upstream requests per account | `1` |
+| `ROUTING_STRATEGY` | Routing strategy for requests without a session | `round-robin` |
+| `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| `LOG_FORMAT` | Console log format: `text` or `json` | `text` |
+| `REQUEST_BODY_LOG` | Keep the latest 1000 request and response bodies in the ledger | `false` |
+| `ADMIN_AUTH_ENABLED` | Console sign-in | `false` |
+| `ADMIN_USERNAME` | Console username | `admin` |
+| `ADMIN_PASSWORD` | Console password | empty |
 
-The `--auth` and `--listen` flags override auth paths and the listener address.
+`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts; with `fill-first`, the first idle account is preferred.
+
+The `--auth` and `--listen` flags override auth paths and the listener address; `--open-ui` controls whether the console opens in the browser after startup, and defaults to on when the program starts without arguments.
+
+## Troubleshooting
+
+### Windows Port Reserved by System
+
+If startup reports that the port configured by `LISTEN_ADDR` is unavailable while Task Manager shows no owning process, Hyper-V, WSL2, or Docker NAT may have reserved the port range.
+
+Run the following commands from an elevated PowerShell or CMD window.
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+If `8007` falls inside a reserved range, change `LISTEN_ADDR`, or restart WinNAT and inspect the range again:
+
+```powershell
+net stop winnat
+net start winnat
+```
+
+When the port is free, it can be reserved persistently:
+
+```powershell
+netsh int ipv4 add excludedportrange protocol=tcp startport=8007 numberofports=1 store=persistent
+```
 
 ## Notes
 
-Gemini Web is an internal protocol that can change with the website. Treat the live model catalog returned after startup as the source of truth. Development guidance is in [docs/development.md](docs/development.md); authentication, payload, and streaming details are in [docs/protocol.md](docs/protocol.md).
+Gemini Web is an internal protocol that can change with the website. Treat the live model catalog returned after startup as the source of truth. Issues and PRs are welcome. Development guidance is in [docs/development.md](docs/development.md); authentication, payload, and streaming details are in [docs/protocol.md](docs/protocol.md); logs and the request ledger are described in [docs/logging.md](docs/logging.md).

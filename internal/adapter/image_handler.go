@@ -11,6 +11,7 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/gin-gonic/gin"
 )
 
@@ -135,17 +136,15 @@ func ImageEditHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 }
 
 func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request ImageGenerationRequest, inputs []imageInput) {
+	logging.FromContext(c.Request.Context()).Begin("images", request.Model, request.Stream, 1, 0)
 	if strings.TrimSpace(request.Prompt) == "" {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "prompt is required")
-		return
-	}
-	if request.Stream {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "stream is not supported by the image endpoint")
 		return
 	}
 	if request.Model == "" {
 		request.Model = defaultImageModel(pool)
 	}
+	bindScope(c, pool, request.Model)
 	if request.Model == "" {
 		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No image model is available")
 		return
@@ -176,11 +175,11 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 	setUnsupportedParameters(c, nonEmptyImageParameters(request))
 
 	prompt := request.Prompt
-	images := make([]gin.H, 0, request.N)
+	images := make([][]byte, 0, request.N)
 	for index := 0; index < request.N && len(images) < request.N; index++ {
 		responseID := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), index)
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, "", false, request.Model, responseID, generationMedia{requireImage: true, aspectRatio: request.Size}, gemini.ThinkingLow,
+			c.Request.Context(), pool, "", false, request.Model, responseID, generationMedia{requireImage: true, aspectRatio: request.Size}, gemini.ThinkingLow, ToolBridge{},
 			func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 				files := make([]gemini.FileData, 0, len(inputs))
 				for _, input := range inputs {
@@ -206,19 +205,49 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 				writeOpenAIError(c, upstreamStatus(err), "image_download_error", err.Error())
 				return
 			}
-			if request.ResponseFormat == "url" {
-				mimeType := http.DetectContentType(data)
-				images = append(images, gin.H{"url": fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))})
-				continue
-			}
-			images = append(images, gin.H{"b64_json": base64.StdEncoding.EncodeToString(data)})
+			images = append(images, data)
 		}
 	}
 	if len(images) == 0 {
 		writeOpenAIError(c, http.StatusBadGateway, "image_generation_error", "Upstream returned no generated images")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"created": time.Now().Unix(), "data": images})
+	created := time.Now().Unix()
+	if request.Stream {
+		event := "image_generation.completed"
+		if inputs != nil {
+			event = "image_edit.completed"
+		}
+		setSSEHeaders(c)
+		for _, data := range images {
+			payload := imageFields(data)
+			payload["type"], payload["b64_json"], payload["created_at"] = event, base64.StdEncoding.EncodeToString(data), created
+			if err := writeSSEJSON(c.Writer, payload); err != nil {
+				return
+			}
+		}
+		return
+	}
+	data := make([]gin.H, 0, len(images))
+	for _, image := range images {
+		if request.ResponseFormat == "url" {
+			data = append(data, gin.H{"url": fmt.Sprintf("data:%s;base64,%s", http.DetectContentType(image), base64.StdEncoding.EncodeToString(image))})
+			continue
+		}
+		data = append(data, gin.H{"b64_json": base64.StdEncoding.EncodeToString(image)})
+	}
+	response := imageFields(images[0])
+	response["created"], response["data"] = created, data
+	c.JSON(http.StatusOK, response)
+}
+
+// imageFields 返回生成图片的 output_format 与 size
+func imageFields(data []byte) gin.H {
+	fields := gin.H{"output_format": strings.TrimPrefix(http.DetectContentType(data), "image/")}
+	if width, height := imageSize(data); width > 0 && height > 0 {
+		fields["size"] = fmt.Sprintf("%dx%d", width, height)
+	}
+	return fields
 }
 
 func defaultImageModel(pool *balancer.AccountPool) string {

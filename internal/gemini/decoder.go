@@ -32,8 +32,12 @@ type FrameDecoder struct {
 	sawEnd        bool
 	// background 表示生成流以后台生成记录结束，成品由 hNvQHb 读取
 	background bool
+	// awaitIncomplete 表示生成流没有完成的候选时按后台生成处理，用于 Deep Research 计划轮
+	awaitIncomplete bool
 	// researchConfirm 为 Deep Research 计划卡片上确认按钮的文字
 	researchConfirm string
+	// heartbeat 在收到上游等待心跳帧 [{"37":[n]}] 时调用
+	heartbeat func()
 }
 
 type codeEventKey struct {
@@ -85,6 +89,12 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 			if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
 				return fmt.Errorf("decode wrb.fr payload: %w", err)
 			}
+			if isHeartbeat(payload) {
+				if d.heartbeat != nil {
+					d.heartbeat()
+				}
+				return nil
+			}
 			return d.decodePayload(payload, activeState, emit)
 		case "er":
 			code, _ := intAt(record, 5)
@@ -97,7 +107,8 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 			return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
 		case "e":
 			d.sawEnd = true
-			if d.background && !d.sawComplete && !d.sawError {
+			if (d.background || d.awaitIncomplete) && !d.sawComplete && !d.sawError {
+				d.background = true
 				return nil
 			}
 			return d.finish(activeState, emit)
@@ -114,6 +125,19 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 		return retryableProtocolError("gemini protocol stream ended without terminal frame", nil)
 	}
 	return nil
+}
+
+// isHeartbeat 判断载荷是否为上游生成期间约每 60 s 一帧的等待心跳 [{"37":[n]}]
+func isHeartbeat(payload []any) bool {
+	if len(payload) != 1 {
+		return false
+	}
+	fields, ok := payload[0].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = fields["37"]
+	return ok && len(fields) == 1
 }
 
 // decodeTurn 解析 hNvQHb 读取到的已完成回答
@@ -356,7 +380,7 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 
 func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit func(Event) error) error {
 	raw, _ := stringPath(candidate, 1, 0)
-	text, codes := parseStructuredContent(expandDocuments(candidate, raw))
+	text, codes := parseStructuredContent(expandDocuments(candidate, stripFileCitations(candidate, stripChameleon(raw))))
 	seen := make(map[codeEventKey]struct{}, len(codes))
 	for _, code := range codes {
 		key := codeEventKey{Candidate: candidateIndex, Index: code.Index, Type: code.Type}
@@ -632,6 +656,39 @@ var documentChipPattern = regexp.MustCompile(`http://googleusercontent\.com/imme
 
 // researchPlanPattern 匹配正文中 Deep Research 计划卡片的占位链接
 var researchPlanPattern = regexp.MustCompile(`http://googleusercontent\.com/deep_research_confirmation_content/\d+`)
+
+// chameleonMarker 是正文开头官网页面不显示的 Bento 卡片代码块的起始行
+const chameleonMarker = "```json?chameleon"
+
+// stripChameleon 去掉正文开头的 chameleon 卡片代码块；正文仍可能是该代码块的开头或代码块尚未结束时返回空正文
+func stripChameleon(raw string) string {
+	if strings.HasPrefix(chameleonMarker, raw) {
+		return ""
+	}
+	if !strings.HasPrefix(raw, chameleonMarker) {
+		return raw
+	}
+	end := strings.Index(raw[len(chameleonMarker):], "\n```")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimLeft(raw[len(chameleonMarker)+end+len("\n```"):], " \r\n")
+}
+
+// stripFileCitations 去掉正文中富内容第 44 项列出的上传文件引用标记，官网把它们渲染为来源标签
+func stripFileCitations(candidate []any, raw string) string {
+	field, ok := richContentField(candidate, 43)
+	if !ok {
+		return raw
+	}
+	entries, _ := field.([]any)
+	for _, entry := range entries {
+		if marker, _ := stringPath(entry, 0, 0); strings.HasPrefix(marker, "[cite") {
+			raw = strings.ReplaceAll(raw, marker, "")
+		}
+	}
+	return raw
+}
 
 // expandDocuments 把 Deep Research 计划占位链接换成计划标题与步骤；回答完成后把文档占位链接换成 candidate[30] 的文档内容，完成前正文截止到第一个文档占位链接
 func expandDocuments(candidate []any, raw string) string {

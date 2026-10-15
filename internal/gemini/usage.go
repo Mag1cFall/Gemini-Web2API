@@ -45,6 +45,7 @@ func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
 		return UsageInfo{}, err
 	}
 	c.contextSize.Store(int64(contextWindow))
+	c.usage.Store(&usage)
 	return usage, nil
 }
 
@@ -72,7 +73,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	query.Set("rt", "c")
 	req.URL.RawQuery = query.Encode()
 	c.applyXHRHeaders(req)
-	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.clientID, bootstrap.BL, 0, 0, requestTiming(time.Since(started), time.Now())))
+	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), c.clientID, bootstrap.BL, 0, 0, requestTiming(time.Since(started), time.Now())))
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 
 	resp, err := c.httpClient.Do(req)
@@ -84,7 +85,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 		return UsageInfo{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		protocolErr := httpStatusError(resp.StatusCode, "usage")
+		protocolErr := responseStatusError(resp, "usage")
 		resp.Body.Close()
 		if allowRefresh && isAuthenticationError(protocolErr) && c.refresh != nil {
 			if err := c.refreshCookies(ctx); err != nil {
@@ -112,7 +113,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 			}
 			return c.fetchUsage(ctx, false)
 		}
-		return UsageInfo{}, retryableProtocolError(fmt.Sprintf("account %q is not signed in", c.displayAccountID()), nil)
+		return UsageInfo{}, retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
 	}
 	usage, err := decodeUsageResponse(bytes.NewReader(body))
 	if allowRefresh && errors.Is(err, errUsageNotSignedIn) && c.refresh != nil {

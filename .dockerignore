@@ -1,0 +1,10 @@
+.git
+.github
+auth
+data
+build
+web/node_modules
+internal/webui/dist
+*.exe
+*.log
+.env

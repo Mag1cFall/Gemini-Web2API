@@ -13,6 +13,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/claude"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 	"github.com/gin-gonic/gin"
 )
@@ -26,6 +27,8 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
+		logging.FromContext(c.Request.Context()).Begin("messages", request.Model, request.Stream, len(request.Messages), len(request.Tools))
+		bindScope(c, pool, request.Model)
 		if request.Model == "" || len(request.Messages) == 0 || request.MaxTokens == nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "model, messages and max_tokens are required")
 			return
@@ -56,12 +59,13 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 
 		if request.Stream {
 			setSSEHeaders(c)
+			defer startKeepalive(c, anthropicKeepalive)()
 			processor := claude.NewStreamProcessor(config.MapModel(request.Model), c.Writer, responseID)
 			projection := newStreamProjection(bridge, includeThoughts)
 			thinkingOpen := false
 			thinkingBlock := 0
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel,
+				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildClaudePrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
@@ -87,23 +91,23 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			c.Set("account_id", accountID)
 			if err != nil {
 				if !projection.errorSent {
-					_ = processor.EmitError(err)
+					_ = processor.EmitErrorType(claudeUpstreamType(err), streamFailure(c, err))
 				}
 				return
 			}
 			processor.SetModel(result.Model)
 			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-				_ = processor.EmitError(err)
+				_ = processor.EmitError(streamFailure(c, err))
 				return
 			}
 			primary := result.Accumulator.Primary()
 			if err := validateHostedOutput(primary, bridge); err != nil {
-				_ = processor.EmitError(err)
+				_ = processor.EmitError(streamFailure(c, err))
 				return
 			}
 			content, calls, err := bridge.Parse(primary.Text)
 			if err != nil {
-				_ = processor.EmitError(err)
+				_ = processor.EmitError(streamFailure(c, err))
 				return
 			}
 			calls = assignToolCallIDs(calls, responseID)
@@ -123,7 +127,21 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					return
 				}
 			}
-			if projection.bufferText {
+			if bridge.WebSearch && len(primary.Citations) > 0 && projection.bufferText && projection.textRunes == 0 {
+				content = renderCandidateMarkdown(content, primary, 0)
+				blocks := anthropicSearchBlocks(responseID, primary.Citations)
+				if err := processor.EmitServerToolUse(blocks[0]["id"].(string), "web_search", blocks[0]["input"]); err != nil {
+					return
+				}
+				if err := processor.EmitBlock(blocks[1]); err != nil {
+					return
+				}
+				for _, block := range anthropicCitedText(content, primary.Citations) {
+					if err := processor.EmitCitedText(block.Text, block.Citations); err != nil {
+						return
+					}
+				}
+			} else if projection.bufferText {
 				content = renderCandidateMarkdown(content, primary, projection.textRunes)
 				content = renderCitationMarkdown(content, primary.Citations)
 				if content != "" {
@@ -150,7 +168,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel,
+			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildClaudePrompt(c, client, request, continuation, bridge)
 			}, nil, nil,
@@ -177,13 +195,24 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 		calls = assignToolCallIDs(calls, responseID)
 		content = renderCandidateMarkdown(content, primary, 0)
-		content = renderCitationMarkdown(content, primary.Citations)
+		searched := bridge.WebSearch && len(primary.Citations) > 0
 
 		blocks := make([]claude.ContentBlock, 0)
 		if includeThoughts && primary.Thought != "" {
 			blocks = append(blocks, claude.ContentBlock{Type: "thinking", Thinking: primary.Thought, Signature: thinkingSignature(responseID, 0)})
 		}
-		if content != "" {
+		if searched {
+			search := anthropicSearchBlocks(responseID, primary.Citations)
+			input := map[string]interface{}(search[0]["input"].(gin.H))
+			results, _ := json.Marshal(search[1]["content"])
+			blocks = append(blocks,
+				claude.ContentBlock{Type: "server_tool_use", ID: search[0]["id"].(string), Name: "web_search", Input: &input},
+				claude.ContentBlock{Type: "web_search_tool_result", ToolUseID: search[0]["id"].(string), Content: results},
+			)
+			for _, block := range anthropicCitedText(content, primary.Citations) {
+				blocks = append(blocks, claude.ContentBlock{Type: "text", Text: block.Text, Citations: block.Citations})
+			}
+		} else if content = renderCitationMarkdown(content, primary.Citations); content != "" {
 			blocks = append(blocks, claude.ContentBlock{Type: "text", Text: content})
 		}
 		for _, call := range calls {
@@ -206,6 +235,9 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			usage := result.Accumulator.Usage
 			response.Usage = &claude.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens()}
 		}
+		if searched {
+			response.Usage.ServerToolUse = &claude.ServerToolUse{WebSearchRequests: 1}
+		}
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
 		c.Header("X-Provider-Model", result.ProviderModel)
@@ -225,57 +257,24 @@ func ClaudeCountTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "model and messages are required")
 			return
 		}
+		bindScope(c, pool, request.Model)
 		knownModel, _ := modelStatus(pool, request.Model)
 		if !knownModel {
 			writeClaudeError(c, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is unavailable", request.Model))
 			return
-		}
-		for _, message := range request.Messages {
-			var parts []map[string]json.RawMessage
-			if json.Unmarshal(message.Content, &parts) == nil {
-				for _, part := range parts {
-					var partType string
-					_ = json.Unmarshal(part["type"], &partType)
-					switch partType {
-					case "image", "image_url", "input_image", "document", "input_file", "input_audio", "audio", "input_video", "video":
-						writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "本地 count_tokens 当前只支持文本与工具内容")
-						return
-					}
-				}
-			}
 		}
 		bridge, err := claudeToolBridge(request)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-		prompt, _, err := buildClaudePrompt(c, nil, request, false, bridge)
+		prompt, files, err := buildClaudePrompt(c, countClient(pool, request.Model), request, false, bridge)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"input_tokens": tokencount.Content(prompt)})
+		c.JSON(http.StatusOK, gin.H{"input_tokens": tokencount.Content(prompt) + mediaTokens(files)})
 	}
-}
-
-// ClaudeListModelsHandler 返回 Anthropic 模型目录
-func ClaudeListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		writeClaudeModelList(c, availableModels(pool))
-	}
-}
-
-func writeClaudeModelList(c *gin.Context, models []availableModel) {
-	data := make([]gin.H, 0, len(models))
-	for _, model := range models {
-		data = append(data, gin.H{
-			"id": model.ID, "type": "model", "display_name": model.DisplayName,
-			"created_at": "1970-01-01T00:00:00Z", "default": model.Default,
-			"context_window": model.MaxInputTokenLimit, "min_context_window": model.MinInputTokenLimit,
-			"available_account_count": model.AccountCount, "thinking_levels": thinkingLevelNames(model.ThinkingLevels),
-		})
-	}
-	c.JSON(http.StatusOK, gin.H{"data": data, "has_more": false, "first_id": firstModelID(models), "last_id": lastModelID(models)})
 }
 
 func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.ClaudeRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
@@ -388,19 +387,6 @@ func unsupportedClaudeParameters(request claude.ClaudeRequest) []string {
 		fields = append(fields, "stop_sequences")
 	}
 	return fields
-}
-
-func firstModelID(models []availableModel) string {
-	if len(models) == 0 {
-		return ""
-	}
-	return models[0].ID
-}
-func lastModelID(models []availableModel) string {
-	if len(models) == 0 {
-		return ""
-	}
-	return models[len(models)-1].ID
 }
 
 func thinkingSignature(messageID string, blockIndex int) string {

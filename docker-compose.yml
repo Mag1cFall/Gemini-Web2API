@@ -1,0 +1,13 @@
+services:
+  gemini-web2api:
+    image: ghcr.io/mag1cfall/gemini-web2api:latest
+    build: .
+    container_name: gemini-web2api
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8007:8007"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/data

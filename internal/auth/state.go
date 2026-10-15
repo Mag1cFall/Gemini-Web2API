@@ -43,6 +43,7 @@ type Metadata struct {
 	Source   ImportSource   `json:"source,omitempty"`
 	Language string         `json:"language,omitempty"`
 	OAuth    *OAuthMaterial `json:"oauth,omitempty"`
+	Disabled bool           `json:"disabled,omitempty"`
 }
 
 // StorageState 是兼容 Playwright 的认证状态文件
@@ -58,6 +59,10 @@ type LoadedAccount struct {
 	ProxyURL string
 	Source   gemini.AccountSource
 	OAuth    *OAuthMaterial
+	// Profile 为 Chrome 导入的 Profile 目录名，Cookie Header 导入时为空
+	Profile  string
+	Disabled bool
+	File     *File
 }
 
 // File 管理一个可原子写回的认证状态文件
@@ -207,8 +212,37 @@ func (f *File) Account(globalProxy string) LoadedAccount {
 	source.Save = f.SaveCookies
 	return LoadedAccount{
 		ID: source.ID, ProxyURL: proxyURL, Source: source,
-		OAuth: f.state.Metadata.OAuth,
+		OAuth: f.state.Metadata.OAuth, Profile: f.state.Metadata.Source.Profile,
+		Disabled: f.state.Metadata.Disabled, File: f,
 	}
+}
+
+// Path 返回认证状态文件的绝对路径
+func (f *File) Path() string {
+	return f.path
+}
+
+// SetDisabled 修改账号停用标记并写回
+func (f *File) SetDisabled(disabled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state.Metadata.Disabled = disabled
+	return f.writeLocked()
+}
+
+// SetProxy 修改账号固定代理并写回，空值表示使用全局代理
+func (f *File) SetProxy(proxy string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state.Metadata.Proxy = strings.TrimSpace(proxy)
+	return f.writeLocked()
+}
+
+// Proxy 返回账号固定代理
+func (f *File) Proxy() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state.Metadata.Proxy
 }
 
 // SaveCookies 更新 Cookie 并原子写回认证状态

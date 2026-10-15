@@ -2,7 +2,9 @@ package adapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -11,6 +13,9 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 	"github.com/gin-gonic/gin"
 )
@@ -83,20 +88,33 @@ type GeminiGenerateContentRequest struct {
 	ToolConfig         json.RawMessage `json:"toolConfig,omitempty"`
 	ConversationID     string          `json:"conversation_id,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	// GenerateContentRequest 为 countTokens 请求包装的完整生成请求
+	GenerateContentRequest *GeminiGenerateContentRequest `json:"generateContentRequest,omitempty"`
 }
 
-// GeminiRouterHandler 处理 Gemini 原生生成接口
-func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
+// GeminiRouterHandler 处理 Gemini 原生 models/{model}:{method}，生成、流式生成、计数与视频长时操作之外的方法返回 404
+func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
+	useStore(store)
 	return func(c *gin.Context) {
 		action := strings.TrimPrefix(c.Param("action"), "/")
 		separator := strings.LastIndex(action, ":")
 		if separator < 0 {
-			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "expected models/{model}:{method}")
+			writeGeminiError(c, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Method not found: POST %s", c.Request.URL.Path))
 			return
 		}
-		model, method := action[:separator], action[separator+1:]
-		if method != "generateContent" && method != "streamGenerateContent" && method != "countTokens" {
-			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "unknown method: "+method)
+		model, method := strings.TrimPrefix(action[:separator], "models/"), action[separator+1:]
+		bindScope(c, pool, model)
+		switch method {
+		case "generateContent", "streamGenerateContent", "countTokens":
+		case "predictLongRunning":
+			if videoModel(pool, model) {
+				geminiVideoOperation(c, pool, store, model)
+				return
+			}
+			writeGeminiError(c, http.StatusNotFound, "NOT_FOUND", geminiUnsupportedMethod(model, method, "video generation for this model"))
+			return
+		default:
+			writeGeminiError(c, http.StatusNotFound, "NOT_FOUND", geminiUnsupportedMethod(model, method, geminiMethodCapability(method)))
 			return
 		}
 
@@ -105,6 +123,12 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		if err != nil {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 			return
+		}
+		if method == "countTokens" && len(request.Contents) == 0 && request.GenerateContentRequest != nil {
+			request = *request.GenerateContentRequest
+		}
+		if method != "countTokens" {
+			logging.FromContext(c.Request.Context()).Begin("gemini", model, method == "streamGenerateContent", len(request.Contents), geminiToolCount(request.Tools))
 		}
 		if len(request.Contents) == 0 {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "contents is required")
@@ -116,7 +140,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 		if method == "countTokens" {
-			countGeminiTokens(c, request)
+			countGeminiTokens(c, pool, model, request)
 			return
 		}
 		if !readyModel {
@@ -140,18 +164,21 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		streaming := method == "streamGenerateContent"
 
 		if streaming {
-			setSSEHeaders(c)
+			writer := newGeminiStreamWriter(c, c.Query("alt") == "sse")
+			defer writer.close()
+			defer startKeepalive(c, geminiKeepalive)()
+			writer.w = c.Writer
 			projection := newStreamProjection(bridge, includeThoughts)
 			streamModel := config.MapModel(model)
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel,
+				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildGeminiPrompt(c, client, request, continuation, bridge)
 				}, func(event gemini.Event) error {
 					return projection.project(event, func(event gemini.Event) error {
-						return writeGeminiDelta(c.Writer, responseID, streamModel, event)
+						return writer.delta(responseID, streamModel, event)
 					}, func(err error) error {
-						return writeGeminiStreamError(c.Writer, http.StatusBadGateway, "INTERNAL", err)
+						return writer.fail(http.StatusBadGateway, "INTERNAL", err)
 					})
 				},
 				projection.hasVisibleOutput,
@@ -159,25 +186,25 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			c.Set("account_id", accountID)
 			if err != nil {
 				if !projection.errorSent {
-					_ = writeGeminiStreamError(c.Writer, upstreamStatus(err), geminiUpstreamStatus(err), err)
+					_ = writer.fail(upstreamStatus(err), geminiUpstreamStatus(err), streamFailure(c, err))
 				}
 				return
 			}
 			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-				_ = writeGeminiStreamError(c.Writer, http.StatusBadGateway, "INTERNAL", err)
+				_ = writer.fail(http.StatusBadGateway, "INTERNAL", streamFailure(c, err))
 				return
 			}
 			response, err := buildGeminiResponse(result, bridge, includeThoughts)
 			if err != nil {
-				_ = writeGeminiStreamError(c.Writer, http.StatusBadGateway, "INTERNAL", err)
+				_ = writer.fail(http.StatusBadGateway, "INTERNAL", streamFailure(c, err))
 				return
 			}
-			_ = writeSSEJSON(c.Writer, projectGeminiStreamTail(response, projection))
+			_ = writer.write(projectGeminiStreamTail(response, projection))
 			return
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel,
+			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildGeminiPrompt(c, client, request, continuation, bridge)
 			}, nil, nil,
@@ -201,49 +228,58 @@ func GeminiRouterHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	}
 }
 
-func countGeminiTokens(c *gin.Context, request GeminiGenerateContentRequest) {
-	contents := request.Contents
-	if request.SystemInstruction != nil {
-		contents = append(contents, *request.SystemInstruction)
+// geminiUnsupportedMethod 返回与官方相同的方法不可用说明，并写明 Gemini Web 不提供的能力
+func geminiUnsupportedMethod(model string, method string, capability string) string {
+	return fmt.Sprintf("models/%s is not found for API version v1beta, or is not supported for %s. Call ListModels to see the list of available models and their supported methods. %s.", model, method, unavailableCapability(capability))
+}
+
+// geminiMethodCapability 返回 Gemini 方法对应的能力名称
+func geminiMethodCapability(method string) string {
+	switch method {
+	case "embedContent", "batchEmbedContents", "asyncBatchEmbedContent", "embedText", "batchEmbedText":
+		return "embeddings"
+	case "predict":
+		return "Imagen predictions"
+	case "bidiGenerateContent":
+		return "the Live API"
+	case "batchGenerateContent":
+		return "batch generation"
+	case "generateAnswer":
+		return "attributed question answering"
+	default:
+		return "the " + method + " method"
 	}
-	for _, content := range contents {
-		for _, part := range content.Parts {
-			if part.InlineData != nil || part.FileData != nil {
-				writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "本地 countTokens 当前只支持文本与工具内容")
-				return
-			}
-		}
-	}
+}
+
+// countGeminiTokens 以生成时的提示词编码计算文本 token，附件按官方计数规则估算并按模态列出
+func countGeminiTokens(c *gin.Context, pool *balancer.AccountPool, model string, request GeminiGenerateContentRequest) {
 	bridge, unsupported, err := geminiToolBridge(request)
 	if err != nil {
 		writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
 	setUnsupportedParameters(c, unsupported)
-	prompt, _, err := buildGeminiPrompt(c, nil, request, false, bridge)
+	prompt, files, err := buildGeminiPrompt(c, countClient(pool, model), request, false, bridge)
 	if err != nil {
-		writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		status := http.StatusBadRequest
+		var protocolErr *gemini.ProtocolError
+		if errors.As(err, &protocolErr) {
+			status = protocolErr.HTTPStatus
+		}
+		writeGeminiError(c, status, geminiStatusName(status), err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"totalTokens": tokencount.Content(prompt)})
-}
-
-// GeminiListModelsHandler 返回 Gemini 原生模型目录
-func GeminiListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		models := availableModels(pool)
-		data := make([]gin.H, 0, len(models))
-		for _, model := range models {
-			data = append(data, gin.H{
-				"name": "models/" + model.ID, "displayName": model.DisplayName, "description": model.Description,
-				"supportedGenerationMethods": model.Capabilities, "default": model.Default,
-				"inputTokenLimit": model.MaxInputTokenLimit, "minInputTokenLimit": model.MinInputTokenLimit,
-				"availableAccountCount": model.AccountCount, "thinking": len(model.ThinkingLevels) > 0,
-				"thinkingLevels": thinkingLevelNames(model.ThinkingLevels),
-			})
+	counts := mediaTokenCount(files)
+	counts[modalityText] += tokencount.Content(prompt)
+	total := 0
+	details := make([]gin.H, 0, len(counts))
+	for _, modality := range []mediaModality{modalityText, modalityImage, modalityAudio, modalityVideo, modalityDocument} {
+		if tokens, ok := counts[modality]; ok {
+			total += tokens
+			details = append(details, gin.H{"modality": string(modality), "tokenCount": tokens})
 		}
-		c.JSON(http.StatusOK, gin.H{"models": data})
 	}
+	c.JSON(http.StatusOK, gin.H{"totalTokens": total, "promptTokensDetails": details})
 }
 
 func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGenerateContentRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
@@ -326,7 +362,27 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 			files = append(files, attachments...)
 		}
 		if part.FileData != nil && part.FileData.FileURI != "" {
-			data, err := client.FetchMedia(c.Request.Context(), part.FileData.FileURI)
+			uri := part.FileData.FileURI
+			if isYouTubeURL(uri) {
+				builder.WriteString("\n" + uri + "\n")
+				continue
+			}
+			if id, ok := storedFileID(uri); ok && (!strings.Contains(uri, "://") || strings.Contains(uri, "/v1beta/files/")) {
+				file, err := storedFileData(c.Request.Context(), id)
+				if errors.As(err, new(missingFileError)) {
+					return "", nil, geminiFileNotFound(id)
+				}
+				if err != nil {
+					return "", nil, err
+				}
+				if part.FileData.MimeType != "" {
+					file.MimeType = part.FileData.MimeType
+				}
+				files = append(files, *file)
+				builder.WriteString("[File]")
+				continue
+			}
+			data, err := client.FetchMedia(c.Request.Context(), uri)
 			if err != nil {
 				return "", nil, err
 			}
@@ -500,13 +556,7 @@ func buildGeminiResponse(result generationResult, bridge ToolBridge, includeThou
 	finish := "STOP"
 	candidate := gin.H{"content": gin.H{"role": "model", "parts": parts}, "finishReason": finish, "index": 0}
 	if len(primary.Citations) > 0 {
-		citations := make([]gin.H, 0, len(primary.Citations))
-		for _, citation := range primary.Citations {
-			citations = append(citations, gin.H{
-				"uri": citation.URL, "startIndex": citation.Start, "endIndex": citation.End,
-			})
-		}
-		candidate["citationMetadata"] = gin.H{"citationSources": citations}
+		candidate["groundingMetadata"] = geminiGroundingMetadata(content, primary.Citations)
 	}
 	response := gin.H{
 		"candidates":   []gin.H{candidate},
@@ -582,19 +632,75 @@ func geminiCodePart(code CodeOutput) gin.H {
 	return gin.H{"executableCode": gin.H{"language": language, "code": code.Content}}
 }
 
-func writeGeminiDelta(w http.ResponseWriter, responseID string, model string, event gemini.Event) error {
+// geminiStreamWriter 按 alt=sse 输出 SSE 事件，未指定时与官方一样输出逐个对象的 JSON 数组
+type geminiStreamWriter struct {
+	w       http.ResponseWriter
+	sse     bool
+	written bool
+	closed  bool
+}
+
+// newGeminiStreamWriter 写入流式响应头
+func newGeminiStreamWriter(c *gin.Context, sse bool) *geminiStreamWriter {
+	if sse {
+		setSSEHeaders(c)
+	} else {
+		c.Header("Content-Type", "application/json; charset=UTF-8")
+		c.Header("Cache-Control", "no-cache")
+	}
+	return &geminiStreamWriter{w: c.Writer, sse: sse}
+}
+
+// write 输出一个 GenerateContentResponse
+func (w *geminiStreamWriter) write(payload interface{}) error {
+	if w.sse {
+		return writeSSEJSON(w.w, payload)
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	prefix := "["
+	if w.written {
+		prefix = "\r\n,\r\n"
+	}
+	w.written = true
+	if _, err := io.WriteString(w.w, prefix+string(data)); err != nil {
+		return err
+	}
+	return streamio.Flush(w.w)
+}
+
+// close 结束 JSON 数组
+func (w *geminiStreamWriter) close() {
+	if w.sse || w.closed {
+		return
+	}
+	w.closed = true
+	tail := "\r\n]"
+	if !w.written {
+		tail = "[]"
+	}
+	if _, err := io.WriteString(w.w, tail); err == nil {
+		_ = streamio.Flush(w.w)
+	}
+}
+
+// delta 输出一段正文或思考增量
+func (w *geminiStreamWriter) delta(responseID string, model string, event gemini.Event) error {
 	part := gin.H{"text": event.Delta}
 	if event.Kind == gemini.EventThought {
 		part["thought"] = true
 	}
-	return writeSSEJSON(w, gin.H{
+	return w.write(gin.H{
 		"candidates": []gin.H{{"content": gin.H{"role": "model", "parts": []gin.H{part}}, "index": 0}},
 		"responseId": responseID, "modelVersion": model,
 	})
 }
 
-func writeGeminiStreamError(w http.ResponseWriter, status int, statusName string, err error) error {
-	return writeSSEJSON(w, gin.H{"error": gin.H{"code": status, "message": err.Error(), "status": statusName}})
+// fail 输出 Google 错误对象
+func (w *geminiStreamWriter) fail(status int, statusName string, err error) error {
+	return w.write(gin.H{"error": gin.H{"code": status, "message": err.Error(), "status": statusName}})
 }
 
 func projectGeminiStreamTail(response gin.H, projection *streamProjection) gin.H {

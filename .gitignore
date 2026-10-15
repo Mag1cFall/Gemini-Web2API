@@ -5,6 +5,8 @@
 *.dylib
 /gemini-web2api
 /dist/
+/bin/
+*.syso
 
 # Logs
 *.log
@@ -25,6 +27,13 @@ go.work
 
 # Authentication states
 /auth/
+
+# Runtime data
+/data/
+
+# Frontend
+/web/node_modules/
+/internal/webui/dist/
 
 # Reference files
 reference*/

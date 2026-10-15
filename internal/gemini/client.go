@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,8 @@ import (
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 )
 
 const (
@@ -35,10 +36,15 @@ type Client struct {
 	language    string
 	clientID    string
 	saveHistory bool
+	// guest 表示未登录的访客会话
+	guest       bool
 	reqID       atomic.Int64
 	contextSize atomic.Int64
 	requestSlot *semaphore.Weighted
+	// concurrency 是请求槽数量
+	concurrency int
 	busy        atomic.Int32
+	usage       atomic.Pointer[UsageInfo]
 
 	bootstrapMu sync.RWMutex
 	bootstrap   *Bootstrap
@@ -55,12 +61,22 @@ func (c *Client) ContextWindow() int {
 	return int(c.contextSize.Load())
 }
 
-// Busy 报告账号请求槽是否被占用或有请求在排队
+// Busy 报告账号的请求槽是否已全部占用
 func (c *Client) Busy() bool {
-	return c.busy.Load() > 0
+	return int(c.busy.Load()) >= c.concurrency
 }
 
-// AcquireRequest 独占同一账号的完整上游请求链，后台生成的轮询阶段让出
+// Pending 返回占用或等待账号请求槽的请求数
+func (c *Client) Pending() int {
+	return int(c.busy.Load())
+}
+
+// CachedUsage 返回最近一次读取的官网用量，尚未读取时为 nil
+func (c *Client) CachedUsage() *UsageInfo {
+	return c.usage.Load()
+}
+
+// AcquireRequest 占用账号的一个请求槽直到完整上游请求链结束，后台生成的轮询阶段让出
 func (c *Client) AcquireRequest(ctx context.Context) (func(), error) {
 	c.busy.Add(1)
 	if err := c.requestSlot.Acquire(ctx, 1); err != nil {
@@ -79,7 +95,8 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 	if language == "" {
 		language = defaultLanguage
 	}
-	httpClient, err := NewHTTPClient(600, proxyURL)
+	concurrency := max(source.Concurrency, 1)
+	httpClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
@@ -93,7 +110,8 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		language:    language,
 		clientID:    clientID,
 		saveHistory: saveHistory,
-		requestSlot: semaphore.NewWeighted(1),
+		requestSlot: semaphore.NewWeighted(int64(concurrency)),
+		concurrency: concurrency,
 		refreshSlot: semaphore.NewWeighted(1),
 		cookies:     make(map[string]Cookie, len(source.Cookies)),
 		save:        source.Save,
@@ -110,6 +128,39 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 	return client, nil
 }
 
+// GuestID 是访客会话在账号池、日志与账本中的 ID
+const GuestID = "guest"
+
+// ErrGuestAttachments 表示带附件的请求落到访客会话，官网访客页面的上传入口全部禁用
+var ErrGuestAttachments = &ProtocolError{HTTPStatus: 503, Message: "访客会话不能上传附件，需要可用的登录账号"}
+
+// guestContextWindow 是访客会话的网页输入窗口，与免费层相同
+const guestContextWindow = 32 * 1024
+
+// NewGuestClient 创建以未登录会话访问官网的访客客户端
+func NewGuestClient(proxyURL string, concurrency int) (*Client, error) {
+	client, err := NewClient(AccountSource{ID: GuestID, Concurrency: concurrency}, proxyURL, false)
+	if err != nil {
+		return nil, err
+	}
+	client.guest = true
+	client.contextSize.Store(guestContextWindow)
+	return client, nil
+}
+
+// Guest 报告客户端是否为未登录的访客会话
+func (c *Client) Guest() bool {
+	return c.guest
+}
+
+// features 返回当前会话类型的页面在扩展头第 8 槽声明的功能编号
+func (c *Client) features() []int {
+	if c.guest {
+		return guestClientFeatures
+	}
+	return clientFeatures
+}
+
 // Init 刷新首页动态参数并获取当前账号模型目录与偏好
 func (c *Client) Init(ctx context.Context) error {
 	return c.init(ctx, true)
@@ -123,10 +174,10 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	c.applyNavigationHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return transportProtocolError(fmt.Sprintf("account %q bootstrap request", c.displayAccountID()), err)
+		return transportProtocolError("bootstrap request", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		protocolErr := httpStatusError(resp.StatusCode, "bootstrap")
+		protocolErr := responseStatusError(resp, "bootstrap")
 		if allowRefresh && isAuthenticationError(protocolErr) && c.refresh != nil {
 			resp.Body.Close()
 			if err := c.refreshCookies(ctx); err != nil {
@@ -143,6 +194,9 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 		return transportProtocolError("read bootstrap page", err)
 	}
 	bootstrap, err := parseBootstrap(string(body))
+	if err == nil && bootstrap.SNlM0e == "" && !c.guest {
+		err = errBootstrapSignedOut
+	}
 	if err != nil {
 		if errors.Is(err, errBootstrapSignedOut) {
 			if allowRefresh && c.refresh != nil {
@@ -151,16 +205,16 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 				}
 				return c.init(ctx, false)
 			}
-			return retryableProtocolError(fmt.Sprintf("account %q is not signed in", c.displayAccountID()), nil)
+			return retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
 		}
-		return retryableProtocolError(fmt.Sprintf("account %q bootstrap: %v", c.displayAccountID(), err), err)
+		return retryableProtocolError(fmt.Sprintf("bootstrap: %v", err), err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		return err
 	}
 	catalog, err := c.fetchModelCatalog(ctx, bootstrap)
 	var preferences Preferences
-	if err == nil {
+	if err == nil && !c.guest {
 		preferences, err = c.fetchPreferences(ctx, bootstrap)
 	}
 	if err != nil {
@@ -170,7 +224,14 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 			}
 			return c.init(ctx, false)
 		}
-		return retryableProtocolError(fmt.Sprintf("account %q initialize models and preferences: %v", c.displayAccountID(), err), err)
+		return retryableProtocolError(fmt.Sprintf("initialize models and preferences: %v", err), err)
+	}
+	if c.guest {
+		catalog.removeTools()
+	} else if gems, err := c.fetchGems(ctx, bootstrap); err != nil {
+		logging.Warn(c.displayAccountID(), "读取 Gem 列表失败", "原因", err)
+	} else {
+		catalog.addGems(gems)
 	}
 	bootstrap.Catalog = catalog
 	bootstrap.Preferences = preferences
@@ -205,19 +266,35 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if model.Feature != 0 {
 		request.Feature = model.Feature
 	}
+	request.Gem = model.Gem
 	request.tools = bootstrap.Catalog.toolSelection(request.Feature, request.AspectRatio)
-	temporaryChat := !c.saveHistory && !request.Feature.savedChatOnly()
+	request.personalIntelligence = bootstrap.Catalog.personalIntelligence
+	temporaryChat := !c.guest && !c.saveHistory && !request.Feature.savedChatOnly()
 	taskTerms := false
 	if request.Feature == FeatureTask {
 		if taskTerms, err = c.onboardTask(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
 			return err
 		}
 	}
+	if c.guest && len(request.Files) > 0 {
+		return ErrGuestAttachments
+	}
+	trace := logging.FromContext(ctx)
 	request.Files = append([]FileData(nil), request.Files...)
-	if slices.ContainsFunc(request.Files, func(file FileData) bool { return file.URL == "" }) {
+	uploads, uploadBytes := 0, 0
+	for _, file := range request.Files {
+		if file.URL == "" {
+			uploads++
+			uploadBytes += len(file.Data)
+		}
+	}
+	uploadStarted := time.Now()
+	if uploads > 0 {
+		trace.SetStage("接受上传条款")
 		if err := c.acceptUploadTerms(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
 			return err
 		}
+		trace.SetStage("上传附件")
 	}
 	for index := range request.Files {
 		file := &request.Files[index]
@@ -231,6 +308,9 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 				return err
 			}
 		}
+	}
+	if uploads > 0 {
+		trace.Stage("附件上传完成", "数量", uploads, "大小", formatBytes(uploadBytes), "耗时", time.Since(uploadStarted))
 	}
 	streamRequestID, err := newProtocolID()
 	if err != nil {
@@ -248,7 +328,9 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointGenerate, strings.NewReader(protocolForm(payload, bootstrap.SNlM0e)))
+	streamCtx, stopWatch := watchStreamIdle(ctx)
+	defer stopWatch()
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, endpointGenerate, strings.NewReader(protocolForm(payload, bootstrap.SNlM0e)))
 	if err != nil {
 		return err
 	}
@@ -268,7 +350,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if request.researchConfirm {
 		chatMode = nil
 	}
-	modelHeader, err := buildModelHeader(model, chatMode, request.ThinkingLevel, c.clientID, bootstrap.BL, requestTiming(time.Since(started), time.Now()))
+	modelHeader, err := buildModelHeader(c.features(), model, chatMode, request.ThinkingLevel, c.clientID, bootstrap.BL, requestTiming(time.Since(started), time.Now()))
 	if err != nil {
 		return err
 	}
@@ -278,17 +360,23 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 	req.Header.Set("x-goog-ext-73010990-jspb", "[0,0,0]")
 
+	trace.SetStage("等待上游响应头")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return transportProtocolError(fmt.Sprintf("account %q generate request", c.displayAccountID()), err)
+		if idle := streamIdleError(streamCtx); idle != nil {
+			return idle
+		}
+		return transportProtocolError("generate request", err)
 	}
+	progress(streamCtx)
+	trace.UpstreamResponse(resp.StatusCode)
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		protocolErr := httpStatusError(resp.StatusCode, "generate")
+		protocolErr := responseStatusError(resp, "generate")
 		if allowRefresh && isAuthenticationError(protocolErr) && c.refresh != nil {
 			resp.Body.Close()
 			if err := c.refreshCookies(ctx); err != nil {
@@ -320,12 +408,27 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	}
 	guard := newModelGuard(model, newFailureTextGuard(withDownload).Emit)
 	decoder := NewFrameDecoder()
-	err = decoder.Decode(resp.Body, decodeState, guard.Emit)
-	if err == nil && decoder.background && !request.researchConfirm {
-		err = c.awaitTurn(ctx, decodeState, model, request.ThinkingLevel, nil, guard.Emit)
+	decoder.heartbeat = trace.UpstreamHeartbeat
+	decoder.awaitIncomplete = request.researchPlan != nil
+	err = decoder.Decode(tracedReader{reader: resp.Body, trace: trace}, decodeState, func(event Event) error {
+		progress(streamCtx)
+		return guard.Emit(event)
+	})
+	if idle := streamIdleError(streamCtx); idle != nil && ctx.Err() == nil {
+		snapshot := decodeState.Snapshot()
+		c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model.Mode, request.ThinkingLevel)
+		return idle
+	}
+	if ctx.Err() != nil {
+		snapshot := decodeState.Snapshot()
+		c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model.Mode, request.ThinkingLevel)
+		return ctx.Err()
 	}
 	if request.researchPlan != nil {
 		*request.researchPlan = decoder.researchConfirm
+	}
+	if err == nil && decoder.background && !request.researchConfirm {
+		err = c.awaitTurn(ctx, decodeState, model, request.ThinkingLevel, nil, request.researchPlan, guard.Emit)
 	}
 	if err != nil {
 		if allowRefresh && !guard.Emitted() && isAuthenticationError(err) && c.refresh != nil {
@@ -350,6 +453,31 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	return nil
 }
 
+// stopTimeout 是客户端取消后通知上游停止生成的最长等待
+const stopTimeout = 10 * time.Second
+
+// stopGeneration 在客户端取消后发送官网“停止回答”的 NkpXw 请求，参数为会话、回答标识与首帧的控制令牌
+func (c *Client) stopGeneration(bootstrap Bootstrap, cid string, rid string, token string, mode int, level ThinkingLevel) {
+	if cid == "" || rid == "" || token == "" {
+		return
+	}
+	payload, err := json.Marshal([]any{[]any{cid, rid}, []any{token}})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+	defer cancel()
+	started := time.Now()
+	_, err = c.batchExecute(ctx, bootstrap, batchRequest{
+		rpcID: "NkpXw", payload: string(payload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: mode, level: level,
+	})
+	if err != nil {
+		logging.Warn(c.displayAccountID(), "通知上游停止生成失败", "原因", err)
+		return
+	}
+	logging.Info(c.displayAccountID(), "已通知上游停止生成", "耗时", time.Since(started))
+}
+
 // Models 返回当前账号初始化得到的模型目录
 func (c *Client) Models() []Model {
 	bootstrap, err := c.bootstrapSnapshot()
@@ -369,7 +497,7 @@ func (c *Client) ResolveModel(id string) (Model, error) {
 }
 
 func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (ModelCatalog, error) {
-	payload, err := c.batchExecute(ctx, bootstrap, batchRequest{rpcID: "otAQ7b", payload: "[]", sourcePath: "/app", language: catalogLanguage, extension: "[]"})
+	payload, err := c.batchExecute(ctx, bootstrap, batchRequest{rpcID: "otAQ7b", payload: "[1]", sourcePath: "/app", language: catalogLanguage, extension: "[]"})
 	if err != nil {
 		return ModelCatalog{}, err
 	}
@@ -394,6 +522,8 @@ type batchRequest struct {
 
 // batchExecute 以页面 XHR 发送单个 batchexecute RPC 并返回其 payload
 func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call batchRequest) ([]any, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
 	started := time.Now()
 	rpcID := call.rpcID
 	encodedRequest, err := pageJSON([]any{[]any{[]any{rpcID, call.payload, nil, "generic"}}})
@@ -418,24 +548,26 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 	if call.untimed {
 		timing[0] = []any{}
 	}
-	header := buildGenericHeader(c.clientID, bootstrap.BL, call.mode, call.level, timing)
+	header := buildGenericHeader(c.features(), c.clientID, bootstrap.BL, call.mode, call.level, timing)
 	if call.conversation {
-		header = buildConversationHeader(c.clientID, bootstrap.BL, call.temporaryChat, call.mode, call.level, timing)
+		header = buildConversationHeader(c.features(), c.clientID, bootstrap.BL, call.temporaryChat, call.mode, call.level, timing)
 	}
 	req.Header.Set("x-goog-ext-525001261-jspb", header)
 	req.Header.Set("x-goog-ext-73010989-jspb", call.extension)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		logging.Debug(c.displayAccountID(), "上游 RPC 失败", "rpc", rpcID, "耗时", time.Since(started), "错误", err)
 		return nil, transportProtocolError(rpcID+" request", err)
 	}
+	logging.Debug(c.displayAccountID(), "上游 RPC", "rpc", rpcID, "状态", resp.StatusCode, "耗时", time.Since(started))
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, httpStatusError(resp.StatusCode, rpcID)
+		return nil, responseStatusError(resp, rpcID)
 	}
 
 	var payload []any
@@ -476,7 +608,7 @@ func (c *Client) bootstrapSnapshot() (Bootstrap, error) {
 	c.bootstrapMu.RLock()
 	defer c.bootstrapMu.RUnlock()
 	if c.bootstrap == nil {
-		return Bootstrap{}, retryableProtocolError(fmt.Sprintf("account %q is not initialized", c.displayAccountID()), nil)
+		return Bootstrap{}, retryableProtocolError("账号尚未完成初始化", nil)
 	}
 	return *c.bootstrap, nil
 }
@@ -552,9 +684,13 @@ func pageJSON(value any) (string, error) {
 	return strings.TrimSuffix(buffer.String(), "\n"), nil
 }
 
-// protocolForm 按网页 XHR 的字段顺序与编码构造 f.req、at 表单，末尾带 &
+// protocolForm 按网页 XHR 的字段顺序与编码构造 f.req、at 表单，末尾带 &，访客会话没有 at
 func protocolForm(request string, token string) string {
-	return "f.req=" + formEscaper.Replace(url.QueryEscape(request)) + "&at=" + formEscaper.Replace(url.QueryEscape(token)) + "&"
+	form := "f.req=" + formEscaper.Replace(url.QueryEscape(request)) + "&"
+	if token == "" {
+		return form
+	}
+	return form + "at=" + formEscaper.Replace(url.QueryEscape(token)) + "&"
 }
 
 // nextReqID 按网页客户端规则在四位随机基数上逐次增加 100000
@@ -576,21 +712,25 @@ func (c *Client) refreshCookies(ctx context.Context) error {
 	}
 	defer c.refreshSlot.Release(1)
 	if c.refresh == nil {
-		return fmt.Errorf("account %q has no cookie refresh source", c.displayAccountID())
+		return retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
 	}
+	started := time.Now()
+	logging.Info(c.displayAccountID(), "账号认证续签")
 	cookies, err := c.refresh(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		return retryableProtocolError(fmt.Sprintf("account %q refresh cookies: %v", c.displayAccountID(), err), err)
+		logging.Error(c.displayAccountID(), "账号认证续签失败", "耗时", time.Since(started), "错误", err)
+		return retryableProtocolError(fmt.Sprintf("续签 Cookie 失败: %v", err), errors.Join(ErrSignedOut, err))
 	}
 	if len(cookies) == 0 {
-		return retryableProtocolError(fmt.Sprintf("account %q refresh returned no cookies", c.displayAccountID()), nil)
+		return retryableProtocolError("续签没有返回 Cookie", ErrSignedOut)
 	}
 	if err := c.replaceCookies(cookies); err != nil {
-		return retryableProtocolError(fmt.Sprintf("account %q install refreshed cookies: %v", c.displayAccountID(), err), err)
+		return retryableProtocolError(fmt.Sprintf("安装续签的 Cookie 失败: %v", err), err)
 	}
+	logging.Info(c.displayAccountID(), "账号认证续签完成", "耗时", time.Since(started))
 	c.cookieMu.Lock()
 	snapshot := c.cookieSnapshotLocked()
 	c.cookieMu.Unlock()
@@ -602,14 +742,38 @@ func (c *Client) refreshCookies(ctx context.Context) error {
 	return nil
 }
 
+// tracedReader 把读取到的上游响应字节计入请求跟踪
+type tracedReader struct {
+	reader io.Reader
+	trace  *logging.Request
+}
+
+func (r tracedReader) Read(buffer []byte) (int, error) {
+	n, err := r.reader.Read(buffer)
+	r.trace.UpstreamRead(n)
+	return n, err
+}
+
+// formatBytes 把字节数格式化为 B、KB 或 MB
+func formatBytes(size int) string {
+	switch {
+	case size >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(size)/(1<<20))
+	case size >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(size)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", size)
+}
+
 // CloseIdleConnections 关闭协议客户端的空闲连接
 func (c *Client) CloseIdleConnections() {
 	c.httpClient.CloseIdleConnections()
 }
 
+// isAuthenticationError 判断错误是否为 HTTP 或帧内的 401、403，BardErrorInfo 1060 等出口限制不属于认证错误
 func isAuthenticationError(err error) bool {
 	var protocolErr *ProtocolError
-	return errors.As(err, &protocolErr) && (protocolErr.HTTPStatus == http.StatusUnauthorized || protocolErr.HTTPStatus == http.StatusForbidden || protocolErr.Code == http.StatusUnauthorized || protocolErr.Code == http.StatusForbidden)
+	return errors.As(err, &protocolErr) && (protocolErr.HTTPStatus == http.StatusUnauthorized || protocolErr.HTTPStatus == http.StatusForbidden)
 }
 
 func newProtocolID() (string, error) {
@@ -645,6 +809,20 @@ func initialReqID() (int64, error) {
 	return int64(1000 + binary.BigEndian.Uint32(value[:])%9000), nil
 }
 
+// ErrCaptcha 表示 Google 以人机验证页（/sorry）拦截了请求，出口 IP 与账号会话被判定为异常流量
+var ErrCaptcha = errors.New("请求被 Google 人机验证页拦截")
+
+// responseStatusError 把非 200 响应转为协议错误，重定向到 google.com/sorry 时为人机验证拦截，按 429 处理
+func responseStatusError(resp *http.Response, operation string) *ProtocolError {
+	if location, err := resp.Location(); err == nil && strings.HasSuffix(location.Hostname(), "google.com") && strings.HasPrefix(location.Path, "/sorry") {
+		return &ProtocolError{
+			HTTPStatus: http.StatusTooManyRequests, Code: http.StatusTooManyRequests, Retryable: true, Cause: ErrCaptcha,
+			Message: fmt.Sprintf("gemini %s 被 Google 人机验证页拦截（HTTP %d 重定向到 %s%s）", operation, resp.StatusCode, location.Host, location.Path),
+		}
+	}
+	return httpStatusError(resp.StatusCode, operation)
+}
+
 func httpStatusError(status int, operation string) *ProtocolError {
 	return &ProtocolError{
 		HTTPStatus: status,
@@ -654,11 +832,14 @@ func httpStatusError(status int, operation string) *ProtocolError {
 	}
 }
 
+// ErrTransport 表示连接、TLS 或代理等网络层失败，与账号状态无关
+var ErrTransport = errors.New("gemini web transport failure")
+
 func transportProtocolError(operation string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return retryableProtocolError(fmt.Sprintf("gemini %s: %v", operation, err), err)
+	return retryableProtocolError(fmt.Sprintf("gemini %s: %v", operation, err), errors.Join(ErrTransport, err))
 }
 
 // rpcStatusError 把没有载荷的 wrb.fr 记录第 5 项的 RPC 状态转为协议错误，会话失效时状态为 7（PERMISSION_DENIED），按 HTTP 403 处理
@@ -672,4 +853,9 @@ func rpcStatusError(rpcID string, record []any) *ProtocolError {
 
 func retryableProtocolError(message string, cause error) *ProtocolError {
 	return &ProtocolError{HTTPStatus: http.StatusBadGateway, Code: http.StatusBadGateway, Message: message, Retryable: true, Cause: cause}
+}
+
+// IsAuthenticationError 判断错误是否表示账号会话失效，包括 HTTP 401、403 与续签失败
+func IsAuthenticationError(err error) bool {
+	return errors.Is(err, ErrSignedOut) || isAuthenticationError(err)
 }

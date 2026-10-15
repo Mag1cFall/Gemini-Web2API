@@ -3,8 +3,11 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 )
 
 // turnPollInterval 是读取会话中后台生成回答的轮询间隔
@@ -43,7 +46,7 @@ func (c *Client) deepResearch(ctx context.Context, request GenerateRequest, mode
 	if err := c.stream(ctx, confirm, thoughts.turn, true); err != nil {
 		return err
 	}
-	return c.awaitTurn(ctx, request.Conversation, model, model.thinkingLevel(request.ThinkingLevel), thoughts.progress, emit)
+	return c.awaitTurn(ctx, request.Conversation, model, model.thinkingLevel(request.ThinkingLevel), thoughts.progress, nil, emit)
 }
 
 // researchThoughts 把 Deep Research 计划轮与确认轮的正文、研究进度转成思考增量
@@ -103,8 +106,10 @@ func (r *researchThoughts) progress(candidate []any) error {
 	return nil
 }
 
-// awaitTurn 在调用方持有账号请求槽时调用，轮询期间让出请求槽，以 hNvQHb 轮询会话中本轮回答，完成后重新占用请求槽并按生成流解析该回答；progress 接收进行中的候选
-func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model Model, level ThinkingLevel, progress func([]any) error, emit func(Event) error) error {
+// awaitTurn 在调用方持有账号请求槽时调用，轮询期间让出请求槽，以 hNvQHb 轮询会话中本轮回答，完成后重新占用请求槽并按生成流解析该回答；progress 接收进行中的候选，researchConfirm 非空时写入该回答计划卡片的确认按钮文字
+func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model Model, level ThinkingLevel, progress func([]any) error, researchConfirm *string, emit func(Event) error) error {
+	trace := logging.FromContext(ctx)
+	trace.Background(model.ID)
 	c.requestSlot.Release(1)
 	c.busy.Add(-1)
 	defer func() {
@@ -118,7 +123,8 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model 
 	}
 	ticker := time.NewTicker(turnPollInterval)
 	defer ticker.Stop()
-	for {
+	started := time.Now()
+	for polls := 1; ; polls++ {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -132,6 +138,10 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model 
 			rpcID: "hNvQHb", payload: string(request), sourcePath: "/app/" + strings.TrimPrefix(session.CID, "c_"),
 			language: bootstrap.Language, extension: "[0]", mode: model.Mode, level: level,
 		})
+		if err != nil && errors.Is(err, ErrTransport) && ctx.Err() == nil {
+			trace.Stage("后台生成轮询网络错误，下次重试", "次数", polls, "原因", err)
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -143,6 +153,7 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model 
 			candidate, _ := valuePath(turn, 3, 0, 0)
 			values, _ := candidate.([]any)
 			if phase, _ := intPath(candidate, 8, 0); Phase(phase) != PhaseComplete {
+				trace.Stage("后台生成轮询", "次数", polls, "已等待", time.Since(started).Truncate(time.Second))
 				if progress != nil {
 					if err := progress(values); err != nil {
 						return err
@@ -155,7 +166,12 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model 
 			frame[1] = []any{session.CID, session.RID}
 			frame[4] = []any{values}
 			frame[39] = hash
-			return NewFrameDecoder().decodeTurn(frame, state, emit)
+			decoder := NewFrameDecoder()
+			err := decoder.decodeTurn(frame, state, emit)
+			if researchConfirm != nil {
+				*researchConfirm = decoder.researchConfirm
+			}
+			return err
 		}
 	}
 }

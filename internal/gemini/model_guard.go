@@ -1,6 +1,12 @@
 package gemini
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrModelMismatch 表示上游实际回答的模型与请求的模型不同，常见于该模型额度用尽后的降级
+var ErrModelMismatch = errors.New("gemini web served a different model")
 
 // modelGuard 在公开任何上游事件前确认实际模型 hash
 type modelGuard struct {
@@ -68,5 +74,6 @@ func modelMismatchError(expected Model, actual EventMetadataData) *ProtocolError
 			actualName, actual.ModelHash, expected.ID, expected.Hash,
 		),
 		Retryable: true,
+		Cause:     ErrModelMismatch,
 	}
 }

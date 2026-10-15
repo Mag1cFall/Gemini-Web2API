@@ -53,6 +53,9 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 	inner[10] = 1
 	inner[11] = 0
 	inner[18] = 0
+	if request.Gem != "" {
+		inner[19] = request.Gem
+	}
 	inner[27] = 1
 	inner[30] = []any{4, 16, 19}
 	inner[41] = []any{2}
@@ -78,10 +81,14 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 	inner[53] = 0
 	inner[59] = requestID
 	inner[61] = []any{}
-	inner[67] = 0
+	if request.personalIntelligence {
+		inner[67] = 0
+	}
 	inner[68] = 1
 	inner[79] = request.ModelMode
-	inner[80] = int(request.ThinkingLevel)
+	if request.ThinkingLevel != 0 {
+		inner[80] = int(request.ThinkingLevel)
+	}
 	inner[91] = 0
 	if preferences.Bool(preferenceSlot91) {
 		inner[91] = 1

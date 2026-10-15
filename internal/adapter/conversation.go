@@ -5,16 +5,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
 	"golang.org/x/sync/semaphore"
 )
 
-// conversationRegistry 保存不可变响应快照和线性会话锁
+// conversationRegistry 保存不可变响应快照和线性会话锁，配置账本库后会话写入 sessions 表并在重启后恢复
 type conversationRegistry struct {
 	states map[string]conversationEntry
 	locks  map[string]*conversationLock
 	ttl    time.Duration
 	lastGC time.Time
+	store  *requestdb.Store
 	mu     sync.Mutex
 }
 
@@ -73,8 +77,6 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	now := time.Now()
 	r.cleanupLocked(now)
 	entry := conversationEntry{
@@ -83,6 +85,79 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 	for _, key := range keys {
 		if key != "" {
 			r.states[key] = entry
+		}
+	}
+	store := r.store
+	r.mu.Unlock()
+	if store == nil {
+		return
+	}
+	sessions := make([]requestdb.StoredSession, 0, len(keys))
+	for _, key := range keys {
+		if key != "" {
+			sessions = append(sessions, requestdb.StoredSession{
+				Key: key, CID: entry.snapshot.CID, RID: entry.snapshot.RID, RCID: entry.snapshot.RCID, Token: entry.snapshot.Token,
+				ModelMode: entry.snapshot.ModelMode, Turns: entry.snapshot.Turns, Account: accountID, ContextTokens: contextTokens, ExpiresAt: entry.expiresAt,
+			})
+		}
+	}
+	if err := store.SaveSessions(context.Background(), sessions); err != nil {
+		logging.Warn(logging.SourceService, "保存会话失败", "错误", err)
+	}
+}
+
+// configureSessionStore 让会话登记写入账本库，并恢复上次运行保存的未过期会话
+func configureSessionStore(pool *balancer.AccountPool, store *requestdb.Store) {
+	if store == nil {
+		return
+	}
+	conversations.mu.Lock()
+	if conversations.store != nil {
+		conversations.mu.Unlock()
+		return
+	}
+	conversations.store = store
+	conversations.mu.Unlock()
+	sessions, err := store.Sessions(context.Background(), time.Now())
+	if err != nil {
+		logging.Warn(logging.SourceService, "读取会话失败", "错误", err)
+		return
+	}
+	conversations.mu.Lock()
+	for _, session := range sessions {
+		conversations.states[session.Key] = conversationEntry{
+			snapshot: gemini.ConversationSnapshot{
+				CID: session.CID, RID: session.RID, RCID: session.RCID, Token: session.Token, ModelMode: session.ModelMode, Turns: session.Turns,
+			},
+			accountID: session.Account, contextTokens: session.ContextTokens, expiresAt: session.ExpiresAt,
+		}
+	}
+	conversations.mu.Unlock()
+	if len(sessions) > 0 {
+		logging.Info(logging.SourceService, "恢复会话", "数量", len(sessions))
+		go bindRestoredSessions(pool, sessions)
+	}
+}
+
+// bindRestoredSessions 在所属账号的客户端创建后把恢复的会话绑定回该账号，会话到期后不再等待
+func bindRestoredSessions(pool *balancer.AccountPool, sessions []requestdb.StoredSession) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for len(sessions) > 0 {
+		now := time.Now()
+		pending := sessions[:0]
+		for _, session := range sessions {
+			switch {
+			case now.After(session.ExpiresAt):
+			case pool.Client(session.Account) != nil:
+				pool.BindSession(session.Key, session.Account)
+			default:
+				pending = append(pending, session)
+			}
+		}
+		sessions = pending
+		if len(sessions) > 0 {
+			<-ticker.C
 		}
 	}
 }
@@ -130,6 +205,13 @@ func (r *conversationRegistry) cleanupLocked(now time.Time) {
 		}
 	}
 	r.lastGC = now
+	if store := r.store; store != nil {
+		go func() {
+			if err := store.PruneSessions(context.Background(), now); err != nil {
+				logging.Warn(logging.SourceService, "清理会话失败", "错误", err)
+			}
+		}()
+	}
 }
 
 func conversationKey(previousResponseID string, conversationID string, headerValue string) string {

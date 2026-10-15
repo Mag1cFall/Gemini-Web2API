@@ -1,0 +1,325 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-*: initial;
+  --color-white: #ffffff;
+  --color-background: #f0f5f8;
+  --color-surface: #ffffff;
+  --color-panel: #f8fbfd;
+  --color-panel-edge: #ebeef0;
+  --color-muted: #eef1f5;
+  --color-hover: #e4e9eb;
+  --color-header-hover: #e2e7e9;
+  --color-nav-active: #e4e9eb;
+  --color-nav-pressed: #ebf0f3;
+  --color-border: #e4e5e6;
+  --color-border-strong: rgb(0 0 0 / 0.2);
+  --color-foreground: rgb(0 0 0 / 0.9);
+  --color-foreground-muted: rgb(0 0 0 / 0.6);
+  --color-foreground-subtle: rgb(0 0 0 / 0.35);
+  --color-overlay: rgb(0 0 0 / 0.4);
+  --color-primary: #3a7bfc;
+  --color-primary-hover: #0b66dd;
+  --color-primary-active: #1740b0;
+  --color-primary-foreground: #ffffff;
+  --color-primary-soft: rgb(58 123 252 / 0.1);
+  --color-primary-soft-strong: rgb(58 123 252 / 0.2);
+  --color-primary-border: rgb(58 123 252 / 0.4);
+  --color-destructive: #f53f3f;
+  --color-destructive-hover: #e63e2a;
+  --color-destructive-active: #c94032;
+  --color-destructive-soft: rgb(240 68 56 / 0.1);
+  --color-destructive-border: rgb(240 68 56 / 0.4);
+  --color-success: #1adb87;
+  --color-success-text: #1d7a4d;
+  --color-success-soft: #ccf0e3;
+  --color-warning: #fd8a00;
+  --color-warning-text: #a35a00;
+  --color-warning-soft: #fef0e0;
+  --color-error: #f53f3f;
+  --color-offline: #ff5667;
+  --color-offline-border: #d94958;
+  --color-error-text: #c4312a;
+  --color-error-soft: #fdecea;
+  --color-info: #3a7bfc;
+  --color-info-soft: #def0ff;
+  --color-chip: #191919;
+  --color-chip-foreground: #ffffff;
+  --color-selection: rgb(58 123 252 / 0.2);
+  --color-scrollbar: #c7ced6;
+  --color-control-edge: #ebebeb;
+  --color-control-underline: #bcbcbc;
+  --color-input-edge: #e6e6e6;
+  --color-input-underline: #878787;
+  --color-placeholder: #8c8c8c;
+  --color-disabled: #c1c2c3;
+  --color-switch-off: #f8f8f8;
+  --color-switch-border: #8a8a8a;
+  --color-switch-knob: #636363;
+
+  --font-*: initial;
+  --font-sans:
+    'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Segoe UI', 'Noto Sans CJK SC',
+    system-ui, sans-serif;
+  --font-mono:
+    'Consolas Text', Consolas, 'Cascadia Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --text-*: initial;
+  --text-xs: 12px;
+  --text-xs--line-height: 18px;
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+  --text-base: 14px;
+  --text-base--line-height: 22px;
+  --text-md: 16px;
+  --text-md--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+
+  --font-weight-*: initial;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  --spacing: initial;
+  --spacing-*: initial;
+  --spacing-0: 0px;
+  --spacing-px: 1px;
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 20px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-10: 40px;
+  --spacing-12: 48px;
+  --spacing-row: 44px;
+  --spacing-16: 64px;
+  --spacing-icon: 20px;
+  --spacing-control-sm: 32px;
+  --spacing-control: 36px;
+  --spacing-control-lg: 40px;
+  --spacing-touch: 44px;
+  --spacing-header: 48px;
+  --spacing-action: 96px;
+
+  --container-*: initial;
+  --container-menu: 160px;
+  --container-cell: 160px;
+  --container-dialog: 440px;
+  --container-dialog-wide: 640px;
+  --container-sheet: 720px;
+  --container-sidebar: 240px;
+  --container-field: 360px;
+  --container-prose: 640px;
+  --container-page: 1600px;
+  --container-login: 380px;
+
+  --radius-*: initial;
+  --radius-sm: 4px;
+  --radius-panel: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  --shadow-*: initial;
+  --shadow-raised: 0 2px 8px 0 rgb(0 0 0 / 0.03);
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+  --shadow-popover: 0 6px 16px 0 rgb(0 0 0 / 0.12);
+  --shadow-modal: 0 9px 30px 0 rgb(0 0 0 / 0.16);
+
+  --ease-*: initial;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.55, 0, 1, 0.45);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --default-transition-duration: 120ms;
+  --default-transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+
+  --animate-*: initial;
+  --animate-fade-in: fade-in var(--duration-base) var(--ease-standard);
+  --animate-fade-out: fade-out var(--duration-fast) var(--ease-standard);
+  --animate-pop-in: pop-in var(--duration-base) var(--ease-standard);
+  --animate-pop-out: pop-out var(--duration-fast) var(--ease-standard);
+  --animate-sheet-in: sheet-in var(--duration-base) var(--ease-standard);
+  --animate-sheet-out: sheet-out var(--duration-fast) var(--ease-standard);
+  --animate-drawer-in: drawer-in var(--duration-base) var(--ease-standard);
+  --animate-drawer-out: drawer-out var(--duration-fast) var(--ease-standard);
+  --animate-page-in: pop-in var(--duration-fast) var(--ease-standard);
+  --animate-spin: spin 900ms linear infinite;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes fade-out {
+    to {
+      opacity: 0;
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+  @keyframes pop-out {
+    to {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+  }
+  @keyframes sheet-in {
+    from {
+      transform: translateX(4px);
+      opacity: 0;
+    }
+  }
+  @keyframes sheet-out {
+    to {
+      transform: translateX(4px);
+      opacity: 0;
+    }
+  }
+  @keyframes drawer-in {
+    from {
+      transform: translateX(-16px);
+      opacity: 0;
+    }
+  }
+  @keyframes drawer-out {
+    to {
+      transform: translateX(-16px);
+      opacity: 0;
+    }
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}
+
+@utility z-sticky {
+  z-index: 10;
+}
+@utility z-dropdown {
+  z-index: 20;
+}
+@utility z-overlay {
+  z-index: 30;
+}
+@utility z-modal {
+  z-index: 40;
+}
+@utility z-popover {
+  z-index: 50;
+}
+@utility z-toast {
+  z-index: 60;
+}
+@utility max-h-dialog {
+  max-height: calc(100dvh - 64px);
+}
+@utility safe-x {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+@utility drag-region {
+  --wails-draggable: drag;
+}
+@utility no-drag {
+  --wails-draggable: no-drag;
+}
+
+/* Consolas Text 是按微软雅黑 x 高度放大的 Consolas，等宽文字与同行正文字面高度一致 */
+@font-face {
+  font-family: 'Consolas Text';
+  src: local('Consolas');
+  size-adjust: 110%;
+}
+
+/* 过渡只用以下时长与缓动：fast 用于颜色、背景、边框与透明度，base 用于展开、指示条与弹出层 */
+:root {
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@layer base {
+  html {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+    scrollbar-color: var(--color-scrollbar) transparent;
+    scrollbar-width: thin;
+  }
+  * {
+    scrollbar-width: thin;
+  }
+  ::selection {
+    background-color: var(--color-selection);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-primary-border);
+    outline-offset: 2px;
+  }
+  input:-webkit-autofill {
+    -webkit-text-fill-color: var(--color-foreground);
+    box-shadow: 0 0 0 1000px var(--color-surface) inset;
+  }
+  summary {
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+  a,
+  button,
+  input,
+  textarea,
+  tr,
+  [role='tab'],
+  [role='radio'],
+  [role='menuitem'],
+  [role='option'],
+  [role='switch'] {
+    transition-property: color, background-color, border-color, opacity, box-shadow;
+    transition-duration: var(--duration-fast);
+    transition-timing-function: var(--ease-standard);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+  .animate-spin {
+    animation-duration: 1800ms !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* 下拉选项超出可用高度时显示滚动条 */
+[data-radix-select-viewport][data-radix-select-viewport] {
+  scrollbar-width: thin;
+}

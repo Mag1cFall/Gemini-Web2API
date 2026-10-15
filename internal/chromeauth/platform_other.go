@@ -4,7 +4,8 @@ package chromeauth
 
 import "fmt"
 
-func defaultChromeRoot() (string, error) {
+// DefaultChromeRoot 返回本机 Chrome User Data 目录
+func DefaultChromeRoot() (string, error) {
 	return "", fmt.Errorf("Chrome OAuth 导入仅支持 Windows")
 }
 

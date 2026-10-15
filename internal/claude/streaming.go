@@ -20,6 +20,8 @@ type StreamingState struct {
 	CurrentBlockType string
 	Usage            *gemini.Usage
 	ConversationID   string
+	// WebSearchRequests 为 message_delta usage.server_tool_use 的搜索次数
+	WebSearchRequests int
 }
 
 // NewStreamingState 创建 Claude SSE 状态
@@ -166,7 +168,11 @@ func (p *StreamProcessor) Finish(stopReason string) error {
 	if p.state.ConversationID != "" {
 		messageDelta["conversation_id"] = p.state.ConversationID
 	}
-	messageDelta["usage"] = map[string]int{"output_tokens": p.state.Usage.OutputTokens()}
+	usage := map[string]any{"output_tokens": p.state.Usage.OutputTokens()}
+	if p.state.WebSearchRequests > 0 {
+		usage["server_tool_use"] = map[string]int{"web_search_requests": p.state.WebSearchRequests}
+	}
+	messageDelta["usage"] = usage
 	if err := p.emit("message_delta", messageDelta); err != nil {
 		return err
 	}
@@ -176,13 +182,101 @@ func (p *StreamProcessor) Finish(stopReason string) error {
 
 // EmitError 输出 Claude 流式错误
 func (p *StreamProcessor) EmitError(err error) error {
+	return p.EmitErrorType("api_error", err)
+}
+
+// EmitErrorType 以指定错误类型输出 Claude 流式错误
+func (p *StreamProcessor) EmitErrorType(errorType string, err error) error {
 	if err == nil {
 		return nil
 	}
 	return p.emit("error", map[string]interface{}{
 		"type":  "error",
-		"error": map[string]string{"type": "api_error", "message": err.Error()},
+		"error": map[string]string{"type": errorType, "message": err.Error()},
 	})
+}
+
+// EmitServerToolUse 输出一次服务端工具调用块，输入以 input_json_delta 发送
+func (p *StreamProcessor) EmitServerToolUse(id string, name string, input any) error {
+	if err := p.ensureStarted(); err != nil {
+		return err
+	}
+	if err := p.closeBlock(); err != nil {
+		return err
+	}
+	if err := p.emit("content_block_start", map[string]interface{}{
+		"type": "content_block_start", "index": p.state.BlockIndex,
+		"content_block": map[string]interface{}{"type": "server_tool_use", "id": id, "name": name, "input": map[string]interface{}{}},
+	}); err != nil {
+		return err
+	}
+	p.state.CurrentBlockType = "server_tool_use"
+	arguments, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	if err := p.emit("content_block_delta", map[string]interface{}{
+		"type": "content_block_delta", "index": p.state.BlockIndex,
+		"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": string(arguments)},
+	}); err != nil {
+		return err
+	}
+	if name == "web_search" {
+		p.state.WebSearchRequests++
+	}
+	return p.closeBlock()
+}
+
+// EmitBlock 以一对 content_block_start 与 content_block_stop 输出完整内容块，例如 web_search_tool_result
+func (p *StreamProcessor) EmitBlock(block map[string]any) error {
+	if err := p.ensureStarted(); err != nil {
+		return err
+	}
+	if err := p.closeBlock(); err != nil {
+		return err
+	}
+	if err := p.emit("content_block_start", map[string]interface{}{
+		"type": "content_block_start", "index": p.state.BlockIndex, "content_block": block,
+	}); err != nil {
+		return err
+	}
+	p.state.CurrentBlockType = fmt.Sprint(block["type"])
+	return p.closeBlock()
+}
+
+// EmitCitedText 输出一个带引用的文本块，引用以 citations_delta 先于正文发送
+func (p *StreamProcessor) EmitCitedText(text string, citations []map[string]any) error {
+	if err := p.ensureStarted(); err != nil {
+		return err
+	}
+	if err := p.closeBlock(); err != nil {
+		return err
+	}
+	block := map[string]interface{}{"type": "text", "text": ""}
+	if len(citations) > 0 {
+		block["citations"] = []any{}
+	}
+	if err := p.emit("content_block_start", map[string]interface{}{
+		"type": "content_block_start", "index": p.state.BlockIndex, "content_block": block,
+	}); err != nil {
+		return err
+	}
+	p.state.CurrentBlockType = "cited_text"
+	for _, citation := range citations {
+		if err := p.emit("content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": p.state.BlockIndex,
+			"delta": map[string]interface{}{"type": "citations_delta", "citation": citation},
+		}); err != nil {
+			return err
+		}
+	}
+	if err := p.emit("content_block_delta", map[string]interface{}{
+		"type": "content_block_delta", "index": p.state.BlockIndex,
+		"delta": map[string]interface{}{"type": "text_delta", "text": text},
+	}); err != nil {
+		return err
+	}
+	return p.closeBlock()
 }
 
 func (p *StreamProcessor) emitContent(blockType string, event gemini.Event) error {

@@ -1,0 +1,87 @@
+// AccountState 对应 internal/admin 的账户状态
+export type AccountState =
+  'initializing' | 'ready' | 'cooldown' | 'auth_required' | 'unavailable' | 'disabled'
+
+// AccountSource 是账户导入来源
+export type AccountSource = 'chrome' | 'cookie' | 'guest'
+
+// UsageWindow 是官网用量窗口，used_ratio 为已用比例
+export interface UsageWindow {
+  used_ratio: number
+  reset_at: string
+}
+
+// AccountUsage 对应 internal/gemini 的 UsageInfo，current 为五小时窗口
+export interface AccountUsage {
+  tier: string
+  tier_code: number
+  current?: UsageWindow
+  weekly?: UsageWindow
+  remaining_credits?: number
+  use_overage_ai_credits: boolean
+  fetched_at: string
+}
+
+// ModelCooldown 是单个模型的冷却
+export interface ModelCooldown {
+  model: string
+  until: string
+  reason: string
+}
+
+// Account 对应 GET /api/accounts 的 account，可选字段为空时后端省略
+export interface Account {
+  account_id: string
+  state: AccountState
+  enabled: boolean
+  source: AccountSource
+  profile?: string
+  proxy?: string
+  tier?: string
+  context_window?: number
+  models: string[]
+  pending: number
+  last_used?: string
+  ready_at?: string
+  cooldown_until?: string
+  cooldown_reason?: string
+  model_cooldowns?: ModelCooldown[]
+  consecutive_failures: number
+  last_error?: string
+  last_error_at?: string
+  usage?: AccountUsage
+}
+
+// AccountUsageStatus 对应 GET /api/accounts/usage 的 accounts 项，error 为本次读取用量失败的原因
+export interface AccountUsageStatus {
+  account_id: string
+  state: AccountState
+  usage?: AccountUsage
+  error?: string
+}
+
+// AccountsUsage 对应 GET /api/accounts/usage 的响应
+export interface AccountsUsage {
+  accounts: AccountUsageStatus[]
+}
+
+// ChromeProfile 对应 GET /api/accounts/import/chrome 的 profiles 项
+export interface ChromeProfile {
+  id: string
+  profile: string
+  display_name: string
+  email: string
+  importable: boolean
+  imported: boolean
+}
+
+// ChromeProfiles 对应 GET /api/accounts/import/chrome 的响应
+export interface ChromeProfiles {
+  profiles: ChromeProfile[]
+}
+
+// PairingToken 对应 POST /api/pairing 的响应
+export interface PairingToken {
+  token: string
+  expires_at: string
+}

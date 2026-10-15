@@ -57,12 +57,12 @@ type pendingImport struct {
 	result ImportResult
 }
 
-// CookieImportOptions 保存 Cookie Header 导入参数
+// CookieImportOptions 保存 Cookie 导入参数，Cookies 为 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt
 type CookieImportOptions struct {
-	Header string
-	ID     string
-	Output string
-	Proxy  string
+	Cookies string
+	ID      string
+	Output  string
+	Proxy   string
 }
 
 // Discover 只读列出本机 Chrome Google 账号
@@ -75,7 +75,7 @@ func Refresh(ctx context.Context, material auth.OAuthMaterial, proxy string) ([]
 	if err := ensurePlatformImport(); err != nil {
 		return nil, err
 	}
-	proxyURL, err := validateProxy(proxy)
+	proxyURL, err := ValidateProxy(proxy)
 	if err != nil {
 		return nil, err
 	}
@@ -86,17 +86,17 @@ func Refresh(ctx context.Context, material auth.OAuthMaterial, proxy string) ([]
 	return toGeminiCookies(cookies), nil
 }
 
-// ImportCookieHeader 从浏览器请求头生成短期账号状态
-func ImportCookieHeader(ctx context.Context, options CookieImportOptions) (ImportResult, int, error) {
-	proxyURL, err := validateProxy(options.Proxy)
+// ImportCookies 从 Cookie 文本生成短期账号状态
+func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResult, int, error) {
+	proxyURL, err := ValidateProxy(options.Proxy)
 	if err != nil {
 		return ImportResult{}, 0, err
 	}
-	id := accountSlug(options.ID)
+	id := AccountID(options.ID)
 	if id == "" {
 		return ImportResult{}, 0, fmt.Errorf("id 必须包含英文字母或数字")
 	}
-	cookies, err := parseCookieHeader(options.Header)
+	cookies, err := parseCookies(options.Cookies)
 	if err != nil {
 		return ImportResult{}, 0, err
 	}
@@ -132,7 +132,7 @@ func Import(ctx context.Context, options ImportOptions) ([]ImportResult, int, er
 	if err := ensurePlatformImport(); err != nil {
 		return nil, 0, err
 	}
-	proxyURL, err := validateProxy(options.Proxy)
+	proxyURL, err := ValidateProxy(options.Proxy)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -218,7 +218,8 @@ func missingValues(requested map[string]struct{}, found map[string]struct{}) []s
 	return missing
 }
 
-func validateProxy(value string) (string, error) {
+// ValidateProxy 校验 HTTP、HTTPS 或 SOCKS5 代理 URL 并返回去掉空白的值
+func ValidateProxy(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", nil
@@ -277,12 +278,12 @@ func importAccount(ctx context.Context, account Account, options ImportOptions, 
 	}
 
 	email := strings.ToLower(strings.TrimSpace(account.Email))
-	path := filepath.Join(options.Output, accountSlug(email), storageFileName)
+	path := filepath.Join(options.Output, AccountID(email), storageFileName)
 	state := auth.StorageState{
 		Cookies: toStorageCookies(cookies),
 		Origins: []json.RawMessage{},
 		Metadata: auth.Metadata{
-			ID:     accountSlug(email),
+			ID:     AccountID(email),
 			Proxy:  proxyURL,
 			Source: auth.ImportSource{Browser: "chrome", Profile: account.Profile},
 			OAuth: &auth.OAuthMaterial{
@@ -350,7 +351,8 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]Im
 	return results, len(models), nil
 }
 
-func accountSlug(email string) string {
+// AccountID 返回邮箱对应的账号 ID
+func AccountID(email string) string {
 	return strings.Trim(slugPattern.ReplaceAllString(strings.ToLower(strings.TrimSpace(email)), "-"), "-")
 }
 
@@ -445,11 +447,6 @@ func parseCookieHeader(header string) ([]auth.StateCookie, error) {
 		cookies = append(cookies, auth.StateCookie{
 			Name: name, Value: value, Domain: domain, Path: "/", Secure: true,
 		})
-	}
-	for _, required := range []string{"SAPISID", "__Secure-1PSID"} {
-		if _, exists := names[required]; !exists {
-			return nil, fmt.Errorf("Cookie Header 缺少核心 Cookie: %s", required)
-		}
 	}
 	return cookies, nil
 }

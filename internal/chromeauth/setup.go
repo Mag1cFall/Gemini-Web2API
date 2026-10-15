@@ -30,6 +30,7 @@ func (values *stringList) Set(value string) error {
 
 // RunSetup 执行首次账号配置
 func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, interactive bool) error {
+	stdin = bufio.NewReader(stdin)
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var profiles stringList
@@ -38,9 +39,11 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	flags.Var(&emails, "email", "要导入的 Google 邮箱，可重复")
 	chromeRoot := flags.String("chrome-root", "", "Chrome User Data 目录")
 	output := flags.String("output", "auth", "认证状态输出目录")
+	remote := flags.String("remote", "", "把导入的账号上传到远程实例，例如 https://example.com，配对令牌从标准输入读取")
 	proxy := flags.String("proxy", "", "账号固定代理 URL")
 	cookieHeader := flags.String("cookie", "", "从一行 Cookie Header 导入账号")
-	accountID := flags.String("id", "", "Cookie Header 导入使用的账号名称")
+	cookieFile := flags.String("cookie-file", "", "从浏览器导出的 Cookie JSON 或 Netscape cookies.txt 文件导入账号")
+	accountID := flags.String("id", "", "Cookie 导入使用的账号名称")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -56,22 +59,55 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	if err != nil {
 		return fmt.Errorf("解析输出目录: %w", err)
 	}
-	if strings.TrimSpace(*cookieHeader) != "" {
-		if len(profiles) != 0 || len(emails) != 0 || strings.TrimSpace(*chromeRoot) != "" {
-			return fmt.Errorf("--cookie 不能与 Chrome 账号选择参数同时使用")
+	origin := ""
+	if strings.TrimSpace(*remote) != "" {
+		if origin, err = RemoteOrigin(*remote); err != nil {
+			return err
 		}
-		_, modelCount, err := ImportCookieHeader(ctx, CookieImportOptions{
-			Header: *cookieHeader, ID: *accountID, Output: outputPath, Proxy: proxyURL,
+		if outputPath, err = os.MkdirTemp("", "gemini-web2api-setup-"); err != nil {
+			return fmt.Errorf("创建临时目录: %w", err)
+		}
+		defer os.RemoveAll(outputPath)
+	}
+	finish := func(paths []string, modelCount int) error {
+		if origin == "" {
+			return writeJSON(stdout, map[string]any{"setup": true, "accounts": len(paths), "models": modelCount, "output": outputPath})
+		}
+		token, err := readPairingToken(stdin, stderr)
+		if err != nil {
+			return err
+		}
+		ids, err := uploadStates(ctx, origin, token, paths)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, map[string]any{"setup": true, "accounts": len(ids), "remote": origin, "ids": ids})
+	}
+	cookies := strings.TrimSpace(*cookieHeader)
+	if path := strings.TrimSpace(*cookieFile); path != "" {
+		if cookies != "" {
+			return fmt.Errorf("--cookie 与 --cookie-file 只能选一个")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("读取 Cookie 文件: %w", err)
+		}
+		cookies = string(data)
+	}
+	if cookies != "" {
+		if len(profiles) != 0 || len(emails) != 0 || strings.TrimSpace(*chromeRoot) != "" {
+			return fmt.Errorf("--cookie、--cookie-file 不能与 Chrome 账号选择参数同时使用")
+		}
+		result, modelCount, err := ImportCookies(ctx, CookieImportOptions{
+			Cookies: cookies, ID: *accountID, Output: outputPath, Proxy: proxyURL,
 		})
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, map[string]any{
-			"setup": true, "accounts": 1, "models": modelCount, "output": outputPath,
-		})
+		return finish([]string{result.Path}, modelCount)
 	}
 	if strings.TrimSpace(*accountID) != "" {
-		return fmt.Errorf("--id 只与 --cookie 一起使用")
+		return fmt.Errorf("--id 只与 --cookie、--cookie-file 一起使用")
 	}
 
 	root, err := resolveChromeRoot(*chromeRoot)
@@ -102,9 +138,11 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	if err != nil {
 		return err
 	}
-	return writeJSON(stdout, map[string]any{
-		"setup": true, "accounts": len(results), "models": modelCount, "output": outputPath,
-	})
+	paths := make([]string, 0, len(results))
+	for _, result := range results {
+		paths = append(paths, result.Path)
+	}
+	return finish(paths, modelCount)
 }
 
 func promptProfiles(accounts []Account, input io.Reader, output io.Writer) (stringList, error) {
@@ -148,7 +186,7 @@ func promptProfiles(accounts []Account, input io.Reader, output io.Writer) (stri
 
 func resolveChromeRoot(value string) (string, error) {
 	if strings.TrimSpace(value) == "" {
-		return defaultChromeRoot()
+		return DefaultChromeRoot()
 	}
 	root, err := filepath.Abs(strings.TrimSpace(value))
 	if err != nil {
