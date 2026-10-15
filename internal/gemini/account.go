@@ -19,6 +19,8 @@ type AccountSource struct {
 	ID       string
 	Cookies  []Cookie
 	Language string
+	// AuthUser 是目标账号在多账号 Cookie 中的序号，对应官网地址 /u/N，0 为默认账号
+	AuthUser int
 	Save     func([]Cookie) error
 	Refresh  func(context.Context) ([]Cookie, error)
 	// Concurrency 是账号同时进行的上游请求数，零按 1 处理

@@ -328,6 +328,9 @@ func logReady(account auth.LoadedAccount, client *gemini.Client, duration time.D
 	if usage := client.CachedUsage(); usage != nil {
 		fields = append([]any{"层级", usage.Tier}, fields...)
 	}
+	if email := client.Email(); email != "" {
+		fields = append([]any{"邮箱", email}, fields...)
+	}
 	if account.ProxyURL != "" {
 		fields = append(fields, "代理", maskProxy(account.ProxyURL))
 	}
@@ -592,7 +595,7 @@ func (m *Manager) ChromeAccounts() ([]ChromeAccount, error) {
 	for _, account := range discovered {
 		result = append(result, ChromeAccount{Account: account, Imported: imported[chromeauth.AccountID(account.Email)]})
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Profile < result[j].Profile })
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Profile < result[j].Profile })
 	return result, nil
 }
 
@@ -602,8 +605,8 @@ type ChromeAccount struct {
 	Imported bool `json:"imported"`
 }
 
-// ImportChrome 从本机 Chrome Profile 导入账号并启动
-func (m *Manager) ImportChrome(ctx context.Context, profiles []string, proxy string) ([]string, error) {
+// ImportChrome 按邮箱从本机 Chrome 导入账号并启动
+func (m *Manager) ImportChrome(ctx context.Context, emails []string, proxy string) ([]string, error) {
 	root, err := chromeauth.DefaultChromeRoot()
 	if err != nil {
 		return nil, err
@@ -612,7 +615,7 @@ func (m *Manager) ImportChrome(ctx context.Context, profiles []string, proxy str
 	if strings.TrimSpace(proxy) == "" {
 		proxy = settings.Proxy
 	}
-	results, _, err := chromeauth.Import(ctx, chromeauth.ImportOptions{ChromeRoot: root, Output: settings.AuthDir, Proxy: proxy, Profiles: profiles})
+	results, _, err := chromeauth.Import(ctx, chromeauth.ImportOptions{ChromeRoot: root, Output: settings.AuthDir, Proxy: proxy, Emails: emails})
 	if err != nil {
 		return nil, err
 	}
@@ -628,12 +631,12 @@ func (m *Manager) ImportChrome(ctx context.Context, profiles []string, proxy str
 }
 
 // ImportCookie 从 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt 导入账号并启动
-func (m *Manager) ImportCookie(ctx context.Context, cookies string, id string, proxy string) (string, error) {
+func (m *Manager) ImportCookie(ctx context.Context, cookies string, id string, proxy string, authUser int) (string, error) {
 	settings := m.Settings()
 	if strings.TrimSpace(proxy) == "" {
 		proxy = settings.Proxy
 	}
-	result, _, err := chromeauth.ImportCookies(ctx, chromeauth.CookieImportOptions{Cookies: cookies, ID: id, Output: settings.AuthDir, Proxy: proxy})
+	result, _, err := chromeauth.ImportCookies(ctx, chromeauth.CookieImportOptions{Cookies: cookies, ID: id, Output: settings.AuthDir, Proxy: proxy, AuthUser: authUser})
 	if err != nil {
 		return "", err
 	}

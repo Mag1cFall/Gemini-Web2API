@@ -42,12 +42,25 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 
 | 顺序 | 请求 | 读取内容 |
 | ---: | --- | --- |
-| 1 | `GET https://gemini.google.com/app` | `SNlM0e`、`cfb2h`、`FdrFJe`、`TuX5cc`、上传参数、响应 Cookie |
+| 1 | `GET https://gemini.google.com/app` | `SNlM0e`、`cfb2h`、`FdrFJe`、`TuX5cc`、`oPEP7c` 登录邮箱、上传参数、响应 Cookie |
 | 2 | `POST /_/BardChatUi/data/batchexecute?rpcids=otAQ7b` | 当前账号可见模型与思考强度 |
 | 3 | `POST ...batchexecute?rpcids=ESY5D` | 账号偏好 |
 | 4 | `POST ...batchexecute?rpcids=jSf9Qc&source-path=/usage` | 套餐、用量窗口、重置时间 |
 
 任一步失败的账号在启动时标为不可用，之后按 `ACCOUNT_COOLDOWN` 间隔重新执行整条链路，成功后加入调度并开始轮换 Cookie。
+
+### 多账号 Cookie
+
+浏览器登录多个 Google 账号时，Cookie 中的会话按登录顺序编号，官网以路径前缀 `/u/N` 访问第 `N` 个账号，不带前缀时为第 0 个。账号状态 `authUser` 为 `N` 时，服务按官网 `/u/N` 页面的请求发送：
+
+| 请求 | 默认账号 | 第 N 个账号 |
+| --- | --- | --- |
+| 首页 | `/app` | `/u/N/app` |
+| batchexecute、StreamGenerate、ProcessFile | `/_/BardChatUi/...` | `/u/N/_/BardChatUi/...` |
+| batchexecute `source-path` | `/app`、`/usage` | `/u/N/app`、`/u/N/usage` |
+| 附件上传开始 | `push.clients6.google.com/upload/` | `push.clients6.google.com/upload/?authuser=N` |
+
+`Referer` 都为 `https://gemini.google.com/`，`gemini.google.com` 请求不带 `x-goog-authuser`；上传完成请求使用开始响应 `x-goog-upload-url` 给出的地址。首页 `oPEP7c` 为当前路径下的登录邮箱，服务在账号就绪日志中输出。
 
 ### 访客会话
 
@@ -258,8 +271,10 @@ payload = [
 
 | 方式 | 输入 | 可自动续签 | 适用场景 |
 | --- | --- | --- | --- |
-| Chrome setup | Chrome Profile | 是 | Windows 日常运行 |
-| Cookie Header | 一行 `Cookie` 值 | 否 | 快速导入、异机短期运行 |
+| Chrome setup | Chrome Profile 中的一个 Google 账号 | 是 | Windows 日常运行 |
+| Cookie Header | 一行 `Cookie` 值与账号序号 | 否 | 快速导入、异机短期运行 |
+
+同一 Profile 登录多个 Google 账号时，setup 逐个列出，选中的账号单独经 OAuthMultilogin 签发只含它自己的 Cookie。Cookie 来自登录多个账号的浏览器时，账号序号为官网地址 `gemini.google.com/u/N/app` 中的 `N`，服务按 [多账号 Cookie](#多账号-cookie) 访问该账号。
 
 ### Chrome DBSC 链路
 
@@ -291,10 +306,11 @@ OAuthMultilogin directed response
 | 来源 | 原始字段 |
 | --- | --- |
 | `Local State` | `profile.info_cache`、`os_crypt.app_bound_encrypted_key` |
-| Profile `Web Data` | `SELECT service, encrypted_token, binding_key FROM token_service` |
+| Profile `Preferences` | `account_info[].gaia`、`account_info[].email`：Profile 中登录的全部账号 |
+| Profile `Web Data` | `SELECT service, encrypted_token, binding_key FROM token_service WHERE service = 'AccountId-GAIA_ID'` |
 | Profile `Preferences` | `intl.accept_languages`，回退 `intl.selected_languages`；按 Chrome 规则在地区语言后补基础语言、q 值从 0.9 起逐项减 0.1（最低 0.1），得到 `Accept-Language` |
 
-`token_service` 必须恰好有一行，`service` 形态为 `AccountId-GAIA_ID`。refresh token 密文形态为：
+`token_service` 每个登录账号一行，`service` 形态为 `AccountId-GAIA_ID`；`account_info` 中没有对应行的账号不可导入。refresh token 密文形态为：
 
 ```text
 "v20" || NONCE_12_BYTES || AES_256_GCM_CIPHERTEXT_AND_TAG
@@ -413,6 +429,7 @@ HPKE 使用 Base mode、DHKEM(X25519, HKDF-SHA256)、HKDF-SHA256、AES-128-GCM�
     "proxy": "PROXY_URL",
     "source": {"browser":"chrome","profile":"Profile 1"},
     "language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "authUser": 1,
     "oauth": {
       "gaiaId": "GAIA_ID",
       "refreshToken": "1//0...",
@@ -474,7 +491,7 @@ priority: u=4, i
 
 `init` 的第 1 个参数为会话值，是带符号的十进制整数（可为负），按字符串原样写入正文数组第 1 位；第 2、3、4 个参数依次写入第 0、2、3 位，零值省略；第 5 个参数为轮换间隔秒数。响应为 `)]}'` 前缀的 `[["identity.hfcr",600],["di",<n>]]`。每次响应都以 `Set-Cookie` 刷新 `SIDCC`、`__Secure-1PSIDCC`、`__Secure-3PSIDCC`；`__Secure-1PSIDTS` 与 `__Secure-3PSIDTS` 由服务端决定何时下发新值。
 
-OAuthMultilogin 响应带 `__Secure-1PSIDTS` 与 `__Secure-1PSIDRTS`（同值，后者 10 分钟到期）时，`RotateCookies` 不下发新的 `__Secure-1PSIDTS`，会话在签发 2 小时后失效；响应不带这两项时，`RotateCookies` 下发并更新 `__Secure-1PSIDTS`。会话失效后首页仍返回 200 但缺少 `SNlM0e`，轮换页与 `RotateCookies` 仍返回 200，只有 `ListAccounts` 反映会话状态。`ListAccounts` 响应为 `application/binary`，正文是 base64 编码的 protobuf，1 号字段为账号列表，按 Cookie 中的账号顺序排列。服务读取第一个账号：
+OAuthMultilogin 响应带 `__Secure-1PSIDTS` 与 `__Secure-1PSIDRTS`（同值，后者 10 分钟到期）时，`RotateCookies` 不下发新的 `__Secure-1PSIDTS`，会话在签发 2 小时后失效；响应不带这两项时，`RotateCookies` 下发并更新 `__Secure-1PSIDTS`。会话失效后首页仍返回 200 但缺少 `SNlM0e`，轮换页与 `RotateCookies` 仍返回 200，只有 `ListAccounts` 反映会话状态。`ListAccounts` 响应为 `application/binary`，正文是 base64 编码的 protobuf，1 号字段为账号列表，按 Cookie 中的账号顺序排列。服务读取账号序号对应的一项，默认为第一项：
 
 | 字段 | 有效会话 | 失效会话 |
 | --- | --- | --- |

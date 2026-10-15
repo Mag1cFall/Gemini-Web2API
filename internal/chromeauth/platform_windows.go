@@ -59,16 +59,50 @@ func discoverPlatform(chromeRoot string) ([]Account, error) {
 	accounts := make([]Account, 0, len(profiles))
 	for _, profile := range profiles {
 		info := state.Profile.InfoCache[profile]
-		_, encrypted, bindingKey, tokenErr := readTokenService(chromeRoot, profile)
-		accounts = append(accounts, Account{
-			Profile: profile, DisplayName: info.Name, Email: info.UserName,
-			Importable: tokenErr == nil && strings.HasPrefix(string(encrypted), "v20") && len(bindingKey) != 0,
-		})
+		identities, err := profileIdentities(chromeRoot, profile)
+		if err != nil || len(identities) == 0 {
+			accounts = append(accounts, Account{Profile: profile, DisplayName: info.Name, Email: info.UserName})
+			continue
+		}
+		seen := make(map[string]bool, len(identities))
+		for _, identity := range identities {
+			if identity.GaiaID == "" || seen[identity.GaiaID] {
+				continue
+			}
+			seen[identity.GaiaID] = true
+			_, encrypted, bindingKey, tokenErr := readTokenService(chromeRoot, profile, identity.GaiaID)
+			accounts = append(accounts, Account{
+				Profile: profile, GaiaID: identity.GaiaID, DisplayName: info.Name, Email: identity.Email,
+				Importable: tokenErr == nil && strings.HasPrefix(string(encrypted), "v20") && len(bindingKey) != 0,
+			})
+		}
 	}
 	return accounts, nil
 }
 
-func readTokenService(chromeRoot string, profile string) (string, []byte, []byte, error) {
+// profileIdentity 是 Preferences.account_info 中的一个 Google 账号
+type profileIdentity struct {
+	GaiaID string `json:"gaia"`
+	Email  string `json:"email"`
+}
+
+// profileIdentities 读取 Profile 中登录的全部 Google 账号
+func profileIdentities(chromeRoot string, profile string) ([]profileIdentity, error) {
+	data, err := os.ReadFile(filepath.Join(chromeRoot, profile, "Preferences"))
+	if err != nil {
+		return nil, fmt.Errorf("读取 %s Preferences: %w", profile, err)
+	}
+	var preferences struct {
+		Accounts []profileIdentity `json:"account_info"`
+	}
+	if err := json.Unmarshal(data, &preferences); err != nil {
+		return nil, fmt.Errorf("解析 %s Preferences: %w", profile, err)
+	}
+	return preferences.Accounts, nil
+}
+
+// readTokenService 读取 Profile 中指定 Gaia ID 账号的 refresh token 与设备绑定密钥
+func readTokenService(chromeRoot string, profile string, gaiaID string) (string, []byte, []byte, error) {
 	databasePath := filepath.Join(chromeRoot, profile, "Web Data")
 	uri := "file:" + filepath.ToSlash(databasePath) + "?mode=ro&immutable=1"
 	database, err := sql.Open("sqlite", uri)
@@ -78,7 +112,7 @@ func readTokenService(chromeRoot string, profile string) (string, []byte, []byte
 	defer database.Close()
 	database.SetMaxOpenConns(1)
 
-	rows, err := database.Query("SELECT service, encrypted_token, binding_key FROM token_service")
+	rows, err := database.Query("SELECT service, encrypted_token, binding_key FROM token_service WHERE service = ?", "AccountId-"+gaiaID)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
 	}
@@ -87,22 +121,13 @@ func readTokenService(chromeRoot string, profile string) (string, []byte, []byte
 		if err := rows.Err(); err != nil {
 			return "", nil, nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
 		}
-		return "", nil, nil, fmt.Errorf("%s 的 token_service 记录数为 0", profile)
+		return "", nil, nil, fmt.Errorf("%s 的 token_service 没有账号 %s", profile, gaiaID)
 	}
 	var service string
 	var encryptedToken []byte
 	var bindingKey []byte
 	if err := rows.Scan(&service, &encryptedToken, &bindingKey); err != nil {
 		return "", nil, nil, fmt.Errorf("解析 %s token_service: %w", profile, err)
-	}
-	if rows.Next() {
-		return "", nil, nil, fmt.Errorf("%s 的 token_service 记录数大于 1", profile)
-	}
-	if err := rows.Err(); err != nil {
-		return "", nil, nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
-	}
-	if !strings.HasPrefix(service, "AccountId-") {
-		return "", nil, nil, fmt.Errorf("%s 的 token_service service 格式异常", profile)
 	}
 	if len(encryptedToken) == 0 || len(bindingKey) == 0 {
 		return "", nil, nil, fmt.Errorf("%s 的 token_service 缺少认证材料", profile)

@@ -44,6 +44,7 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	cookieHeader := flags.String("cookie", "", "从一行 Cookie Header 导入账号")
 	cookieFile := flags.String("cookie-file", "", "从浏览器导出的 Cookie JSON 或 Netscape cookies.txt 文件导入账号")
 	accountID := flags.String("id", "", "Cookie 导入使用的账号名称")
+	authUser := flags.Int("authuser", 0, "Cookie 中目标账号的序号，即官网地址 gemini.google.com/u/N/app 中的 N")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -99,15 +100,15 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 			return fmt.Errorf("--cookie、--cookie-file 不能与 Chrome 账号选择参数同时使用")
 		}
 		result, modelCount, err := ImportCookies(ctx, CookieImportOptions{
-			Cookies: cookies, ID: *accountID, Output: outputPath, Proxy: proxyURL,
+			Cookies: cookies, ID: *accountID, Output: outputPath, Proxy: proxyURL, AuthUser: *authUser,
 		})
 		if err != nil {
 			return err
 		}
 		return finish([]string{result.Path}, modelCount)
 	}
-	if strings.TrimSpace(*accountID) != "" {
-		return fmt.Errorf("--id 只与 --cookie、--cookie-file 一起使用")
+	if strings.TrimSpace(*accountID) != "" || *authUser != 0 {
+		return fmt.Errorf("--id、--authuser 只与 --cookie、--cookie-file 一起使用")
 	}
 
 	root, err := resolveChromeRoot(*chromeRoot)
@@ -122,7 +123,7 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 		if err != nil {
 			return err
 		}
-		profiles, err = promptProfiles(accounts, stdin, stderr)
+		emails, err = promptAccounts(accounts, stdin, stderr)
 		if err != nil {
 			return err
 		}
@@ -145,7 +146,8 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	return finish(paths, modelCount)
 }
 
-func promptProfiles(accounts []Account, input io.Reader, output io.Writer) (stringList, error) {
+// promptAccounts 列出可导入账号并按输入的编号返回选中账号的邮箱
+func promptAccounts(accounts []Account, input io.Reader, output io.Writer) (stringList, error) {
 	available := make([]Account, 0, len(accounts))
 	for _, account := range accounts {
 		if account.Importable {
@@ -157,7 +159,7 @@ func promptProfiles(accounts []Account, input io.Reader, output io.Writer) (stri
 	}
 	fmt.Fprintln(output, "可导入账号:")
 	for index, account := range available {
-		fmt.Fprintf(output, "%d. %s  %s  %s\n", index+1, account.Profile, account.DisplayName, account.Email)
+		fmt.Fprintf(output, "%d. %s  %s  %s\n", index+1, account.Email, account.Profile, account.DisplayName)
 	}
 	fmt.Fprint(output, "请输入逗号分隔的编号: ")
 	line, err := bufio.NewReader(input).ReadString('\n')
@@ -179,7 +181,7 @@ func promptProfiles(accounts []Account, input io.Reader, output io.Writer) (stri
 			continue
 		}
 		seen[index] = struct{}{}
-		selected = append(selected, available[index-1].Profile)
+		selected = append(selected, available[index-1].Email)
 	}
 	return selected, nil
 }

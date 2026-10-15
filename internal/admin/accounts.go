@@ -105,17 +105,17 @@ func (h *handler) chromeProfiles(c *gin.Context) {
 
 func (h *handler) importChrome(c *gin.Context) {
 	var input struct {
-		Profiles []string `json:"profiles"`
-		Proxy    string   `json:"proxy"`
+		Emails []string `json:"emails"`
+		Proxy  string   `json:"proxy"`
 	}
 	if !bindJSON(c, &input) {
 		return
 	}
-	if len(input.Profiles) == 0 {
-		writeError(c, http.StatusBadRequest, "invalid_request", "profiles 不能为空")
+	if len(input.Emails) == 0 {
+		writeError(c, http.StatusBadRequest, "invalid_request", "emails 不能为空")
 		return
 	}
-	ids, err := h.Accounts.ImportChrome(c.Request.Context(), input.Profiles, trimmed(input.Proxy))
+	ids, err := h.Accounts.ImportChrome(c.Request.Context(), input.Emails, trimmed(input.Proxy))
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "account_import_failed", err.Error())
 		return
@@ -125,14 +125,15 @@ func (h *handler) importChrome(c *gin.Context) {
 
 func (h *handler) importCookie(c *gin.Context) {
 	var input struct {
-		ID      string `json:"id"`
-		Cookies string `json:"cookies"`
-		Proxy   string `json:"proxy"`
+		ID       string `json:"id"`
+		Cookies  string `json:"cookies"`
+		Proxy    string `json:"proxy"`
+		AuthUser int    `json:"authuser"`
 	}
 	if !bindJSON(c, &input) {
 		return
 	}
-	id, err := h.Accounts.ImportCookie(c.Request.Context(), input.Cookies, trimmed(input.ID), trimmed(input.Proxy))
+	id, err := h.Accounts.ImportCookie(c.Request.Context(), input.Cookies, trimmed(input.ID), trimmed(input.Proxy), input.AuthUser)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "account_import_failed", err.Error())
 		return

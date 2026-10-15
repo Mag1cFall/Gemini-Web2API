@@ -3,6 +3,7 @@ package balancer
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"net/url"
 	"sort"
 	"sync"
@@ -143,12 +144,13 @@ type AccountPool struct {
 	mu            sync.Mutex
 }
 
-// NewAccountPool 创建账号池
+// NewAccountPool 创建账号池，轮询从随机位置开始
 func NewAccountPool(cooldown time.Duration, sessionTTL time.Duration) *AccountPool {
 	return &AccountPool{
 		sessions:   make(map[string]sessionBinding),
 		cooldown:   cooldown,
 		sessionTTL: sessionTTL,
+		index:      rand.Uint64(),
 	}
 }
 

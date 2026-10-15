@@ -617,6 +617,9 @@ export const importMessages = defineMessages({
     cookieId: '账号标识',
     cookieIdHint: '用于区分账号，建议填邮箱',
     cookieValue: 'Cookie',
+    authUser: '账号序号',
+    authUserHint:
+      '浏览器登录多个 Google 账号时，填官网地址 gemini.google.com/u/N/app 中的 N；只登录一个账号时为 0',
     proxy: '代理',
     proxyHint: '留空表示使用全局代理',
     importCookie: '导入',
@@ -647,6 +650,9 @@ export const importMessages = defineMessages({
     cookieId: '帳號識別',
     cookieIdHint: '用於區分帳號，建議填電子郵件',
     cookieValue: 'Cookie',
+    authUser: '帳號序號',
+    authUserHint:
+      '瀏覽器登入多個 Google 帳號時，填官網網址 gemini.google.com/u/N/app 中的 N；只登入一個帳號時為 0',
     proxy: '代理',
     proxyHint: '留空表示使用全域代理',
     importCookie: '匯入',
@@ -677,6 +683,9 @@ export const importMessages = defineMessages({
     cookieId: 'Account id',
     cookieIdHint: 'Identifies the account; an email is recommended',
     cookieValue: 'Cookie',
+    authUser: 'Account index',
+    authUserHint:
+      'With several Google accounts signed in to the browser, enter N from gemini.google.com/u/N/app; 0 for a single account',
     proxy: 'Proxy',
     proxyHint: 'Leave empty to use the global proxy',
     importCookie: 'Import',
@@ -708,6 +717,9 @@ export const importMessages = defineMessages({
     cookieId: 'アカウント ID',
     cookieIdHint: 'アカウントの識別に使います。メールアドレスを推奨します',
     cookieValue: 'Cookie',
+    authUser: 'アカウント番号',
+    authUserHint:
+      'ブラウザで複数の Google アカウントにログインしている場合は gemini.google.com/u/N/app の N を入力します。1 アカウントのみなら 0',
     proxy: 'プロキシ',
     proxyHint: '空欄の場合は全体のプロキシを使用します',
     importCookie: 'インポート',
@@ -738,6 +750,9 @@ export const importMessages = defineMessages({
     cookieId: '계정 식별자',
     cookieIdHint: '계정을 구분하는 데 쓰며 이메일을 권장합니다',
     cookieValue: '쿠키',
+    authUser: '계정 번호',
+    authUserHint:
+      '브라우저에 여러 Google 계정으로 로그인한 경우 gemini.google.com/u/N/app의 N을 입력합니다. 계정이 하나면 0',
     proxy: '프록시',
     proxyHint: '비워 두면 전역 프록시를 사용합니다',
     importCookie: '가져오기',
@@ -769,6 +784,9 @@ export const importMessages = defineMessages({
     cookieId: 'Identifiant du compte',
     cookieIdHint: 'Distingue les comptes ; une adresse e-mail est recommandée',
     cookieValue: 'Cookie',
+    authUser: 'Numéro du compte',
+    authUserHint:
+      'Si plusieurs comptes Google sont connectés dans le navigateur, saisissez le N de gemini.google.com/u/N/app ; 0 pour un seul compte',
     proxy: 'Proxy',
     proxyHint: 'Laissez vide pour utiliser le proxy global',
     importCookie: 'Importer',
@@ -800,6 +818,9 @@ export const importMessages = defineMessages({
     cookieId: 'Konto-ID',
     cookieIdHint: 'Unterscheidet die Konten; eine E-Mail-Adresse wird empfohlen',
     cookieValue: 'Cookie',
+    authUser: 'Kontonummer',
+    authUserHint:
+      'Sind im Browser mehrere Google-Konten angemeldet, N aus gemini.google.com/u/N/app eingeben; 0 bei nur einem Konto',
     proxy: 'Proxy',
     proxyHint: 'Leer lassen für den globalen Proxy',
     importCookie: 'Importieren',

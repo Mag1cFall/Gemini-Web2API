@@ -29,7 +29,7 @@ function ChromeImport() {
   })
   const run = useMutation({
     mutationFn: () =>
-      api('/api/accounts/import/chrome', { method: 'POST', json: { profiles: selected, proxy } }),
+      api('/api/accounts/import/chrome', { method: 'POST', json: { emails: selected, proxy } }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: accountsKey })
       void profiles.refetch()
@@ -52,11 +52,9 @@ function ChromeImport() {
     )
   }
   const items = profiles.data.profiles
-  const toggle = (profile: string) => {
+  const toggle = (email: string) => {
     setSelected((current) =>
-      current.includes(profile)
-        ? current.filter((item) => item !== profile)
-        : [...current, profile],
+      current.includes(email) ? current.filter((item) => item !== email) : [...current, email],
     )
   }
   return (
@@ -66,15 +64,15 @@ function ChromeImport() {
       ) : (
         <ul className="-mx-5 -mt-4 flex flex-col divide-y divide-border border-b border-border">
           {items.map((profile) => (
-            <li key={profile.profile}>
+            <li key={profile.profile + '/' + profile.email}>
               <label className="flex cursor-pointer items-center gap-3 px-5 py-3 hover:bg-hover has-disabled:cursor-default has-disabled:opacity-70">
                 <input
                   type="checkbox"
                   className="size-4 accent-primary"
-                  checked={selected.includes(profile.profile)}
+                  checked={selected.includes(profile.email)}
                   disabled={profile.imported || !profile.importable}
                   onChange={() => {
-                    toggle(profile.profile)
+                    toggle(profile.email)
                   }}
                 />
                 <span className="flex min-w-0 flex-1 flex-col">
@@ -126,10 +124,14 @@ function CookieImport() {
   const client = useQueryClient()
   const [id, setId] = useState('')
   const [cookies, setCookies] = useState('')
+  const [authUser, setAuthUser] = useState('0')
   const [proxy, setProxy] = useState('')
   const run = useMutation({
     mutationFn: () =>
-      api('/api/accounts/import/cookie', { method: 'POST', json: { id, cookies, proxy } }),
+      api('/api/accounts/import/cookie', {
+        method: 'POST',
+        json: { id, cookies, proxy, authuser: Number(authUser) },
+      }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: accountsKey })
       toast({ tone: 'success', title: m.importDone })
@@ -161,6 +163,18 @@ function CookieImport() {
           }}
         />
       </Field>
+      <Field id="cookie-authuser" label={m.authUser} description={m.authUserHint}>
+        <Input
+          id="cookie-authuser"
+          type="number"
+          min={0}
+          step={1}
+          value={authUser}
+          onChange={(event) => {
+            setAuthUser(event.target.value)
+          }}
+        />
+      </Field>
       <Field id="cookie-proxy" label={m.proxy} description={m.proxyHint}>
         <Input
           id="cookie-proxy"
@@ -173,7 +187,7 @@ function CookieImport() {
       </Field>
       <div>
         <Button
-          disabled={!id.trim() || !cookies.trim()}
+          disabled={!id.trim() || !cookies.trim() || !/^\d+$/.test(authUser)}
           loading={run.isPending}
           onClick={() => {
             run.mutate()

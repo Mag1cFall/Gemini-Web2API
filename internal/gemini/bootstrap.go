@@ -16,6 +16,8 @@ type Bootstrap struct {
 	FSID   string
 	// Language 为首页 TuX5cc 给出的账号界面语言，用于 hl 与生成载荷语言槽
 	Language string
+	// Email 为首页 oPEP7c 给出的当前登录邮箱
+	Email string
 	// UploadURL、UploadPushID、UploadClientContext 为首页 h1eoVe、qKIAYe、Ylro7b 给出的附件上传端点与请求头
 	UploadURL           string
 	UploadPushID        string
@@ -34,6 +36,7 @@ var (
 	fdrFJePattern = regexp.MustCompile(`"FdrFJe":"([^"]+)"`)
 	fsidPattern   = regexp.MustCompile(`"f\.sid":"([^"]+)"`)
 	localePattern = regexp.MustCompile(`"TuX5cc":"([^"]+)"`)
+	emailPattern  = regexp.MustCompile(`"oPEP7c":"([^"]+)"`)
 	uploadPattern = regexp.MustCompile(`"h1eoVe":"([^"]+)"`)
 	pushIDPattern = regexp.MustCompile(`"qKIAYe":"([^"]+)"`)
 	pctxPattern   = regexp.MustCompile(`"Ylro7b":"([^"]+)"`)
@@ -54,6 +57,7 @@ func parseBootstrap(html string) (Bootstrap, error) {
 		BL:       firstMatch(html, blPattern),
 		FSID:     firstMatch(html, fdrFJePattern, fsidPattern),
 		Language: firstMatch(html, localePattern),
+		Email:    firstMatch(html, emailPattern),
 
 		UploadURL:           firstMatch(html, uploadPattern),
 		UploadPushID:        firstMatch(html, pushIDPattern),

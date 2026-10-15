@@ -239,7 +239,7 @@ func (c *Client) doRotationRequest(req *http.Request, operation string) ([]byte,
 	return body, nil
 }
 
-// listAccountsSignedIn 以 Chrome 浏览器进程的方式请求 ListAccounts，返回是否列出账号与 Cookie 中第一个账号的会话是否有效
+// listAccountsSignedIn 以 Chrome 浏览器进程的方式请求 ListAccounts，返回是否列出账号与 Cookie 中目标账号的会话是否有效
 func (c *Client) listAccountsSignedIn(ctx context.Context) (bool, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointListAccounts, strings.NewReader(" "))
 	if err != nil {
@@ -260,21 +260,36 @@ func (c *Client) listAccountsSignedIn(ctx context.Context) (bool, bool, error) {
 	if err != nil {
 		return false, false, err
 	}
-	return parseListAccounts(body)
+	return parseListAccounts(body, c.authUser)
 }
 
-// parseListAccounts 解析 b64bin 格式的 ListAccounts 响应，返回是否列出账号与第一个账号的会话是否有效：9 号字段为 1 且 14 号字段不为 1 时有效
-func parseListAccounts(body []byte) (bool, bool, error) {
+// parseListAccounts 解析 b64bin 格式的 ListAccounts 响应，返回是否列出账号与第 index 个账号的会话是否有效：9 号字段为 1 且 14 号字段不为 1 时有效
+func parseListAccounts(body []byte, index int) (bool, bool, error) {
 	data, err := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(body)))
 	if err != nil {
 		return false, false, fmt.Errorf("decode list accounts response: %w", err)
 	}
-	response, err := protoFields(data)
-	if err != nil {
-		return false, false, fmt.Errorf("decode list accounts response: %w", err)
+	var account []byte
+	for position := 0; len(data) > 0; {
+		number, kind, size := protowire.ConsumeTag(data)
+		if size < 0 {
+			return false, false, fmt.Errorf("decode list accounts response: %w", protowire.ParseError(size))
+		}
+		data = data[size:]
+		size = protowire.ConsumeFieldValue(number, kind, data)
+		if size < 0 {
+			return false, false, fmt.Errorf("decode list accounts response: %w", protowire.ParseError(size))
+		}
+		if number == 1 && kind == protowire.BytesType {
+			if position == index {
+				account, _ = protowire.ConsumeBytes(data)
+				break
+			}
+			position++
+		}
+		data = data[size:]
 	}
-	account, listed := response[1].([]byte)
-	if !listed {
+	if account == nil {
 		return false, false, nil
 	}
 	fields, err := protoFields(account)

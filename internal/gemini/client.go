@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	endpointInit     = "https://gemini.google.com/app"
-	endpointBatch    = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
-	endpointGenerate = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+	geminiOrigin = "https://gemini.google.com"
+	pathInit     = "/app"
+	pathBatch    = "/_/BardChatUi/data/batchexecute"
+	pathGenerate = "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
 )
 
 // Client 表示与单一账号身份绑定的 Gemini Web 协议客户端
@@ -45,6 +46,9 @@ type Client struct {
 	concurrency int
 	busy        atomic.Int32
 	usage       atomic.Pointer[UsageInfo]
+	// authUser 是目标账号在多账号 Cookie 中的序号，pathPrefix 是它在官网路径中的 /u/N 前缀，默认账号为 0 与空
+	authUser   int
+	pathPrefix string
 
 	bootstrapMu sync.RWMutex
 	bootstrap   *Bootstrap
@@ -117,6 +121,10 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		save:        source.Save,
 		refresh:     source.Refresh,
 	}
+	if source.AuthUser > 0 {
+		client.authUser = source.AuthUser
+		client.pathPrefix = fmt.Sprintf("/u/%d", source.AuthUser)
+	}
 	reqID, err := initialReqID()
 	if err != nil {
 		return nil, err
@@ -167,7 +175,7 @@ func (c *Client) Init(ctx context.Context) error {
 }
 
 func (c *Client) init(ctx context.Context, allowRefresh bool) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointInit, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.pageURL(pathInit), nil)
 	if err != nil {
 		return err
 	}
@@ -330,7 +338,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	}
 	streamCtx, stopWatch := watchStreamIdle(ctx)
 	defer stopWatch()
-	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, endpointGenerate, strings.NewReader(protocolForm(payload, bootstrap.SNlM0e)))
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.pageURL(pathGenerate), strings.NewReader(protocolForm(payload, bootstrap.SNlM0e)))
 	if err != nil {
 		return err
 	}
@@ -487,6 +495,15 @@ func (c *Client) Models() []Model {
 	return bootstrap.Catalog.List()
 }
 
+// Email 返回首页 oPEP7c 给出的当前登录邮箱，访客会话与尚未初始化时为空
+func (c *Client) Email() string {
+	bootstrap, err := c.bootstrapSnapshot()
+	if err != nil {
+		return ""
+	}
+	return bootstrap.Email
+}
+
 // ResolveModel 在当前账号模型目录中解析公开 ID
 func (c *Client) ResolveModel(id string) (Model, error) {
 	bootstrap, err := c.bootstrapSnapshot()
@@ -530,13 +547,13 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointBatch, strings.NewReader(protocolForm(encodedRequest, bootstrap.SNlM0e)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.pageURL(pathBatch), strings.NewReader(protocolForm(encodedRequest, bootstrap.SNlM0e)))
 	if err != nil {
 		return nil, err
 	}
 	query := req.URL.Query()
 	query.Set("rpcids", rpcID)
-	query.Set("source-path", call.sourcePath)
+	query.Set("source-path", c.pathPrefix+call.sourcePath)
 	query.Set("bl", bootstrap.BL)
 	query.Set("f.sid", bootstrap.FSID)
 	query.Set("hl", call.language)
@@ -696,6 +713,11 @@ func protocolForm(request string, token string) string {
 // nextReqID 按网页客户端规则在四位随机基数上逐次增加 100000
 func (c *Client) nextReqID() int64 {
 	return c.reqID.Add(100000)
+}
+
+// pageURL 返回目标账号在官网下的页面或接口地址
+func (c *Client) pageURL(path string) string {
+	return geminiOrigin + c.pathPrefix + path
 }
 
 func (c *Client) displayAccountID() string {

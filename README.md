@@ -94,7 +94,7 @@ Windows 首次使用时，直接运行交互式配置：
 
 `setup` 会扫描本机 Chrome 账号，并短暂启动独立临时 Chrome 进程读取 App-Bound 主密钥。现有 Chrome 窗口与 Profile 保持原状。
 
-也可以直接指定 Chrome 中已登录的账号：
+也可以直接指定 Chrome 中已登录的账号；同一 Profile 登录了多个 Google 账号时，每个账号单独列出、单独导入：
 
 ```powershell
 .\gemini-web2api.exe setup --email "name@example.com"
@@ -110,6 +110,12 @@ Windows 首次使用时，直接运行交互式配置：
 
 ```powershell
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name
+```
+
+Cookie 来自登录了多个 Google 账号的浏览器时，用 `--authuser` 指定要使用的账号，取值为官网地址 `gemini.google.com/u/N/app` 中的 `N`，默认 0；管理端 Cookie 导入的“账号序号”与之相同：
+
+```powershell
+.\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name --authuser 1
 ```
 
 服务部署在没有 Chrome 的服务器上时，在管理端“导入账号”页生成配对令牌，然后在登录了 Chrome 的电脑上把账号上传到服务器；令牌从标准输入读取，非本机地址需要 HTTPS，可经 SSH 隧道 `ssh -L 8007:127.0.0.1:8007 <服务器>` 使用 `http://127.0.0.1:8007`：

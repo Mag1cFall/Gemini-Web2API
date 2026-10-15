@@ -94,7 +94,7 @@ On Windows, import accounts already signed into the local Chrome installation:
 
 `setup` scans local Chrome accounts and briefly starts an isolated temporary Chrome process to read the App-Bound master key. Existing Chrome windows and profiles remain untouched.
 
-An account can also be selected directly:
+An account can also be selected directly. When a profile is signed in to several Google accounts, each account is listed and imported separately:
 
 ```powershell
 .\gemini-web2api.exe setup --email "name@example.com"
@@ -110,6 +110,12 @@ Import a cookie JSON exported by a browser extension or a Netscape `cookies.txt`
 
 ```powershell
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name
+```
+
+When the cookies come from a browser signed in to several Google accounts, select the account with `--authuser`, the `N` in `gemini.google.com/u/N/app` (default 0). The console's cookie import has the same Account index field:
+
+```powershell
+.\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name --authuser 1
 ```
 
 When the service runs on a server without Chrome, generate a pairing token on the console's Import account page, then upload accounts from a computer signed in to Chrome. The token is read from standard input. Remote addresses other than the local machine require HTTPS; through an SSH tunnel such as `ssh -L 8007:127.0.0.1:8007 <server>`, use `http://127.0.0.1:8007`:

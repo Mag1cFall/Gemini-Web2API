@@ -42,6 +42,7 @@ type Metadata struct {
 	Proxy    string         `json:"proxy,omitempty"`
 	Source   ImportSource   `json:"source,omitempty"`
 	Language string         `json:"language,omitempty"`
+	AuthUser int            `json:"authUser,omitempty"`
 	OAuth    *OAuthMaterial `json:"oauth,omitempty"`
 	Disabled bool           `json:"disabled,omitempty"`
 }
@@ -208,6 +209,7 @@ func (f *File) Account(globalProxy string) LoadedAccount {
 		ID:       f.state.Metadata.ID,
 		Cookies:  toGeminiCookies(f.state.Cookies),
 		Language: f.state.Metadata.Language,
+		AuthUser: f.state.Metadata.AuthUser,
 	}
 	source.Save = f.SaveCookies
 	return LoadedAccount{

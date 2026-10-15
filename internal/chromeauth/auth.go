@@ -25,9 +25,10 @@ const (
 
 var slugPattern = regexp.MustCompile(`[^a-z0-9]+`)
 
-// Account 描述本机 Chrome 中可发现的 Google 账号
+// Account 描述本机 Chrome 中可发现的 Google 账号，同一 Profile 登录的每个账号各占一项
 type Account struct {
 	Profile     string `json:"profile"`
+	GaiaID      string `json:"-"`
 	DisplayName string `json:"displayName"`
 	Email       string `json:"email"`
 	Importable  bool   `json:"importable"`
@@ -63,6 +64,8 @@ type CookieImportOptions struct {
 	ID      string
 	Output  string
 	Proxy   string
+	// AuthUser 是目标账号在浏览器多账号登录中的序号，即官网地址 /u/N 中的 N
+	AuthUser int
 }
 
 // Discover 只读列出本机 Chrome Google 账号
@@ -96,6 +99,9 @@ func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResu
 	if id == "" {
 		return ImportResult{}, 0, fmt.Errorf("id 必须包含英文字母或数字")
 	}
+	if options.AuthUser < 0 {
+		return ImportResult{}, 0, fmt.Errorf("authuser 不能为负数")
+	}
 	cookies, err := parseCookies(options.Cookies)
 	if err != nil {
 		return ImportResult{}, 0, err
@@ -108,6 +114,7 @@ func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResu
 			ID: id, Proxy: proxyURL,
 			Source:   auth.ImportSource{Browser: "cookie-header"},
 			Language: defaultImportLanguage,
+			AuthUser: options.AuthUser,
 		},
 	}
 	absPath, err := filepath.Abs(path)
@@ -156,7 +163,7 @@ func Import(ctx context.Context, options ImportOptions) ([]ImportResult, int, er
 	for _, account := range selected {
 		result, err := importAccount(ctx, account, options, proxyURL, masterKey)
 		if err != nil {
-			return nil, 0, fmt.Errorf("导入 %s: %w", account.Profile, err)
+			return nil, 0, fmt.Errorf("导入 %s: %w", account.Email, err)
 		}
 		pending = append(pending, result)
 	}
@@ -178,13 +185,16 @@ func selectAccounts(accounts []Account, profiles []string, emails []string) ([]A
 			continue
 		}
 		if !account.Importable {
-			return nil, fmt.Errorf("%s 缺少可导入的 OAuth 认证材料", account.Profile)
+			return nil, fmt.Errorf("%s %s 缺少可导入的 OAuth 认证材料", account.Profile, account.Email)
 		}
 		if !strings.Contains(account.Email, "@") {
 			return nil, fmt.Errorf("%s 缺少账号邮箱", account.Profile)
 		}
-		selected = append(selected, account)
 		foundProfiles[profile] = struct{}{}
+		if _, exists := foundEmails[email]; exists {
+			continue
+		}
+		selected = append(selected, account)
 		foundEmails[email] = struct{}{}
 	}
 	if missing := missingValues(requestedProfiles, foundProfiles); len(missing) != 0 {
@@ -260,7 +270,7 @@ func decryptV20Token(masterKey []byte, encrypted []byte) (string, error) {
 }
 
 func importAccount(ctx context.Context, account Account, options ImportOptions, proxyURL string, masterKey []byte) (pendingImport, error) {
-	gaiaID, encryptedToken, wrappedKey, err := readTokenService(options.ChromeRoot, account.Profile)
+	gaiaID, encryptedToken, wrappedKey, err := readTokenService(options.ChromeRoot, account.Profile, account.GaiaID)
 	if err != nil {
 		return pendingImport{}, err
 	}
@@ -311,7 +321,7 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]Im
 		item := &pending[index]
 		source := gemini.AccountSource{
 			ID: item.state.Metadata.ID, Cookies: stateCookiesToGemini(item.state.Cookies),
-			Language: item.state.Metadata.Language,
+			Language: item.state.Metadata.Language, AuthUser: item.state.Metadata.AuthUser,
 		}
 		source.Save = func(cookies []gemini.Cookie) error {
 			item.state.Cookies = geminiCookiesToState(cookies)

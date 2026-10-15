@@ -59,13 +59,13 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	if err != nil {
 		return UsageInfo{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointBatch, strings.NewReader(protocolForm(string(encodedRequest), bootstrap.SNlM0e)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.pageURL(pathBatch), strings.NewReader(protocolForm(string(encodedRequest), bootstrap.SNlM0e)))
 	if err != nil {
 		return UsageInfo{}, err
 	}
 	query := req.URL.Query()
 	query.Set("rpcids", usageRPC)
-	query.Set("source-path", "/usage")
+	query.Set("source-path", c.pathPrefix+"/usage")
 	query.Set("bl", bootstrap.BL)
 	query.Set("f.sid", bootstrap.FSID)
 	query.Set("hl", bootstrap.Language)

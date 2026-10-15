@@ -28,14 +28,14 @@ var chromeGoogleHeaders = map[string]string{
 	"sec-ch-ua-arch":              `"x86"`,
 	"sec-ch-ua-bitness":           `"64"`,
 	"sec-ch-ua-form-factors":      `"Desktop"`,
-	"sec-ch-ua-full-version":      `"155.0.8059.40"`,
-	"sec-ch-ua-full-version-list": `"Google Chrome";v="155.0.8059.40", "Chromium";v="155.0.8059.40", "Not(A:Brand";v="24.0.0.0"`,
+	"sec-ch-ua-full-version":      `"155.0.8059.41"`,
+	"sec-ch-ua-full-version-list": `"Google Chrome";v="155.0.8059.41", "Chromium";v="155.0.8059.41", "Not(A:Brand";v="24.0.0.0"`,
 	"sec-ch-ua-model":             `""`,
 	"sec-ch-ua-platform-version":  `"10.0.0"`,
 	"sec-ch-ua-wow64":             "?0",
 	"x-browser-channel":           "stable",
 	"x-browser-year":              "2026",
-	"x-browser-validation":        "0559nr5uGKWlIwYFRL6023LQGT0=",
+	"x-browser-validation":        "lYqVr4pshcjeOP5q5htEarLm87A=",
 	"x-browser-copyright":         "Copyright 2026 Google LLC. All Rights Reserved.",
 }
 

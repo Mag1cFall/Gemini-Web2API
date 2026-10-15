@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	endpointProcessFile = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/ProcessFile"
-	uploadTenantID      = "bard-storage"
+	pathProcessFile = "/_/BardChatUi/data/assistant.lamda.BardFrontendService/ProcessFile"
+	uploadTenantID  = "bard-storage"
 )
 
 // uploadStartHeaderOrder 是 Chrome 稳定版发起断点续传上传的请求头顺序
@@ -87,7 +87,11 @@ func (c *Client) uploadFile(ctx context.Context, bootstrap Bootstrap, file FileD
 	}
 	mimeType, _, _ = strings.Cut(mimeType, ";")
 
-	start, err := http.NewRequestWithContext(ctx, http.MethodPost, bootstrap.UploadURL, strings.NewReader("File name: "+filename))
+	startURL := bootstrap.UploadURL
+	if c.authUser > 0 {
+		startURL += fmt.Sprintf("?authuser=%d", c.authUser)
+	}
+	start, err := http.NewRequestWithContext(ctx, http.MethodPost, startURL, strings.NewReader("File name: "+filename))
 	if err != nil {
 		return FileData{}, err
 	}
@@ -175,7 +179,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointProcessFile, strings.NewReader(protocolForm(outer, bootstrap.SNlM0e)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.pageURL(pathProcessFile), strings.NewReader(protocolForm(outer, bootstrap.SNlM0e)))
 	if err != nil {
 		return "", err
 	}
