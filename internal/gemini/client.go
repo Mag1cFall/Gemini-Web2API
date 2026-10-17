@@ -792,6 +792,30 @@ func (c *Client) CloseIdleConnections() {
 	c.httpClient.CloseIdleConnections()
 }
 
+// ProbeProxy 经代理以浏览器导航请求官网首页，首页返回 200 时报告耗时
+func ProbeProxy(ctx context.Context, proxyURL string) (time.Duration, error) {
+	httpClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL)
+	if err != nil {
+		return 0, err
+	}
+	defer httpClient.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, geminiOrigin+pathInit, nil)
+	if err != nil {
+		return 0, err
+	}
+	(&Client{language: defaultLanguage}).applyNavigationHeaders(req)
+	started := time.Now()
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, responseStatusError(resp, "proxy probe")
+	}
+	return time.Since(started), nil
+}
+
 // isAuthenticationError 判断错误是否为 HTTP 或帧内的 401、403，BardErrorInfo 1060 等出口限制不属于认证错误
 func isAuthenticationError(err error) bool {
 	var protocolErr *ProtocolError

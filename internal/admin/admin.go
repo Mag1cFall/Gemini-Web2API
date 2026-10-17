@@ -82,6 +82,10 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.GET("/usage/records.csv", requestdb.ExportHandler(deps.Store))
 	api.GET("/config", func(c *gin.Context) { c.JSON(http.StatusOK, h.settings.View()) })
 	api.PUT("/config", h.updateConfig)
+	api.GET("/proxies", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"proxies": h.Accounts.ProxyStatus()}) })
+	api.POST("/proxies/check", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"proxies": h.Accounts.CheckProxies(c.Request.Context())})
+	})
 }
 
 // NotFound 以管理端错误体返回未知的 /api 路径

@@ -2,6 +2,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -26,6 +27,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
 
 	"github.com/gofrs/flock"
@@ -169,7 +171,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	if err := os.MkdirAll(authDirectory, 0o700); err != nil {
 		return fmt.Errorf("创建认证目录: %w", err)
 	}
-	loaded, err := auth.LoadFiles(cfg.AuthStatePaths, cfg.ProxyURL)
+	loaded, err := auth.LoadFiles(cfg.AuthStatePaths)
 	if err != nil {
 		return err
 	}
@@ -263,9 +265,13 @@ func (instance *Instance) Serve(ctx context.Context) error {
 // logStartup 输出版本、监听、账号与安全配置
 func logStartup(cfg config.Config, accountCount int) {
 	logging.Info(logging.SourceService, "Gemini-Web2API 启动", "版本", Version(), "Go", strings.TrimPrefix(runtime.Version(), "go"), "系统", runtime.GOOS+"/"+runtime.GOARCH)
-	proxy := cfg.ProxyURL
+	proxies := config.SplitList(cfg.ProxyURL)
+	for index, proxy := range proxies {
+		proxies[index] = maskProxy(proxy)
+	}
+	proxy := strings.Join(proxies, ",")
 	if proxy == "" {
-		proxy = "无"
+		proxy = cmp.Or(maskProxy(proxypool.System()), "无")
 	}
 	key := "未设置"
 	if cfg.ProxyAPIKey != "" {
@@ -273,7 +279,7 @@ func logStartup(cfg config.Config, accountCount int) {
 	}
 	logging.Info(logging.SourceService, "配置",
 		"监听", cfg.ListenAddress, "认证", strings.Join(cfg.AuthStatePaths, ","), "账号", accountCount,
-		"代理", maskProxy(proxy), "API key", key, "历史记录", cfg.SaveHistory, "日志", cfg.LogLevel)
+		"代理", proxy, "API key", key, "历史记录", cfg.SaveHistory, "日志", cfg.LogLevel)
 	if cfg.ProxyAPIKey == "" && !loopbackAddress(cfg.ListenAddress) {
 		logging.Warn(logging.SourceService, "监听地址不是本机回环且未设置 PROXY_API_KEY，能访问该地址的任何人都可以调用", "监听", cfg.ListenAddress)
 	}

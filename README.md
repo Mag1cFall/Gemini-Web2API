@@ -18,7 +18,7 @@
 - **运行日志**：彩色分列控制台日志，逐请求记录开始、选号、上传、首个输出、换号、等待与结束
 - **请求账本**：SQLite 保存每个请求的用量，按模型、账号与协议统计并按 Gemini API 单价估算费用
 - **Gems**：账号的 Gem 以 `gem-<Gem ID>` 模型 ID 提供
-- **代理**：支持 HTTP、HTTPS、SOCKS5 全局代理和每账号固定代理
+- **代理池**：多个 HTTP、HTTPS、SOCKS4、SOCKS5 代理组成代理池，每个账号固定绑定其中一个，定时检测并在代理不可用时自动改绑；支持每账号固定代理、直连与系统代理
 - **模型映射**：支持将外部模型名映射到当前 Gemini 模型
 - **纯协议运行**：完成账号配置后无需浏览器和前端脚本
 
@@ -145,7 +145,7 @@ GEMINI_SAVE_HISTORY=false
 # 本地 2API 访问密钥，多个 key 用逗号分隔
 PROXY_API_KEY=
 
-# HTTP、HTTPS 或 SOCKS5 代理
+# 代理池，多个代理用逗号分隔，支持 HTTP、HTTPS、SOCKS4、SOCKS5
 PROXY=
 ```
 
@@ -162,13 +162,21 @@ docker compose up -d
 
 ### 代理
 
-`PROXY` 是全局 HTTP、HTTPS 或 SOCKS5 代理，例如 `socks5://127.0.0.1:1080`、`http://127.0.0.1:7890`，setup 与服务请求都经过它。setup 会把本次使用的代理写入账号认证文件 `auth/<账号>/storage-state.json` 的 `geminiWeb2api.proxy`，服务运行时该账号固定使用这个代理，`PROXY` 只作用于没有固定代理的账号。也可以为单个账号指定代理：
+`PROXY` 是代理池，多个代理用逗号分隔，例如 `PROXY=socks5://127.0.0.1:1080,http://user:pass@10.0.0.2:7890`，支持 `http`、`https`、`socks4`、`socks4a`、`socks5`、`socks5h`。管理端“设置 → 服务 → 出口代理”按行编辑，保存后生效。
+
+- **分配**：没有固定代理的账号与访客会话各绑定一个代理并一直使用它，新账号分到使用账号最少的代理；代理列表变化时以最少的改绑重新均衡
+- **检测**：服务启动时、每 5 分钟、账号连接失败时以及在管理端点击“立即检测”时，经每个代理请求 Gemini 首页
+- **故障切换**：不可用代理上的账号改绑到可用代理并重新初始化；全部代理不可用时账号保持原代理
+- **状态**：设置页的代理池卡片显示每个代理的状态、延迟与使用它的账号
+- **系统代理**：`PROXY` 为空时使用环境变量 `HTTPS_PROXY`，未设置时在 Windows 上使用系统代理设置，都没有时直连
+
+账号也可以设置固定代理，固定代理优先于代理池，填 `direct` 表示该账号直连。在管理端账号页“修改代理”中填写，或在导入时指定：
 
 ```powershell
 .\gemini-web2api.exe setup --email "name@example.com" --proxy "socks5://127.0.0.1:1080"
 ```
 
-更换账号代理时，用新代理重新执行 setup，或修改认证文件中的 `geminiWeb2api.proxy`。代理出口需要位于 Gemini 支持的地区。
+`setup --proxy` 与管理端导入时填写的代理写入账号认证文件 `auth/<账号>/storage-state.json` 的 `geminiWeb2api.proxy`；不填时导入请求经 `PROXY` 中的一个代理发出，账号运行时从代理池分配。代理出口需要位于 Gemini 支持的地区。
 
 ## API 端点
 
@@ -310,7 +318,7 @@ build/               # 桌面版图标与打包配置
 | `GEMINI_AUTH_STATES` | 认证文件或目录，多个路径用逗号分隔 | `auth` |
 | `LISTEN_ADDR` | 服务监听地址 | `127.0.0.1:8007` |
 | `PROXY_API_KEY` | 本地 2API 访问密钥，多个 key 用逗号分隔 | 空 |
-| `PROXY` | 全局 HTTP、HTTPS 或 SOCKS5 代理 | 空 |
+| `PROXY` | 代理池，多个代理用逗号分隔 | 空 |
 | `MODEL_MAPPING` | 外部模型名到当前模型 ID 的映射 | 空 |
 | `ACCOUNT_COOLDOWN` | 账号失败后的冷却时间 | `2m` |
 | `SESSION_TTL` | 显式会话状态的存活时间 | `30m` |

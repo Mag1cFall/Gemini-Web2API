@@ -23,7 +23,9 @@ import {
   cooldownReason,
   cooldownReasonMessages,
 } from '@/features/accounts/messages'
+import { fixedProxy } from '@/features/accounts/proxy'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
+import { ProxyValue } from '@/features/accounts/ProxyValue'
 import { accountsKey, useAccounts } from '@/features/accounts/queries'
 import type { Account, AccountsUsage, UsageWindow } from '@/features/accounts/types'
 import { stateTone, windowTone } from '@/features/accounts/usage'
@@ -341,7 +343,9 @@ export function AccountPage() {
           </div>
           <div className="flex min-w-0 flex-col gap-1">
             <dt className="text-foreground-muted">{m.proxy}</dt>
-            <dd className="truncate font-mono">{account.proxy ?? m.none}</dd>
+            <dd className="truncate font-mono">
+              <ProxyValue account={account} source />
+            </dd>
           </div>
           <div className="flex flex-col gap-1">
             <dt className="text-foreground-muted">{m.readyAt}</dt>
@@ -376,10 +380,10 @@ export function AccountPage() {
       {proxyOpen && (
         <ProxyDialog
           title={m.proxyTitle}
-          initial={account.proxy ?? ''}
+          initial={fixedProxy(account)}
           pending={saveProxy.isPending}
           onSave={(proxy) => {
-            saveProxy.mutate({ proxy, current: account.proxy ?? '' })
+            saveProxy.mutate({ proxy, current: fixedProxy(account) })
           }}
           onClose={() => {
             setProxyOpen(false)

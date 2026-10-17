@@ -297,7 +297,7 @@ OAuthMultilogin directed response
 | --- | --- |
 | `cookies` | 完整 Cookie、域、路径、到期时间与属性 |
 | `geminiWeb2api.id` | 本地账号标识 |
-| `proxy` | 账号固定出口 |
+| `proxy` | 账号固定出口，`direct` 为直连 |
 | `language` | 请求的 `Accept-Language` |
 | `oauth` | Gaia ID、refresh token、wrapped binding key |
 
@@ -454,7 +454,7 @@ Cookie Header 导入将普通 Cookie 绑定到 `.google.com`，将 `__Host-*` �
 
 **设备绑定：** wrapped binding key 绑定原 Windows 用户密钥环境。异机复制的 Cookie 可使用至失效；自动续签需要在目标 Windows 设备重新 setup。
 
-**代理出口：** setup、OAuthMultilogin、模型验证和日常请求使用同一账号代理。账号状态中的代理优先于全局 `PROXY`。
+**代理出口：** OAuthMultilogin、模型验证和日常请求使用同一账号代理。账号状态中的固定代理优先，`direct` 为直连；没有固定代理的账号使用代理池为它绑定的代理，`PROXY` 为空时使用系统代理。导入请求使用填写的代理（`direct` 为直连），未填写时使用 `PROXY` 中的一个代理。账号的连接、TLS 或代理错误立即触发一次代理池检测。代理池检测经代理以浏览器导航请求 `/app`，HTTP 200 为可用。
 
 ### Cookie 轮换
 

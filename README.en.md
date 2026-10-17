@@ -18,7 +18,7 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Run logs**: colored columnar console logs that record each request's start, account selection, uploads, first output, account switches, waits, and completion
 - **Request ledger**: SQLite stores per-request usage, with statistics by model, account, and protocol and cost estimates at Gemini API prices
 - **Gems**: each account's Gems are available as `gem-<Gem ID>` model IDs
-- **Proxy**: supports a global HTTP, HTTPS or SOCKS5 proxy or a fixed per-account proxy
+- **Proxy pool**: multiple HTTP, HTTPS, SOCKS4 and SOCKS5 proxies form a pool; each account stays bound to one of them, proxies are checked periodically, and accounts move automatically when their proxy fails; fixed per-account proxies, direct connections and the system proxy are supported
 - **Model aliases**: maps external model names to current Gemini models
 - **Protocol-only runtime**: runs without a browser or frontend scripts after account setup
 
@@ -145,7 +145,7 @@ GEMINI_SAVE_HISTORY=false
 # Local 2API access keys, comma-separated
 PROXY_API_KEY=
 
-# HTTP, HTTPS, or SOCKS5 proxy
+# Proxy pool, comma-separated; HTTP, HTTPS, SOCKS4 and SOCKS5
 PROXY=
 ```
 
@@ -162,13 +162,21 @@ docker compose up -d
 
 ### Proxy
 
-`PROXY` is the global HTTP, HTTPS or SOCKS5 proxy, for example `socks5://127.0.0.1:1080` or `http://127.0.0.1:7890`. Both setup and service requests use it. Setup writes the proxy it used into `geminiWeb2api.proxy` of the account auth file `auth/<account>/storage-state.json`; at runtime that account always uses this proxy, and `PROXY` only applies to accounts without a fixed proxy. A proxy can also be set for one account:
+`PROXY` is the proxy pool, comma-separated, for example `PROXY=socks5://127.0.0.1:1080,http://user:pass@10.0.0.2:7890`. Supported schemes are `http`, `https`, `socks4`, `socks4a`, `socks5` and `socks5h`. In the console, edit it one proxy per line under Settings → Service → Egress proxy; changes apply on save.
+
+- **Assignment**: accounts without a fixed proxy and the guest session each stay bound to one proxy; a new account goes to the proxy with the fewest accounts. When the proxy list changes, accounts are rebalanced with the fewest moves
+- **Checks**: at startup, every 5 minutes, when an account fails to connect, and when you click Check now in the console, the service requests the Gemini home page through each proxy
+- **Failover**: accounts on an unavailable proxy move to an available proxy and re-initialize; when every proxy is unavailable, accounts keep their proxy
+- **Status**: the proxy pool card on the settings page shows each proxy's status, latency and the accounts using it
+- **System proxy**: when `PROXY` is empty, the `HTTPS_PROXY` environment variable is used; without it, Windows uses the system proxy setting; otherwise connections are direct
+
+An account can also have a fixed proxy, which takes priority over the pool; `direct` makes that account connect without a proxy. Set it with Edit proxy on the account page, or when importing:
 
 ```powershell
 .\gemini-web2api.exe setup --email "name@example.com" --proxy "socks5://127.0.0.1:1080"
 ```
 
-To change an account's proxy, run setup again with the new proxy or edit `geminiWeb2api.proxy` in its auth file. The proxy exit must be in a region where Gemini is available.
+The proxy given to `setup --proxy` or in the console import form is written to `geminiWeb2api.proxy` in the account auth file `auth/<account>/storage-state.json`. Without one, import requests go through a proxy from `PROXY` and the account gets a proxy from the pool at runtime. The proxy exit must be in a region where Gemini is available.
 
 ## API Endpoints
 
@@ -310,7 +318,7 @@ build/               # Desktop icons and packaging configuration
 | `GEMINI_AUTH_STATES` | Auth file or directory, comma-separated | `auth` |
 | `LISTEN_ADDR` | Service listener | `127.0.0.1:8007` |
 | `PROXY_API_KEY` | Local 2API access keys, comma-separated | empty |
-| `PROXY` | Global HTTP, HTTPS, or SOCKS5 proxy | empty |
+| `PROXY` | Proxy pool, comma-separated | empty |
 | `MODEL_MAPPING` | External model name to current model ID mapping | empty |
 | `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure | `2m` |
 | `SESSION_TTL` | Lifetime of explicit session state | `30m` |

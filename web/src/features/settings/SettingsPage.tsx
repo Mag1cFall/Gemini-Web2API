@@ -12,9 +12,10 @@ import { ErrorState, Loading } from '@/components/ui/states'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
-import { ApiKeyList } from '@/features/settings/ApiKeyList'
+import { ListInput } from '@/features/settings/ListInput'
 import { settingsMessages } from '@/features/settings/messages'
-import { configKey, useConfig } from '@/features/settings/queries'
+import { ProxyPoolCard } from '@/features/settings/ProxyPoolCard'
+import { configKey, proxiesKey, useConfig } from '@/features/settings/queries'
 import type { ConfigPatch, ServiceConfig } from '@/features/settings/types'
 import { api } from '@/lib/api'
 import { fill, useMessages } from '@/lib/i18n'
@@ -143,6 +144,7 @@ export function SettingsPage() {
       api<ServiceConfig>('/api/config', { method: 'PUT', json: patch }),
     onSuccess: (data) => {
       client.setQueryData(configKey, data)
+      void client.invalidateQueries({ queryKey: proxiesKey })
       setEdited(null)
       setPassword('')
       toast({ tone: 'success', title: m.saved })
@@ -178,10 +180,7 @@ export function SettingsPage() {
     auth_states: m.authStates,
     log_format: m.logFormat,
   }
-  const text = (
-    key: 'proxy' | 'listen_addr' | 'auth_states' | 'admin_username',
-    placeholder = '',
-  ) => (
+  const text = (key: 'listen_addr' | 'auth_states' | 'admin_username', placeholder = '') => (
     <Input
       id={key}
       value={value[key]}
@@ -236,14 +235,25 @@ export function SettingsPage() {
           <SettingRow id="listen_addr" label={m.listenAddr} hint={m.listenAddrHint} restart>
             {text('listen_addr', '127.0.0.1:8007')}
           </SettingRow>
-          <SettingRow id="proxy" label={m.proxy} hint={m.proxyHint}>
-            {text('proxy', 'http://127.0.0.1:7890')}
+          <SettingRow id="proxy" label={m.proxy} hint={m.proxyHint} align="start">
+            <ListInput
+              id="proxy"
+              value={value.proxy}
+              itemLabel={m.proxy}
+              addLabel={m.proxyAdd}
+              removeLabel={m.proxyRemove}
+              placeholder="http://127.0.0.1:7890"
+              onChange={(next) => {
+                set('proxy', next)
+              }}
+            />
           </SettingRow>
           <SettingRow id="auth_states" label={m.authStates} hint={m.authStatesHint} restart>
             {text('auth_states', 'auth')}
           </SettingRow>
         </SettingCard>
       )}
+      {tab === 'service' && <ProxyPoolCard />}
 
       {tab === 'upstream' && (
         <SettingCard title={m.tabUpstream}>
@@ -328,9 +338,12 @@ export function SettingsPage() {
       {tab === 'security' && (
         <SettingCard title={m.publicApi}>
           <SettingRow id="proxy_api_key" label={m.apiKey} hint={m.apiKeyHint} align="start">
-            <ApiKeyList
+            <ListInput
               id="proxy_api_key"
               value={value.proxy_api_key}
+              itemLabel={m.apiKey}
+              addLabel={m.apiKeyAdd}
+              removeLabel={m.apiKeyRemove}
               onChange={(next) => {
                 set('proxy_api_key', next)
               }}

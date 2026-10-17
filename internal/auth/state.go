@@ -74,7 +74,7 @@ type File struct {
 }
 
 // LoadFiles 加载全部认证状态文件
-func LoadFiles(paths []string, globalProxy string) ([]LoadedAccount, error) {
+func LoadFiles(paths []string) ([]LoadedAccount, error) {
 	expanded, err := expandPaths(paths)
 	if err != nil {
 		return nil, err
@@ -86,7 +86,7 @@ func LoadFiles(paths []string, globalProxy string) ([]LoadedAccount, error) {
 		if err != nil {
 			return nil, err
 		}
-		account := file.Account(globalProxy)
+		account := file.Account()
 		if _, exists := seen[account.ID]; exists {
 			return nil, fmt.Errorf("账号标识 %q 重复", account.ID)
 		}
@@ -197,14 +197,11 @@ func (f *File) Write() error {
 }
 
 // Account 返回协议客户端使用的账号来源
-func (f *File) Account(globalProxy string) LoadedAccount {
+func (f *File) Account() LoadedAccount {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	proxyURL := strings.TrimSpace(f.state.Metadata.Proxy)
-	if proxyURL == "" {
-		proxyURL = strings.TrimSpace(globalProxy)
-	}
 	source := gemini.AccountSource{
 		ID:       f.state.Metadata.ID,
 		Cookies:  toGeminiCookies(f.state.Cookies),
@@ -232,7 +229,7 @@ func (f *File) SetDisabled(disabled bool) error {
 	return f.writeLocked()
 }
 
-// SetProxy 修改账号固定代理并写回，空值表示使用全局代理
+// SetProxy 修改账号固定代理并写回，空值表示从代理池分配，direct 表示直连
 func (f *File) SetProxy(proxy string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
 )
 
 type stringList []string
@@ -52,8 +55,9 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 		return fmt.Errorf("setup 不接受位置参数")
 	}
 	proxyURL := strings.TrimSpace(*proxy)
-	if proxyURL == "" {
-		proxyURL = strings.TrimSpace(os.Getenv("PROXY"))
+	requestProxy := proxypool.System()
+	if pool := config.SplitList(os.Getenv("PROXY")); len(pool) != 0 {
+		requestProxy = pool[0]
 	}
 
 	outputPath, err := filepath.Abs(strings.TrimSpace(*output))
@@ -100,7 +104,7 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 			return fmt.Errorf("--cookie、--cookie-file 不能与 Chrome 账号选择参数同时使用")
 		}
 		result, modelCount, err := ImportCookies(ctx, CookieImportOptions{
-			Cookies: cookies, ID: *accountID, Output: outputPath, Proxy: proxyURL, AuthUser: *authUser,
+			Cookies: cookies, ID: *accountID, Output: outputPath, Proxy: proxyURL, RequestProxy: requestProxy, AuthUser: *authUser,
 		})
 		if err != nil {
 			return err
@@ -130,11 +134,12 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	}
 
 	results, modelCount, err := Import(ctx, ImportOptions{
-		ChromeRoot: root,
-		Output:     outputPath,
-		Proxy:      proxyURL,
-		Profiles:   profiles,
-		Emails:     emails,
+		ChromeRoot:   root,
+		Output:       outputPath,
+		Proxy:        proxyURL,
+		RequestProxy: requestProxy,
+		Profiles:     profiles,
+		Emails:       emails,
 	})
 	if err != nil {
 		return err

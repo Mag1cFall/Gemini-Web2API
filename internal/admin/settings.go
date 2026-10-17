@@ -150,12 +150,13 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		env["PROXY_API_KEY"] = next.ProxyAPIKey
 	}
 	if update.Proxy != nil {
-		proxy := strings.TrimSpace(*update.Proxy)
-		if proxy != "" {
+		proxies := config.SplitList(*update.Proxy)
+		for _, proxy := range proxies {
 			if _, err := chromeauth.ValidateProxy(proxy); err != nil {
 				problems = append(problems, fmt.Errorf("PROXY: %w", err))
 			}
 		}
+		proxy := strings.Join(proxies, ",")
 		next.ProxyURL = proxy
 		env["PROXY"] = proxy
 	}

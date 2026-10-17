@@ -2,6 +2,7 @@
 package accounts
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,8 +18,10 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
 )
 
 // Settings 是账号生命周期使用的配置
@@ -27,7 +30,7 @@ type Settings struct {
 	InitTimeout time.Duration
 	// RetryInterval 是初始化失败后再次初始化的间隔
 	RetryInterval time.Duration
-	// Proxy 是未设置固定代理的账号使用的全局代理
+	// Proxy 是以逗号分隔的代理池，未设置固定代理的账号与访客会话从中分配
 	Proxy string
 	// SaveHistory 表示生成请求写入官网历史记录
 	SaveHistory bool
@@ -49,6 +52,11 @@ type Manager struct {
 	guest *managed
 	// operations 串行化同一账号的停止与重启
 	operations sync.Map
+	// proxies 是未设置固定代理的账号共用的代理池，proxyCheck 请求立即检测代理池
+	proxies    *proxypool.Pool
+	proxyCheck chan struct{}
+	// guestMu 串行化访客会话的重启
+	guestMu sync.Mutex
 }
 
 type managed struct {
@@ -67,7 +75,12 @@ func (m *Manager) operate(accountID string) func() {
 
 // New 创建账号管理器，ctx 结束时全部账号停止
 func New(ctx context.Context, pool *balancer.AccountPool, settings Settings) *Manager {
-	return &Manager{ctx: ctx, pool: pool, settings: settings, accounts: make(map[string]*managed)}
+	manager := &Manager{
+		ctx: ctx, pool: pool, settings: settings, accounts: make(map[string]*managed),
+		proxies: proxypool.New(config.SplitList(settings.Proxy)), proxyCheck: make(chan struct{}, 1),
+	}
+	pool.OnTransportError(manager.requestProxyCheck)
+	return manager
 }
 
 // Pool 返回账号池
@@ -92,6 +105,7 @@ func (m *Manager) Start(accounts []auth.LoadedAccount) {
 	wait.Add(1)
 	m.launchGuest(wait.Done)
 	wait.Wait()
+	go m.watchProxies()
 }
 
 // guestReloadInterval 是访客会话重读首页与模型目录的间隔，与账号的默认轮换间隔相同
@@ -100,8 +114,9 @@ const guestReloadInterval = 10 * time.Minute
 // launchGuest 创建访客客户端并启动其生命周期，firstDone 在首轮初始化结束时调用
 func (m *Manager) launchGuest(firstDone func()) {
 	settings := m.Settings()
-	m.pool.Register(gemini.GuestID, balancer.AccountInfo{Source: balancer.SourceGuest, Proxy: settings.Proxy}, false)
-	client, err := gemini.NewGuestClient(settings.Proxy, settings.Concurrency)
+	proxy, source := m.poolProxy(gemini.GuestID)
+	m.pool.Register(gemini.GuestID, balancer.AccountInfo{Source: balancer.SourceGuest, Proxy: proxy, ProxySource: source}, false)
+	client, err := gemini.NewGuestClient(proxy, settings.Concurrency)
 	if err != nil {
 		m.pool.MarkFailed(gemini.GuestID, err)
 		logging.Error(gemini.GuestID, "访客会话创建失败", "错误", err)
@@ -197,10 +212,9 @@ func (m *Manager) Add(account auth.LoadedAccount) error {
 
 // launch 创建账号客户端并启动其生命周期，firstDone 在首轮初始化结束或账号停用时调用
 func (m *Manager) launch(account auth.LoadedAccount, firstDone func()) {
-	if usesGlobalProxy(account) {
-		account.ProxyURL = m.Settings().Proxy
-	}
-	info := balancer.AccountInfo{Source: "cookie", Profile: account.Profile, Proxy: account.ProxyURL}
+	proxy, source := m.accountProxy(account)
+	account.ProxyURL = proxy
+	info := balancer.AccountInfo{Source: "cookie", Profile: account.Profile, Proxy: proxy, ProxySource: source}
 	if account.OAuth != nil {
 		info.Source = "chrome"
 	}
@@ -416,6 +430,7 @@ func (m *Manager) Remove(accountID string) error {
 		return err
 	}
 	m.pool.Remove(accountID)
+	m.proxies.Release(accountID)
 	m.mu.Lock()
 	delete(m.accounts, accountID)
 	for index, id := range m.order {
@@ -459,10 +474,10 @@ func (m *Manager) SetEnabled(accountID string, enabled bool) error {
 	return m.restart(entry.account)
 }
 
-// SetProxy 修改账号固定代理并重新初始化账号，空值表示使用全局代理
+// SetProxy 修改账号固定代理并重新初始化账号，空值表示从代理池分配，direct 表示直连
 func (m *Manager) SetProxy(accountID string, proxy string) error {
 	proxy = strings.TrimSpace(proxy)
-	if proxy != "" {
+	if proxy != "" && proxy != proxypool.Direct {
 		if _, err := chromeauth.ValidateProxy(proxy); err != nil {
 			return err
 		}
@@ -477,11 +492,8 @@ func (m *Manager) SetProxy(accountID string, proxy string) error {
 			return err
 		}
 	}
-	entry.account.ProxyURL = proxy
-	if proxy == "" {
-		entry.account.ProxyURL = m.Settings().Proxy
-	}
-	logging.Info(accountID, "账号代理已更新", "代理", maskProxy(entry.account.ProxyURL))
+	entry.account.ProxyURL, _ = m.accountProxy(entry.account)
+	logging.Info(accountID, "账号代理已更新", "代理", cmp.Or(maskProxy(entry.account.ProxyURL), "直连"))
 	return m.restart(entry.account)
 }
 
@@ -507,13 +519,17 @@ func (m *Manager) Verify(accountID string) error {
 	return nil
 }
 
-// SetSettings 修改账号配置并并行重新初始化受影响的账号：全局代理变化时为没有固定代理的账号与访客会话，历史记录变化时为全部账号，并发设置变化时为全部账号与访客会话
+// SetSettings 修改账号配置并并行重新初始化受影响的账号：代理池变化时为分到的代理有变化的账号与访客会话，历史记录变化时为全部账号，并发设置变化时为全部账号与访客会话
 func (m *Manager) SetSettings(settings Settings) {
 	m.mu.Lock()
 	previous := m.settings
 	m.settings = settings
 	ids := append([]string(nil), m.order...)
 	m.mu.Unlock()
+	if previous.Proxy != settings.Proxy {
+		m.proxies.SetProxies(config.SplitList(settings.Proxy))
+		m.requestProxyCheck()
+	}
 	var wait sync.WaitGroup
 	for _, id := range ids {
 		wait.Add(1)
@@ -527,8 +543,8 @@ func (m *Manager) SetSettings(settings Settings) {
 				return
 			}
 			account := entry.account
-			globalProxy := usesGlobalProxy(account)
-			if globalProxy && previous.Proxy != settings.Proxy || previous.SaveHistory != settings.SaveHistory || previous.Concurrency != settings.Concurrency {
+			proxyChanged := usesGlobalProxy(account) && m.proxies.Assign(id) != account.ProxyURL
+			if proxyChanged || previous.SaveHistory != settings.SaveHistory || previous.Concurrency != settings.Concurrency {
 				if _, err := m.stop(id); err == nil {
 					_ = m.restart(account)
 				}
@@ -539,22 +555,15 @@ func (m *Manager) SetSettings(settings Settings) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			m.stopGuest()
-			done := make(chan struct{})
-			var once sync.Once
-			m.launchGuest(func() { once.Do(func() { close(done) }) })
-			select {
-			case <-done:
-			case <-m.ctx.Done():
-			}
+			m.relaunchGuest()
 		}()
 	}
 	wait.Wait()
 }
 
-// usesGlobalProxy 报告账号没有固定代理、使用全局代理
+// usesGlobalProxy 报告账号没有固定代理、从代理池分配
 func usesGlobalProxy(account auth.LoadedAccount) bool {
-	return account.File == nil || strings.TrimSpace(account.File.Proxy()) == ""
+	return fixedProxy(account) == ""
 }
 
 // restart 以新客户端重新启动账号并等待首轮初始化结束
@@ -612,10 +621,7 @@ func (m *Manager) ImportChrome(ctx context.Context, emails []string, proxy strin
 		return nil, err
 	}
 	settings := m.Settings()
-	if strings.TrimSpace(proxy) == "" {
-		proxy = settings.Proxy
-	}
-	results, _, err := chromeauth.Import(ctx, chromeauth.ImportOptions{ChromeRoot: root, Output: settings.AuthDir, Proxy: proxy, Emails: emails})
+	results, _, err := chromeauth.Import(ctx, chromeauth.ImportOptions{ChromeRoot: root, Output: settings.AuthDir, Proxy: proxy, RequestProxy: m.importProxy(), Emails: emails})
 	if err != nil {
 		return nil, err
 	}
@@ -633,10 +639,7 @@ func (m *Manager) ImportChrome(ctx context.Context, emails []string, proxy strin
 // ImportCookie 从 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt 导入账号并启动
 func (m *Manager) ImportCookie(ctx context.Context, cookies string, id string, proxy string, authUser int) (string, error) {
 	settings := m.Settings()
-	if strings.TrimSpace(proxy) == "" {
-		proxy = settings.Proxy
-	}
-	result, _, err := chromeauth.ImportCookies(ctx, chromeauth.CookieImportOptions{Cookies: cookies, ID: id, Output: settings.AuthDir, Proxy: proxy, AuthUser: authUser})
+	result, _, err := chromeauth.ImportCookies(ctx, chromeauth.CookieImportOptions{Cookies: cookies, ID: id, Output: settings.AuthDir, Proxy: proxy, RequestProxy: m.importProxy(), AuthUser: authUser})
 	if err != nil {
 		return "", err
 	}
@@ -669,7 +672,7 @@ func (m *Manager) addFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	account := file.Account(m.Settings().Proxy)
+	account := file.Account()
 	m.mu.Lock()
 	_, exists := m.accounts[account.ID]
 	m.mu.Unlock()

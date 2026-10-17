@@ -12,7 +12,9 @@ import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { runBatch } from '@/features/accounts/batch'
 import { accountsMessages, accountStateMessages } from '@/features/accounts/messages'
+import { fixedProxy } from '@/features/accounts/proxy'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
+import { ProxyValue } from '@/features/accounts/ProxyValue'
 import { accountsKey, useAccounts } from '@/features/accounts/queries'
 import type { Account } from '@/features/accounts/types'
 import { stateTone } from '@/features/accounts/usage'
@@ -41,7 +43,7 @@ function applyBatch({ action, proxy = '' }: BatchRequest, account: Account) {
     case 'verify':
       return api(path + '/verify', { method: 'POST' })
     case 'proxy':
-      return proxy === (account.proxy ?? '')
+      return proxy === fixedProxy(account)
         ? Promise.resolve()
         : api(path, { method: 'PUT', json: { proxy } })
     default:
@@ -282,8 +284,11 @@ export function AccountsPage() {
                       ? formatDateTime(new Date(account.last_used), now, locale)
                       : m.never}
                   </Td>
-                  <Td className="max-w-cell truncate font-mono text-foreground-muted">
-                    {account.proxy ?? m.none}
+                  <Td
+                    className="max-w-cell truncate font-mono text-foreground-muted"
+                    title={account.proxy}
+                  >
+                    <ProxyValue account={account} />
                   </Td>
                 </tr>
               ))}

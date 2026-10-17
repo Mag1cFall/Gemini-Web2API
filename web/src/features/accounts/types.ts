@@ -37,6 +37,7 @@ export interface Account {
   source: AccountSource
   profile?: string
   proxy?: string
+  proxy_source?: 'fixed' | 'direct' | 'pool' | 'system'
   tier?: string
   context_window?: number
   models: string[]

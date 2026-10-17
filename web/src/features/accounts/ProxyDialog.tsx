@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input'
 import { accountsMessages } from '@/features/accounts/messages'
 import { useMessages } from '@/lib/i18n'
 
-// ProxyDialog 是填写账号固定代理的对话框，以 initial 为初值，留空表示使用全局代理
+// ProxyDialog 是填写账号固定代理的对话框，以 initial 为初值，留空表示从代理池分配，direct 表示直连
 export function ProxyDialog({
   title,
   initial,

@@ -1,6 +1,7 @@
 package chromeauth
 
 import (
+	"cmp"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
 )
 
 const (
@@ -38,9 +40,11 @@ type Account struct {
 type ImportOptions struct {
 	ChromeRoot string
 	Output     string
-	Proxy      string
-	Profiles   []string
-	Emails     []string
+	// Proxy 是写入账号的固定代理，RequestProxy 是没有固定代理时导入请求使用的代理
+	Proxy        string
+	RequestProxy string
+	Profiles     []string
+	Emails       []string
 }
 
 // ImportResult 描述单个账号导入结果
@@ -56,6 +60,8 @@ type ImportResult struct {
 type pendingImport struct {
 	state  auth.StorageState
 	result ImportResult
+	// requestProxy 是验证请求使用的代理
+	requestProxy string
 }
 
 // CookieImportOptions 保存 Cookie 导入参数，Cookies 为 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt
@@ -63,7 +69,9 @@ type CookieImportOptions struct {
 	Cookies string
 	ID      string
 	Output  string
-	Proxy   string
+	// Proxy 是写入账号的固定代理，RequestProxy 是没有固定代理时验证请求使用的代理
+	Proxy        string
+	RequestProxy string
 	// AuthUser 是目标账号在浏览器多账号登录中的序号，即官网地址 /u/N 中的 N
 	AuthUser int
 }
@@ -91,7 +99,7 @@ func Refresh(ctx context.Context, material auth.OAuthMaterial, proxy string) ([]
 
 // ImportCookies 从 Cookie 文本生成短期账号状态
 func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResult, int, error) {
-	proxyURL, err := ValidateProxy(options.Proxy)
+	proxyURL, requestProxy, err := importProxies(options.Proxy, options.RequestProxy)
 	if err != nil {
 		return ImportResult{}, 0, err
 	}
@@ -126,6 +134,7 @@ func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResu
 		result: ImportResult{
 			Profile: "cookie-header", Imported: true, CookieCount: len(cookies), Path: absPath,
 		},
+		requestProxy: requestProxy,
 	}
 	results, modelCount, err := validateAndWriteImports(ctx, []pendingImport{pending})
 	if err != nil {
@@ -139,7 +148,7 @@ func Import(ctx context.Context, options ImportOptions) ([]ImportResult, int, er
 	if err := ensurePlatformImport(); err != nil {
 		return nil, 0, err
 	}
-	proxyURL, err := ValidateProxy(options.Proxy)
+	proxyURL, requestProxy, err := importProxies(options.Proxy, options.RequestProxy)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -161,7 +170,7 @@ func Import(ctx context.Context, options ImportOptions) ([]ImportResult, int, er
 
 	pending := make([]pendingImport, 0, len(selected))
 	for _, account := range selected {
-		result, err := importAccount(ctx, account, options, proxyURL, masterKey)
+		result, err := importAccount(ctx, account, options, proxyURL, requestProxy, masterKey)
 		if err != nil {
 			return nil, 0, fmt.Errorf("导入 %s: %w", account.Email, err)
 		}
@@ -228,7 +237,20 @@ func missingValues(requested map[string]struct{}, found map[string]struct{}) []s
 	return missing
 }
 
-// ValidateProxy 校验 HTTP、HTTPS 或 SOCKS5 代理 URL 并返回去掉空白的值
+// importProxies 校验导入时填写的账号代理，返回写入账号的固定代理与导入请求使用的代理：direct 为直连，未填写时使用 fallback
+func importProxies(proxy string, fallback string) (string, string, error) {
+	proxy = strings.TrimSpace(proxy)
+	if proxy == proxypool.Direct {
+		return proxy, "", nil
+	}
+	fixed, err := ValidateProxy(proxy)
+	if err != nil {
+		return "", "", err
+	}
+	return fixed, cmp.Or(fixed, fallback), nil
+}
+
+// ValidateProxy 校验 HTTP、HTTPS、SOCKS4 或 SOCKS5 代理 URL 并返回去掉空白的值
 func ValidateProxy(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -236,13 +258,13 @@ func ValidateProxy(value string) (string, error) {
 	}
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Hostname() == "" {
-		return "", fmt.Errorf("proxy 必须是 http、https 或 socks5 URL")
+		return "", fmt.Errorf("proxy 必须是 http、https、socks4、socks4a、socks5 或 socks5h URL")
 	}
 	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https", "socks5":
+	case "http", "https", "socks4", "socks4a", "socks5", "socks5h":
 		return value, nil
 	default:
-		return "", fmt.Errorf("proxy 必须是 http、https 或 socks5 URL")
+		return "", fmt.Errorf("proxy 必须是 http、https、socks4、socks4a、socks5 或 socks5h URL")
 	}
 }
 
@@ -269,7 +291,7 @@ func decryptV20Token(masterKey []byte, encrypted []byte) (string, error) {
 	return token, nil
 }
 
-func importAccount(ctx context.Context, account Account, options ImportOptions, proxyURL string, masterKey []byte) (pendingImport, error) {
+func importAccount(ctx context.Context, account Account, options ImportOptions, proxyURL string, requestProxy string, masterKey []byte) (pendingImport, error) {
 	gaiaID, encryptedToken, wrappedKey, err := readTokenService(options.ChromeRoot, account.Profile, account.GaiaID)
 	if err != nil {
 		return pendingImport{}, err
@@ -278,7 +300,7 @@ func importAccount(ctx context.Context, account Account, options ImportOptions, 
 	if err != nil {
 		return pendingImport{}, err
 	}
-	cookies, err := fetchGoogleCookies(ctx, gaiaID, token, wrappedKey, proxyURL)
+	cookies, err := fetchGoogleCookies(ctx, gaiaID, token, wrappedKey, requestProxy)
 	if err != nil {
 		return pendingImport{}, err
 	}
@@ -312,6 +334,7 @@ func importAccount(ctx context.Context, account Account, options ImportOptions, 
 			Profile: account.Profile, Email: email, Imported: true,
 			CookieCount: len(cookies), Path: absPath,
 		},
+		requestProxy: requestProxy,
 	}, nil
 }
 
@@ -327,7 +350,7 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]Im
 			item.state.Cookies = geminiCookiesToState(cookies)
 			return nil
 		}
-		client, err := gemini.NewClient(source, item.state.Metadata.Proxy, false)
+		client, err := gemini.NewClient(source, item.requestProxy, false)
 		if err != nil {
 			return nil, 0, fmt.Errorf("验证账号 %s: %w", item.state.Metadata.ID, err)
 		}

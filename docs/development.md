@@ -30,6 +30,7 @@ internal/chromeauth/ Chrome 账号发现、OAuthMultilogin、Cookie 导入与远
 internal/auth/       账号状态和原子写回
 internal/gemini/     Gemini Web 请求、解码与规范事件
 internal/balancer/   账号能力调度、冷却与会话粘连
+internal/proxypool/  代理池绑定、检测与系统代理
 internal/adapter/    OpenAI、Claude 和 Gemini 协议投影
 internal/claude/     Claude 协议类型与流式事件
 internal/tokencount/ Gemini tokenizer 本地计数
@@ -124,6 +125,7 @@ Windows 便携包为桌面版可执行文件与 README、LICENSE、`.env.example
 | 续签 | `internal/chromeauth` | Chrome 导入的账号在登录态失效时续签 |
 | 冷却 | `AccountPool.ReportFailure` | 按模型或整个账号移出调度 |
 | 运行期变更 | `Manager.Add`、`Remove`、`SetEnabled`、`SetProxy`、`Verify` | 导入、删除、停用、改代理、重新连接 |
+| 代理 | `internal/accounts/proxies.go`、`internal/proxypool` | 分配代理，定时检测，故障时改绑 |
 | 写回 | `internal/auth` | 变化的 Cookie 原子写回认证文件 |
 
 - **启动**：`internal/app` 读取配置后创建 `AccountPool` 与 `accounts.Manager`，`Start` 为每个账号启动独立的初始化与轮换循环，并另建访客会话

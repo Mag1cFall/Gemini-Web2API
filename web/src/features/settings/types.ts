@@ -42,3 +42,13 @@ export type ConfigPatch = Partial<{
   auth_states: string
   log_format: ServiceConfig['log_format']
 }>
+
+// ProxyStatus 对应 GET /api/proxies 的 proxy，checked_at 在首次检测前省略
+export interface ProxyStatus {
+  url: string
+  healthy: boolean
+  checked_at?: string
+  latency_ms: number
+  error?: string
+  accounts: string[]
+}

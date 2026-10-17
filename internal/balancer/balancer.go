@@ -34,6 +34,8 @@ type AccountInfo struct {
 	Profile string
 	// Proxy 为账号实际使用的代理 URL
 	Proxy string
+	// ProxySource 为代理来源：fixed（账号固定代理）、direct（直连）、pool（代理池）或 system（系统代理）
+	ProxySource string
 	// Path 为认证状态文件路径
 	Path string
 }
@@ -72,6 +74,7 @@ type AccountStatus struct {
 	Source           string            `json:"source,omitempty"`
 	Profile          string            `json:"profile,omitempty"`
 	Proxy            string            `json:"proxy,omitempty"`
+	ProxySource      string            `json:"proxy_source,omitempty"`
 	Tier             string            `json:"tier,omitempty"`
 	ContextWindow    int               `json:"context_window,omitempty"`
 	Models           []string          `json:"models"`
@@ -142,6 +145,7 @@ type AccountPool struct {
 	sessionTTL    time.Duration
 	lastSessionGC time.Time
 	mu            sync.Mutex
+	transport     func()
 }
 
 // NewAccountPool 创建账号池，轮询从随机位置开始
@@ -224,6 +228,7 @@ func (p *AccountPool) MarkFailed(accountID string, err error) bool {
 	if gemini.IsAuthenticationError(err) {
 		state = StateAuthRequired
 	}
+	p.reportTransport(err)
 	changed := entry.State != state || entry.LastError != errorText(err)
 	entry.State = state
 	entry.LastError, entry.LastErrorAt = errorText(err), time.Now()
@@ -236,6 +241,21 @@ func (p *AccountPool) RecordError(accountID string, err error) {
 	defer p.mu.Unlock()
 	if entry := p.entry(accountID); entry != nil {
 		entry.LastError, entry.LastErrorAt = errorText(err), time.Now()
+	}
+	p.reportTransport(err)
+}
+
+// OnTransportError 设置账号遇到连接、TLS 或代理错误时调用的函数
+func (p *AccountPool) OnTransportError(fn func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.transport = fn
+}
+
+// reportTransport 在 err 为连接、TLS 或代理错误时调用 OnTransportError 设置的函数，调用方持有 p.mu
+func (p *AccountPool) reportTransport(err error) {
+	if p.transport != nil && errors.Is(err, gemini.ErrTransport) {
+		p.transport()
 	}
 }
 
@@ -375,6 +395,7 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	entry.LastError, entry.LastErrorAt = errorText(err), now
 	if errors.Is(err, gemini.ErrTransport) {
 		logging.Warn(accountID, "网络错误，账号不冷却", "原因", err)
+		p.reportTransport(err)
 		return
 	}
 	entry.ConsecutiveFails++
@@ -618,7 +639,7 @@ func (p *AccountPool) Usage(ctx context.Context, refresh bool) PoolUsageStatus {
 func (e *accountEntry) status(now time.Time) AccountStatus {
 	status := AccountStatus{
 		AccountID: e.AccountID, State: e.State, Enabled: e.State != StateDisabled, Source: e.Info.Source, Profile: e.Info.Profile,
-		Proxy: maskProxy(e.Info.Proxy), Models: []string{}, ConsecutiveFails: e.ConsecutiveFails, LastError: e.LastError,
+		Proxy: maskProxy(e.Info.Proxy), ProxySource: e.Info.ProxySource, Models: []string{}, ConsecutiveFails: e.ConsecutiveFails, LastError: e.LastError,
 		LastUsed: timePointer(e.LastUsed), ReadyAt: timePointer(e.ReadyAt), LastErrorAt: timePointer(e.LastErrorAt),
 	}
 	if e.State == StateReady && now.Before(e.Cooldown.until) {
