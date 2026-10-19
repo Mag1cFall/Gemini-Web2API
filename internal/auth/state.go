@@ -59,16 +59,25 @@ func (m *Metadata) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = Metadata(aux.Alias)
-	if len(aux.RawAuthUser) > 0 {
+	if len(aux.RawAuthUser) > 0 && string(aux.RawAuthUser) != "null" {
 		var intVal int
 		if err := json.Unmarshal(aux.RawAuthUser, &intVal); err == nil {
+			if intVal < 0 {
+				return fmt.Errorf("authUser 不能为负数: %d", intVal)
+			}
 			m.AuthUser = intVal
 		} else {
 			var strVal string
-			if err := json.Unmarshal(aux.RawAuthUser, &strVal); err == nil {
-				if n, err := strconv.Atoi(strings.TrimSpace(strVal)); err == nil {
-					m.AuthUser = n
+			if err := json.Unmarshal(aux.RawAuthUser, &strVal); err != nil {
+				return fmt.Errorf("解析 authUser: %w", err)
+			}
+			trimmed := strings.TrimSpace(strVal)
+			if trimmed != "" {
+				n, err := strconv.Atoi(trimmed)
+				if err != nil || n < 0 {
+					return fmt.Errorf("无效的 authUser 值: %q", strVal)
 				}
+				m.AuthUser = n
 			}
 		}
 	}

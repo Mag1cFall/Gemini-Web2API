@@ -65,23 +65,25 @@ func discoverPlatform(chromeRoot string) ([]Account, error) {
 			accounts = append(accounts, Account{Profile: profile, DisplayName: info.Name, Email: info.UserName})
 			continue
 		}
+		tokens, dbErr := readProfileTokens(chromeRoot, profile)
 		seen := make(map[string]bool, len(identities))
 		for _, identity := range identities {
 			if identity.GaiaID == "" || seen[identity.GaiaID] {
 				continue
 			}
 			seen[identity.GaiaID] = true
-			_, encrypted, _, tokenErr := readTokenService(chromeRoot, profile, identity.GaiaID)
-			importable := tokenErr == nil && strings.HasPrefix(string(encrypted), "v20")
+			encrypted, hasToken := tokens[identity.GaiaID]
+			importable := dbErr == nil && hasToken && strings.HasPrefix(string(encrypted), "v20")
 			reason := ""
 			if !importable {
-				if tokenErr != nil {
-					if strings.Contains(tokenErr.Error(), "没有账号") {
-						reason = "not_signed_in"
-					} else {
-						reason = "missing_token"
-					}
-				} else {
+				switch {
+				case dbErr != nil:
+					reason = "missing_token"
+				case !hasToken:
+					reason = "not_signed_in"
+				case len(encrypted) == 0:
+					reason = "missing_token"
+				default:
 					reason = "needs_reauth"
 				}
 			}
@@ -135,16 +137,15 @@ func copyFile(src, dst string) error {
 func openWebData(chromeRoot string, profile string) (*sql.DB, func(), error) {
 	databasePath := filepath.Join(chromeRoot, profile, "Web Data")
 	cleanup := func() {}
+	uri := "file:" + filepath.ToSlash(databasePath) + "?mode=ro&immutable=1"
 
 	// 当 Chrome 正在运行时，直接以 mode=ro 打开 Web Data 会触发 SQLITE_BUSY (database is locked)。
-	// 为此将 Web Data 及其 WAL 文件拷贝到临时文件后再打开，既能读取最新的 WAL 提交，又避开了 Chrome 的排他锁。
-	tempDir, err := os.MkdirTemp("", "gemini-web2api-webdata-*")
-	if err == nil {
+	// 为此将 Web Data 及其 WAL 文件拷贝到临时文件后再打开，既能由 SQLite 自动重建索引读取最新的 WAL 提交，又避开了 Chrome 的排他锁。
+	if tempDir, err := os.MkdirTemp("", "gemini-web2api-webdata-*"); err == nil {
 		tempDb := filepath.Join(tempDir, "Web Data")
 		if copyFile(databasePath, tempDb) == nil {
 			_ = copyFile(databasePath+"-wal", tempDb+"-wal")
-			_ = copyFile(databasePath+"-shm", tempDb+"-shm")
-			databasePath = tempDb
+			uri = "file:" + filepath.ToSlash(tempDb)
 			cleanup = func() {
 				_ = os.RemoveAll(tempDir)
 			}
@@ -153,7 +154,6 @@ func openWebData(chromeRoot string, profile string) (*sql.DB, func(), error) {
 		}
 	}
 
-	uri := "file:" + filepath.ToSlash(databasePath) + "?mode=ro"
 	database, err := sql.Open("sqlite", uri)
 	if err != nil {
 		cleanup()
@@ -164,6 +164,37 @@ func openWebData(chromeRoot string, profile string) (*sql.DB, func(), error) {
 		database.Close()
 		cleanup()
 	}, nil
+}
+
+// readProfileTokens 一次性读取指定 Profile 中全部账号的 encrypted_token，避免多账号循环重复拷贝数据库
+func readProfileTokens(chromeRoot string, profile string) (map[string][]byte, error) {
+	database, closeDb, err := openWebData(chromeRoot, profile)
+	if err != nil {
+		return nil, err
+	}
+	defer closeDb()
+
+	rows, err := database.Query("SELECT service, encrypted_token FROM token_service")
+	if err != nil {
+		return nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
+	}
+	defer rows.Close()
+
+	tokens := make(map[string][]byte)
+	for rows.Next() {
+		var service string
+		var encryptedToken []byte
+		if err := rows.Scan(&service, &encryptedToken); err != nil {
+			return nil, fmt.Errorf("解析 %s token_service: %w", profile, err)
+		}
+		if gaiaID, ok := strings.CutPrefix(service, "AccountId-"); ok && gaiaID != "" {
+			tokens[gaiaID] = encryptedToken
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
+	}
+	return tokens, nil
 }
 
 // readTokenService 读取 Profile 中指定 Gaia ID 账号的 refresh token 与设备绑定密钥

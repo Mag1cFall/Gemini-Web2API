@@ -205,7 +205,9 @@ func findChallenge(response multiloginResponse) string {
 func encodeMultiOAuthHeader(gaiaID string, token string, assertion string) string {
 	account := appendBytesField(nil, 1, []byte(gaiaID))
 	account = appendBytesField(account, 2, []byte(token))
-	account = appendBytesField(account, 3, []byte(assertion))
+	if assertion != "" {
+		account = appendBytesField(account, 3, []byte(assertion))
+	}
 	return base64.RawURLEncoding.EncodeToString(appendBytesField(nil, 1, account))
 }
 

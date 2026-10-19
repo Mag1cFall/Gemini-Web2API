@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -63,6 +64,9 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					sessionKey = fp
 				}
 			}
+		}
+		if sessionKey != "" {
+			c.Set("session_key", sessionKey)
 		}
 		responseID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 
@@ -172,7 +176,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			if len(calls) > 0 {
 				stopReason = "tool_use"
 			}
-			bindNextClaudeFingerprint(pool, request.System, request.Messages, result)
+			bindNextClaudeFingerprint(pool, request.System, request.Messages, sessionKey, responseID, result, bridge)
 			_ = processor.Finish(stopReason)
 			return
 		}
@@ -251,7 +255,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
 		c.Header("X-Provider-Model", result.ProviderModel)
-		bindNextClaudeFingerprint(pool, request.System, request.Messages, result)
+		bindNextClaudeFingerprint(pool, request.System, request.Messages, sessionKey, responseID, result, bridge)
 		c.JSON(http.StatusOK, response)
 	}
 }
@@ -319,8 +323,12 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 	if err != nil {
 		return "", nil, err
 	}
+	sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, extractHeaderSessionKey(c))
+	if sessionKey == "" && c != nil {
+		sessionKey = c.GetString("session_key")
+	}
 	var suffix string
-	if continuation {
+	if continuation && conversations.hasSameTools(sessionKey, bridge.fingerprint()) {
 		suffix = bridge.ContinuationSuffix()
 	} else {
 		suffix, err = bridge.PromptSuffix()
@@ -419,41 +427,157 @@ func findLastClaudeAssistantIndex(messages []claude.Message) int {
 	return -1
 }
 
+func writeCanonicalClaudeContent(h io.Writer, raw json.RawMessage) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		if trimmed := strings.TrimSpace(str); trimmed != "" {
+			_, _ = io.WriteString(h, "text:")
+			_, _ = io.WriteString(h, trimmed)
+			_, _ = h.Write([]byte{0})
+		}
+		return
+	}
+	var blocks []claude.ContentBlock
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var textBuf strings.Builder
+		flushText := func() {
+			if trimmed := strings.TrimSpace(textBuf.String()); trimmed != "" {
+				_, _ = io.WriteString(h, "text:")
+				_, _ = io.WriteString(h, trimmed)
+				_, _ = h.Write([]byte{0})
+			}
+			textBuf.Reset()
+		}
+		for _, b := range blocks {
+			switch b.Type {
+			case "thinking", "redacted_thinking", "server_tool_use", "web_search_tool_result":
+				continue
+			case "text":
+				textBuf.WriteString(b.Text)
+			case "tool_use":
+				flushText()
+				_, _ = io.WriteString(h, "tool_use:")
+				_, _ = io.WriteString(h, b.Name)
+				_, _ = h.Write([]byte{0})
+				if b.Input != nil {
+					if inputBytes, err := json.Marshal(b.Input); err == nil {
+						_, _ = h.Write(inputBytes)
+					}
+				}
+				_, _ = h.Write([]byte{0})
+			case "tool_result":
+				flushText()
+				_, _ = io.WriteString(h, "tool_result:")
+				_, _ = io.WriteString(h, b.ToolUseID)
+				_, _ = h.Write([]byte{0})
+				_, _ = h.Write(canonicalJSONBytes(b.Content))
+				_, _ = h.Write([]byte{0})
+			default:
+				flushText()
+				_, _ = io.WriteString(h, b.Type)
+				_, _ = h.Write([]byte{0})
+				_, _ = h.Write(canonicalJSONBytes(b.Content))
+				_, _ = h.Write([]byte{0})
+			}
+		}
+		flushText()
+		return
+	}
+	_, _ = h.Write(canonicalJSONBytes(raw))
+}
+
 func claudeMessagesFingerprint(system json.RawMessage, messages []claude.Message) string {
 	if len(messages) == 0 {
 		return ""
 	}
 	h := sha256.New()
 	if len(system) > 0 {
-		h.Write(system)
-		h.Write([]byte{0xFF})
+		if sysText, err := claude.ParseSystemPrompt(system); err == nil && strings.TrimSpace(sysText) != "" {
+			_, _ = io.WriteString(h, strings.TrimSpace(sysText))
+			_, _ = h.Write([]byte{0xFF})
+		}
 	}
 	for _, m := range messages {
-		h.Write([]byte(m.Role))
-		h.Write([]byte{0})
-		h.Write(m.Content)
-		h.Write([]byte{0xFF})
+		_, _ = io.WriteString(h, m.Role)
+		_, _ = h.Write([]byte{0})
+		writeCanonicalClaudeContent(h, m.Content)
+		_, _ = h.Write([]byte{0xFF})
 	}
 	sum := h.Sum(nil)
 	return "fp_cld_" + hex.EncodeToString(sum[:16])
 }
 
-func bindNextClaudeFingerprint(pool *balancer.AccountPool, system json.RawMessage, messages []claude.Message, result generationResult) {
+func bindNextClaudeFingerprint(pool *balancer.AccountPool, system json.RawMessage, messages []claude.Message, sessionKey string, responseID string, result generationResult, bridge ToolBridge) {
 	if result.ConversationID == "" {
 		return
 	}
+	toolsFp := bridge.fingerprint()
 	primary := result.Accumulator.Primary()
 	if primary.Text == "" && len(primary.Codes) == 0 {
+		conversations.setTools(toolsFp, result.ConversationID, responseID, sessionKey)
 		return
 	}
-	assistantContent, err := json.Marshal(primary.Text)
+	content, calls, err := bridge.Parse(primary.Text)
 	if err != nil {
+		content = primary.Text
+		calls = nil
+	}
+	rendered := renderCandidateMarkdown(content, primary, 0)
+	renderedWithCitations := renderCitationMarkdown(rendered, primary.Citations)
+
+	buildBlocks := func(textVal string) (json.RawMessage, bool) {
+		blocks := make([]claude.ContentBlock, 0, 1+len(calls))
+		if strings.TrimSpace(textVal) != "" {
+			blocks = append(blocks, claude.ContentBlock{Type: "text", Text: textVal})
+		}
+		for _, call := range calls {
+			var input map[string]interface{}
+			_ = json.Unmarshal(call.Arguments, &input)
+			blocks = append(blocks, claude.ContentBlock{Type: "tool_use", Name: call.Name, Input: &input})
+		}
+		if len(blocks) == 0 {
+			return nil, false
+		}
+		raw, err := json.Marshal(blocks)
+		return raw, err == nil
+	}
+
+	var fps []string
+	for _, candidateText := range []string{renderedWithCitations, rendered, content} {
+		assistantContent, ok := buildBlocks(candidateText)
+		if !ok {
+			continue
+		}
+		nextMessages := make([]claude.Message, len(messages)+1)
+		copy(nextMessages, messages)
+		nextMessages[len(messages)] = claude.Message{Role: "assistant", Content: assistantContent}
+		fp := claudeMessagesFingerprint(system, nextMessages)
+		if fp != "" {
+			seen := false
+			for _, existing := range fps {
+				if existing == fp {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				fps = append(fps, fp)
+			}
+		}
+	}
+	if len(fps) == 0 {
+		conversations.setTools(toolsFp, result.ConversationID, responseID, sessionKey)
 		return
 	}
-	nextMessages := append(messages, claude.Message{Role: "assistant", Content: assistantContent})
-	nextFp := claudeMessagesFingerprint(system, nextMessages)
 	if state, accountID, ctxTokens, ok := conversations.get(result.ConversationID); ok {
-		conversations.put(state, accountID, ctxTokens, nextFp)
-		pool.BindSession(nextFp, accountID)
+		conversations.put(state, accountID, ctxTokens, fps...)
+		for _, fp := range fps {
+			pool.BindSession(fp, accountID)
+		}
 	}
+	allKeys := append([]string{result.ConversationID, responseID, sessionKey}, fps...)
+	conversations.setTools(toolsFp, allKeys...)
 }

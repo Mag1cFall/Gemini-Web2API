@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -137,6 +138,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				}
 			}
 		}
+		if sessionKey != "" {
+			c.Set("session_key", sessionKey)
+		}
 		allowNewSession := request.PreviousResponseID == ""
 		responseID := fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
@@ -214,7 +218,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					return
 				}
 				usage = addUsage(usage, result.Accumulator.Usage)
-				bindNextOpenAIFingerprint(pool, request.Messages, result)
+				if choice == 0 {
+					bindNextOpenAIFingerprint(pool, request.Messages, sessionKey, responseID, result, bridge)
+				}
 			}
 			recordChoiceUsage(c, n, usage)
 			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && usage != nil {
@@ -243,7 +249,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				return
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
-			bindNextOpenAIFingerprint(pool, request.Messages, result)
+			if choice == 0 {
+				bindNextOpenAIFingerprint(pool, request.Messages, sessionKey, responseID, result, bridge)
+			}
 			if response == nil {
 				response = built
 				continue
@@ -332,8 +340,12 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	if err != nil {
 		return "", nil, err
 	}
+	sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, extractHeaderSessionKey(c))
+	if sessionKey == "" && c != nil {
+		sessionKey = c.GetString("session_key")
+	}
 	var suffix string
-	if continuation {
+	if continuation && conversations.hasSameTools(sessionKey, bridge.fingerprint()) {
 		suffix = bridge.ContinuationSuffix()
 	} else {
 		suffix, err = bridge.PromptSuffix()
@@ -655,22 +667,54 @@ func findLastAssistantIndex(messages []ChatMessage) int {
 	return -1
 }
 
+func normalizeOpenAIMessageContent(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		var b strings.Builder
+		for _, part := range parts {
+			var partType string
+			_ = json.Unmarshal(part["type"], &partType)
+			switch partType {
+			case "text", "input_text", "output_text", "":
+				var val string
+				if json.Unmarshal(part["text"], &val) == nil {
+					b.WriteString(val)
+				}
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+	return strings.TrimSpace(string(raw))
+}
+
 func openAIMessagesFingerprint(messages []ChatMessage) string {
 	if len(messages) == 0 {
 		return ""
 	}
 	h := sha256.New()
 	for _, m := range messages {
-		h.Write([]byte(m.Role))
+		role := m.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		h.Write([]byte(role))
 		h.Write([]byte{0})
-		h.Write(m.Content)
+		h.Write([]byte(normalizeOpenAIMessageContent(m.Content)))
 		h.Write([]byte{0})
 		h.Write([]byte(m.ToolCallID))
 		h.Write([]byte{0})
 		for _, tc := range m.ToolCalls {
-			h.Write([]byte(tc.ID))
 			h.Write([]byte(tc.Function.Name))
-			h.Write([]byte(tc.Function.Arguments))
+			h.Write([]byte{0})
+			h.Write(canonicalJSONBytes([]byte(tc.Function.Arguments)))
+			h.Write([]byte{0})
 		}
 		h.Write([]byte{0xFF})
 	}
@@ -678,22 +722,71 @@ func openAIMessagesFingerprint(messages []ChatMessage) string {
 	return "fp_oai_" + hex.EncodeToString(sum[:16])
 }
 
-func bindNextOpenAIFingerprint(pool *balancer.AccountPool, messages []ChatMessage, result generationResult) {
+func bindNextOpenAIFingerprint(pool *balancer.AccountPool, messages []ChatMessage, sessionKey string, responseID string, result generationResult, bridge ToolBridge) {
 	if result.ConversationID == "" {
 		return
 	}
+	toolsFp := bridge.fingerprint()
 	primary := result.Accumulator.Primary()
 	if primary.Text == "" && len(primary.Codes) == 0 {
+		conversations.setTools(toolsFp, result.ConversationID, responseID, sessionKey)
 		return
 	}
-	assistantContent, err := json.Marshal(primary.Text)
+	content, calls, err := bridge.Parse(primary.Text)
 	if err != nil {
+		content = primary.Text
+		calls = nil
+	}
+
+	var candidates []ChatMessage
+	if len(calls) > 0 {
+		toolCalls := make([]OpenAIToolCall, 0, len(calls))
+		for _, call := range calls {
+			var tc OpenAIToolCall
+			tc.Type = "function"
+			tc.Function.Name = call.Name
+			tc.Function.Arguments = string(call.Arguments)
+			toolCalls = append(toolCalls, tc)
+		}
+		candidates = append(candidates, ChatMessage{Role: "assistant", ToolCalls: toolCalls})
+	} else {
+		rendered := renderCandidateMarkdown(content, primary, 0)
+		for _, textVal := range []string{rendered, content} {
+			if raw, err := json.Marshal(textVal); err == nil {
+				candidates = append(candidates, ChatMessage{Role: "assistant", Content: raw})
+			}
+		}
+	}
+
+	var fps []string
+	for _, assistantMsg := range candidates {
+		nextMessages := make([]ChatMessage, len(messages)+1)
+		copy(nextMessages, messages)
+		nextMessages[len(messages)] = assistantMsg
+		fp := openAIMessagesFingerprint(nextMessages)
+		if fp != "" {
+			seen := false
+			for _, existing := range fps {
+				if existing == fp {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				fps = append(fps, fp)
+			}
+		}
+	}
+	if len(fps) == 0 {
+		conversations.setTools(toolsFp, result.ConversationID, responseID, sessionKey)
 		return
 	}
-	nextMessages := append(messages, ChatMessage{Role: "assistant", Content: assistantContent})
-	nextFp := openAIMessagesFingerprint(nextMessages)
 	if state, accountID, ctxTokens, ok := conversations.get(result.ConversationID); ok {
-		conversations.put(state, accountID, ctxTokens, nextFp)
-		pool.BindSession(nextFp, accountID)
+		conversations.put(state, accountID, ctxTokens, fps...)
+		for _, fp := range fps {
+			pool.BindSession(fp, accountID)
+		}
 	}
+	allKeys := append([]string{result.ConversationID, responseID, sessionKey}, fps...)
+	conversations.setTools(toolsFp, allKeys...)
 }
