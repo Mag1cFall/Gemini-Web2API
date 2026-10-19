@@ -879,7 +879,7 @@ func responseStatusError(resp *http.Response, operation string) *ProtocolError {
 		if isLoginRedirect(location) {
 			return &ProtocolError{
 				HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,
-				Message: fmt.Sprintf("gemini %s 登录态失效，被重定向到登录页（HTTP %d 重定向到 %s）", operation, resp.StatusCode, location.String()),
+				Message: fmt.Sprintf("gemini %s 登录态失效或账号序号偏移（HTTP %d 重定向到 %s）", operation, resp.StatusCode, location.String()),
 			}
 		}
 	}
@@ -894,6 +894,11 @@ func isLoginRedirect(location *url.URL) bool {
 	path := strings.ToLower(location.Path)
 	if strings.Contains(host, "accounts.google.com") {
 		if strings.Contains(path, "servicelogin") || strings.Contains(path, "interactivelogin") || strings.Contains(path, "signin") || strings.Contains(location.RawQuery, "continue=") {
+			return true
+		}
+	}
+	if strings.Contains(host, "gemini.google.com") {
+		if path == "/app" || path == "/" || strings.HasPrefix(path, "/u/") {
 			return true
 		}
 	}
