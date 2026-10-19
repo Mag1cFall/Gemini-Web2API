@@ -105,6 +105,36 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 	return "\n\n" + strings.Join(sections, "\n\n"), nil
 }
 
+// ContinuationSuffix 返回多轮续接时追加到增量提示词的精简协议约束，省略重复的工具 Schema 定义
+func (b ToolBridge) ContinuationSuffix() string {
+	if strings.EqualFold(strings.TrimSpace(b.Choice), "none") {
+		return "\n\n本次请求根据对话和已有工具结果直接回答；禁止调用函数工具、代码执行、Google 搜索和图片生成"
+	}
+	var sections []string
+	if len(b.Definitions) > 0 {
+		choice := strings.TrimSpace(b.Choice)
+		if choice == "" {
+			choice = "auto"
+		}
+		rule := "需要调用工具时，只输出一个 JSON 对象；无需调用工具时，直接输出正常回答"
+		switch strings.ToLower(choice) {
+		case "required", "any":
+			rule = "必须调用一个可用工具，只输出一个 JSON 对象"
+		case "auto":
+		default:
+			rule = fmt.Sprintf("必须调用工具 %s，只输出一个 JSON 对象", choice)
+		}
+		sections = append(sections, fmt.Sprintf("工具协议（沿用上一轮工具定义）：\n%s，格式必须为 {\"tool_calls\":[{\"name\":\"工具名称\",\"arguments\":{}}]}，不要输出 Markdown 代码块或额外文字", rule))
+	}
+	if len(b.JSONSchema) > 0 {
+		sections = append(sections, "结构化输出协议：只输出符合 JSON Schema 的 JSON 值，不要输出 Markdown 代码块或额外文字")
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return "\n\n" + strings.Join(sections, "\n\n")
+}
+
 // Parse 解析严格工具调用并验证结构化输出
 func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	trimmed := stripJSONFence(strings.TrimSpace(text))

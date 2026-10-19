@@ -85,6 +85,7 @@ type chromeProfile struct {
 	Email       string `json:"email"`
 	Importable  bool   `json:"importable"`
 	Imported    bool   `json:"imported"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 func (h *handler) chromeProfiles(c *gin.Context) {
@@ -97,7 +98,7 @@ func (h *handler) chromeProfiles(c *gin.Context) {
 	for _, account := range discovered {
 		profiles = append(profiles, chromeProfile{
 			ID: chromeauth.AccountID(account.Email), Profile: account.Profile, DisplayName: account.DisplayName,
-			Email: account.Email, Importable: account.Importable, Imported: account.Imported,
+			Email: account.Email, Importable: account.Importable, Imported: account.Imported, Reason: account.Reason,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"profiles": profiles})

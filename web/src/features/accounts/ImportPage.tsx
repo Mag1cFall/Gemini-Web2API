@@ -85,9 +85,15 @@ function ChromeImport() {
                 </span>
                 {profile.imported ? (
                   <Badge tone="neutral">{m.imported}</Badge>
-                ) : (
-                  !profile.importable && <Badge tone="warning">{m.notSignedIn}</Badge>
-                )}
+                ) : !profile.importable ? (
+                  <Badge tone="warning">
+                    {profile.reason === 'missing_token'
+                      ? m.missingToken
+                      : profile.reason === 'needs_reauth'
+                        ? m.needsReauth
+                        : m.notSignedIn}
+                  </Badge>
+                ) : null}
               </label>
             </li>
           ))}

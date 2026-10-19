@@ -70,10 +70,23 @@ func discoverPlatform(chromeRoot string) ([]Account, error) {
 				continue
 			}
 			seen[identity.GaiaID] = true
-			_, encrypted, bindingKey, tokenErr := readTokenService(chromeRoot, profile, identity.GaiaID)
+			_, encrypted, _, tokenErr := readTokenService(chromeRoot, profile, identity.GaiaID)
+			importable := tokenErr == nil && strings.HasPrefix(string(encrypted), "v20")
+			reason := ""
+			if !importable {
+				if tokenErr != nil {
+					if strings.Contains(tokenErr.Error(), "没有账号") {
+						reason = "not_signed_in"
+					} else {
+						reason = "missing_token"
+					}
+				} else {
+					reason = "needs_reauth"
+				}
+			}
 			accounts = append(accounts, Account{
 				Profile: profile, GaiaID: identity.GaiaID, DisplayName: info.Name, Email: identity.Email,
-				Importable: tokenErr == nil && strings.HasPrefix(string(encrypted), "v20") && len(bindingKey) != 0,
+				Importable: importable, Reason: reason,
 			})
 		}
 	}
@@ -104,7 +117,7 @@ func profileIdentities(chromeRoot string, profile string) ([]profileIdentity, er
 // readTokenService 读取 Profile 中指定 Gaia ID 账号的 refresh token 与设备绑定密钥
 func readTokenService(chromeRoot string, profile string, gaiaID string) (string, []byte, []byte, error) {
 	databasePath := filepath.Join(chromeRoot, profile, "Web Data")
-	uri := "file:" + filepath.ToSlash(databasePath) + "?mode=ro&immutable=1"
+	uri := "file:" + filepath.ToSlash(databasePath) + "?mode=ro"
 	database, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("打开 %s Web Data: %w", profile, err)
@@ -129,7 +142,7 @@ func readTokenService(chromeRoot string, profile string, gaiaID string) (string,
 	if err := rows.Scan(&service, &encryptedToken, &bindingKey); err != nil {
 		return "", nil, nil, fmt.Errorf("解析 %s token_service: %w", profile, err)
 	}
-	if len(encryptedToken) == 0 || len(bindingKey) == 0 {
+	if len(encryptedToken) == 0 {
 		return "", nil, nil, fmt.Errorf("%s 的 token_service 缺少认证材料", profile)
 	}
 	return strings.TrimPrefix(service, "AccountId-"), encryptedToken, bindingKey, nil

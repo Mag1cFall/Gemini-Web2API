@@ -74,6 +74,7 @@ export interface ChromeProfile {
   email: string
   importable: boolean
   imported: boolean
+  reason?: string
 }
 
 // ChromeProfiles 对应 GET /api/accounts/import/chrome 的响应

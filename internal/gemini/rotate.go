@@ -104,7 +104,14 @@ func (r *CookieRotator) rotateSession(ctx context.Context) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if signedIn || !listed {
+		if signedIn {
+			return !first, nil
+		}
+		if !listed {
+			// 没有 accounts.google.com Cookie 的纯 Cookie 导入账号，不主动触发 reload 避免引爆 302
+			if c.refresh == nil {
+				return false, nil
+			}
 			return !first, nil
 		}
 		if c.refresh == nil {

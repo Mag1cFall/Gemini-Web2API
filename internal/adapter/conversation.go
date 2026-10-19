@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -214,6 +215,16 @@ func (r *conversationRegistry) cleanupLocked(now time.Time) {
 	}
 }
 
+func (r *conversationRegistry) has(key string) bool {
+	if key == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.states[key]
+	return ok && time.Now().Before(entry.expiresAt)
+}
+
 func conversationKey(previousResponseID string, conversationID string, headerValue string) string {
 	if previousResponseID != "" {
 		return previousResponseID
@@ -222,4 +233,24 @@ func conversationKey(previousResponseID string, conversationID string, headerVal
 		return conversationID
 	}
 	return headerValue
+}
+
+func extractHeaderSessionKey(c interface{ GetHeader(string) string }) string {
+	if c == nil {
+		return ""
+	}
+	for _, header := range []string{
+		"X-Conversation-ID",
+		"Conversation-ID",
+		"X-Session-ID",
+		"Session-ID",
+		"X-Chat-ID",
+		"Chat-ID",
+		"anthropic-session-id",
+	} {
+		if val := strings.TrimSpace(c.GetHeader(header)); val != "" {
+			return val
+		}
+	}
+	return ""
 }

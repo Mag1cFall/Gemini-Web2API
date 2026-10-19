@@ -215,9 +215,6 @@ func runGenerationAttempts(
 	}
 
 	requestAttempts := 1
-	if sessionKey == "" || newSession {
-		requestAttempts = 2
-	}
 	excludedAccountIDs := make(map[string]struct{})
 	availableAccounts := pool.Size()
 	if availableAccounts == 0 {
@@ -406,9 +403,9 @@ func runGenerationWithClient(
 	if accumulator.Usage == nil {
 		accumulator.Usage = estimatedUsage(accumulator, promptTokens)
 	}
-	nextContextTokens := accumulator.Usage.TotalTokens
+	nextContextTokens := accumulator.Usage.PromptTokens + accumulator.Usage.CompletionTokens
 	primary := accumulator.Primary()
-	if primary.Text != "" || primary.Thought != "" || len(primary.Codes) > 0 || len(primary.Media) > 0 {
+	if primary.Text != "" || len(primary.Codes) > 0 || len(primary.Media) > 0 {
 		nextContextTokens++
 	}
 

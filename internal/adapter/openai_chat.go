@@ -1,6 +1,8 @@
 package adapter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -126,7 +128,15 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
-		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, c.GetHeader("X-Conversation-ID"))
+		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, extractHeaderSessionKey(c))
+		if sessionKey == "" && len(request.Messages) > 1 {
+			if lastIdx := findLastAssistantIndex(request.Messages); lastIdx >= 0 {
+				fp := openAIMessagesFingerprint(request.Messages[:lastIdx+1])
+				if conversations.has(fp) {
+					sessionKey = fp
+				}
+			}
+		}
 		allowNewSession := request.PreviousResponseID == ""
 		responseID := fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
@@ -204,6 +214,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					return
 				}
 				usage = addUsage(usage, result.Accumulator.Usage)
+				bindNextOpenAIFingerprint(pool, request.Messages, result)
 			}
 			recordChoiceUsage(c, n, usage)
 			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && usage != nil {
@@ -232,6 +243,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				return
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
+			bindNextOpenAIFingerprint(pool, request.Messages, result)
 			if response == nil {
 				response = built
 				continue
@@ -320,9 +332,14 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	if err != nil {
 		return "", nil, err
 	}
-	suffix, err := bridge.PromptSuffix()
-	if err != nil {
-		return "", nil, err
+	var suffix string
+	if continuation {
+		suffix = bridge.ContinuationSuffix()
+	} else {
+		suffix, err = bridge.PromptSuffix()
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	return transcript + suffix, files, nil
 }
@@ -626,5 +643,57 @@ func openAIUsage(usage *gemini.Usage) gin.H {
 	return gin.H{
 		"prompt_tokens": usage.PromptTokens, "completion_tokens": usage.OutputTokens(), "total_tokens": usage.TotalTokens,
 		"prompt_tokens_details": gin.H{"cached_tokens": 0}, "completion_tokens_details": gin.H{"reasoning_tokens": usage.ThoughtTokens},
+	}
+}
+
+func findLastAssistantIndex(messages []ChatMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" || messages[i].Role == "model" {
+			return i
+		}
+	}
+	return -1
+}
+
+func openAIMessagesFingerprint(messages []ChatMessage) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	for _, m := range messages {
+		h.Write([]byte(m.Role))
+		h.Write([]byte{0})
+		h.Write(m.Content)
+		h.Write([]byte{0})
+		h.Write([]byte(m.ToolCallID))
+		h.Write([]byte{0})
+		for _, tc := range m.ToolCalls {
+			h.Write([]byte(tc.ID))
+			h.Write([]byte(tc.Function.Name))
+			h.Write([]byte(tc.Function.Arguments))
+		}
+		h.Write([]byte{0xFF})
+	}
+	sum := h.Sum(nil)
+	return "fp_oai_" + hex.EncodeToString(sum[:16])
+}
+
+func bindNextOpenAIFingerprint(pool *balancer.AccountPool, messages []ChatMessage, result generationResult) {
+	if result.ConversationID == "" {
+		return
+	}
+	primary := result.Accumulator.Primary()
+	if primary.Text == "" && len(primary.Codes) == 0 {
+		return
+	}
+	assistantContent, err := json.Marshal(primary.Text)
+	if err != nil {
+		return
+	}
+	nextMessages := append(messages, ChatMessage{Role: "assistant", Content: assistantContent})
+	nextFp := openAIMessagesFingerprint(nextMessages)
+	if state, accountID, ctxTokens, ok := conversations.get(result.ConversationID); ok {
+		conversations.put(state, accountID, ctxTokens, nextFp)
+		pool.BindSession(nextFp, accountID)
 	}
 }

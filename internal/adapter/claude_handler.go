@@ -3,6 +3,7 @@ package adapter
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -54,7 +55,15 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 		setUnsupportedParameters(c, unsupportedClaudeParameters(request))
-		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, c.GetHeader("X-Conversation-ID"))
+		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, extractHeaderSessionKey(c))
+		if sessionKey == "" && len(request.Messages) > 1 {
+			if lastIdx := findLastClaudeAssistantIndex(request.Messages); lastIdx >= 0 {
+				fp := claudeMessagesFingerprint(request.System, request.Messages[:lastIdx+1])
+				if conversations.has(fp) {
+					sessionKey = fp
+				}
+			}
+		}
 		responseID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 
 		if request.Stream {
@@ -163,6 +172,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			if len(calls) > 0 {
 				stopReason = "tool_use"
 			}
+			bindNextClaudeFingerprint(pool, request.System, request.Messages, result)
 			_ = processor.Finish(stopReason)
 			return
 		}
@@ -241,6 +251,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
 		c.Header("X-Provider-Model", result.ProviderModel)
+		bindNextClaudeFingerprint(pool, request.System, request.Messages, result)
 		c.JSON(http.StatusOK, response)
 	}
 }
@@ -308,9 +319,14 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 	if err != nil {
 		return "", nil, err
 	}
-	suffix, err := bridge.PromptSuffix()
-	if err != nil {
-		return "", nil, err
+	var suffix string
+	if continuation {
+		suffix = bridge.ContinuationSuffix()
+	} else {
+		suffix, err = bridge.PromptSuffix()
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	return transcript + suffix, files, nil
 }
@@ -392,4 +408,52 @@ func unsupportedClaudeParameters(request claude.ClaudeRequest) []string {
 func thinkingSignature(messageID string, blockIndex int) string {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", messageID, blockIndex)))
 	return base64.StdEncoding.EncodeToString(digest[:])
+}
+
+func findLastClaudeAssistantIndex(messages []claude.Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return i
+		}
+	}
+	return -1
+}
+
+func claudeMessagesFingerprint(system json.RawMessage, messages []claude.Message) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	if len(system) > 0 {
+		h.Write(system)
+		h.Write([]byte{0xFF})
+	}
+	for _, m := range messages {
+		h.Write([]byte(m.Role))
+		h.Write([]byte{0})
+		h.Write(m.Content)
+		h.Write([]byte{0xFF})
+	}
+	sum := h.Sum(nil)
+	return "fp_cld_" + hex.EncodeToString(sum[:16])
+}
+
+func bindNextClaudeFingerprint(pool *balancer.AccountPool, system json.RawMessage, messages []claude.Message, result generationResult) {
+	if result.ConversationID == "" {
+		return
+	}
+	primary := result.Accumulator.Primary()
+	if primary.Text == "" && len(primary.Codes) == 0 {
+		return
+	}
+	assistantContent, err := json.Marshal(primary.Text)
+	if err != nil {
+		return
+	}
+	nextMessages := append(messages, claude.Message{Role: "assistant", Content: assistantContent})
+	nextFp := claudeMessagesFingerprint(system, nextMessages)
+	if state, accountID, ctxTokens, ok := conversations.get(result.ConversationID); ok {
+		conversations.put(state, accountID, ctxTokens, nextFp)
+		pool.BindSession(nextFp, accountID)
+	}
 }

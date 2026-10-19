@@ -34,6 +34,7 @@ type Account struct {
 	DisplayName string `json:"displayName"`
 	Email       string `json:"email"`
 	Importable  bool   `json:"importable"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 // ImportOptions 保存批量导入参数
