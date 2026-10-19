@@ -34,7 +34,7 @@ type ImportSource struct {
 type OAuthMaterial struct {
 	GaiaID            string `json:"gaiaId"`
 	RefreshToken      string `json:"refreshToken"`
-	WrappedBindingKey []byte `json:"wrappedBindingKey"`
+	WrappedBindingKey []byte `json:"wrappedBindingKey,omitempty"`
 }
 
 // Metadata 保存账号固定身份
@@ -320,7 +320,7 @@ func validateOAuthMaterial(material *OAuthMaterial) error {
 	if material == nil {
 		return nil
 	}
-	if strings.TrimSpace(material.GaiaID) == "" || strings.TrimSpace(material.RefreshToken) == "" || len(material.WrappedBindingKey) == 0 {
+	if strings.TrimSpace(material.GaiaID) == "" || strings.TrimSpace(material.RefreshToken) == "" {
 		return fmt.Errorf("OAuth 续签材料不完整")
 	}
 	return nil
