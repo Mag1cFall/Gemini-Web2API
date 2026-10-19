@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -45,6 +46,33 @@ type Metadata struct {
 	AuthUser int            `json:"authUser,omitempty"`
 	OAuth    *OAuthMaterial `json:"oauth,omitempty"`
 	Disabled bool           `json:"disabled,omitempty"`
+}
+
+// UnmarshalJSON 兼容数字与字符串形式的 authUser
+func (m *Metadata) UnmarshalJSON(data []byte) error {
+	type Alias Metadata
+	var aux struct {
+		Alias
+		RawAuthUser json.RawMessage `json:"authUser,omitempty"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*m = Metadata(aux.Alias)
+	if len(aux.RawAuthUser) > 0 {
+		var intVal int
+		if err := json.Unmarshal(aux.RawAuthUser, &intVal); err == nil {
+			m.AuthUser = intVal
+		} else {
+			var strVal string
+			if err := json.Unmarshal(aux.RawAuthUser, &strVal); err == nil {
+				if n, err := strconv.Atoi(strings.TrimSpace(strVal)); err == nil {
+					m.AuthUser = n
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // StorageState 是兼容 Playwright 的认证状态文件
