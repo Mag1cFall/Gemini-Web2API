@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -114,16 +115,64 @@ func profileIdentities(chromeRoot string, profile string) ([]profileIdentity, er
 	return preferences.Accounts, nil
 }
 
-// readTokenService 读取 Profile 中指定 Gaia ID 账号的 refresh token 与设备绑定密钥
-func readTokenService(chromeRoot string, profile string, gaiaID string) (string, []byte, []byte, error) {
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func openWebData(chromeRoot string, profile string) (*sql.DB, func(), error) {
 	databasePath := filepath.Join(chromeRoot, profile, "Web Data")
+	cleanup := func() {}
+
+	// 当 Chrome 正在运行时，直接以 mode=ro 打开 Web Data 会触发 SQLITE_BUSY (database is locked)。
+	// 为此将 Web Data 及其 WAL 文件拷贝到临时文件后再打开，既能读取最新的 WAL 提交，又避开了 Chrome 的排他锁。
+	tempDir, err := os.MkdirTemp("", "gemini-web2api-webdata-*")
+	if err == nil {
+		tempDb := filepath.Join(tempDir, "Web Data")
+		if copyFile(databasePath, tempDb) == nil {
+			_ = copyFile(databasePath+"-wal", tempDb+"-wal")
+			_ = copyFile(databasePath+"-shm", tempDb+"-shm")
+			databasePath = tempDb
+			cleanup = func() {
+				_ = os.RemoveAll(tempDir)
+			}
+		} else {
+			_ = os.RemoveAll(tempDir)
+		}
+	}
+
 	uri := "file:" + filepath.ToSlash(databasePath) + "?mode=ro"
 	database, err := sql.Open("sqlite", uri)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("打开 %s Web Data: %w", profile, err)
+		cleanup()
+		return nil, nil, fmt.Errorf("打开 %s Web Data: %w", profile, err)
 	}
-	defer database.Close()
 	database.SetMaxOpenConns(1)
+	return database, func() {
+		database.Close()
+		cleanup()
+	}, nil
+}
+
+// readTokenService 读取 Profile 中指定 Gaia ID 账号的 refresh token 与设备绑定密钥
+func readTokenService(chromeRoot string, profile string, gaiaID string) (string, []byte, []byte, error) {
+	database, closeDb, err := openWebData(chromeRoot, profile)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	defer closeDb()
 
 	rows, err := database.Query("SELECT service, encrypted_token, binding_key FROM token_service WHERE service = ?", "AccountId-"+gaiaID)
 	if err != nil {
