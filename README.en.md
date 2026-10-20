@@ -100,7 +100,7 @@ An account can also be selected directly. When a profile is signed in to several
 .\gemini-web2api.exe setup --email "name@example.com"
 ```
 
-You can also paste the one-line value of a request's `Cookie` header. This state works while those cookies remain valid and cannot perform device-bound renewal:
+You can also paste the one-line value of a request's `Cookie` header. This state works while those cookies remain valid and cannot perform OAuth renewal:
 
 ```powershell
 .\gemini-web2api.exe setup --cookie "SAPISID=...; __Secure-1PSID=..." --id account-name
@@ -124,13 +124,13 @@ When the service runs on a server without Chrome, generate a pairing token on th
 .\gemini-web2api.exe setup --email "name@example.com" --remote https://example.com
 ```
 
-Setup creates `auth/<account>/storage-state.json` and verifies the live model catalog. Chrome import also saves the device-bound material needed to renew cookies after Chrome exits. Daily startup is:
+Setup creates `auth/<account>/storage-state.json` and verifies the live model catalog. Chrome import also saves the OAuth renewal material needed to renew cookies after Chrome exits. Daily startup is:
 
 ```powershell
 .\gemini-web2api.exe
 ```
 
-The default auth directory is `auth`, and the default listener is `127.0.0.1:8007`. Linux and macOS can use existing cookies copied in an `auth` directory; device-bound renewal requires setup on the original Windows device.
+The default auth directory is `auth`, and the default listener is `127.0.0.1:8007`. Linux and macOS can use existing cookies copied in an `auth` directory; renewal requires setup on the original Windows device.
 
 While running, the service rotates each account's sign-in cookies every 10 minutes, as the Gemini website does. Cookies that change in a response are written back to `auth/<account>/storage-state.json` and reused after a restart. Chrome-imported accounts renew automatically when their session expires.
 
@@ -211,7 +211,7 @@ GET    /v1/models
 ```
 
 - **Responses**: stored in `data/requests.db` by default and can be retrieved, have their input items listed, and be deleted; `store: false` skips storage. `background: true` returns `queued` immediately for later polling or cancellation
-- **Continuation**: `previous_response_id` and conversation IDs keep working across service restarts within `SESSION_TTL`
+- **Continuation**: `previous_response_id` and conversation IDs keep working across service restarts within `SESSION_TTL`; clients that resend the full history continue the same web conversation and send only the new messages when the history matches the previous answer
 - **Files**: uploaded files are stored in `data/files/` and referenced from generation requests by `file_id`
 - **Speech**: `/v1/audio/speech` uses the website's read-aloud feature and returns mp3, opus, wav, flac, or pcm; `voice` and `speed` have no effect
 - **Transcription and translation**: performed by the selected chat model

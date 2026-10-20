@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,32 +66,24 @@ func discoverPlatform(chromeRoot string) ([]Account, error) {
 			accounts = append(accounts, Account{Profile: profile, DisplayName: info.Name, Email: info.UserName})
 			continue
 		}
-		tokens, dbErr := readProfileTokens(chromeRoot, profile)
+		records, recordsErr := readTokenServices(chromeRoot, profile)
 		seen := make(map[string]bool, len(identities))
 		for _, identity := range identities {
 			if identity.GaiaID == "" || seen[identity.GaiaID] {
 				continue
 			}
 			seen[identity.GaiaID] = true
-			encrypted, hasToken := tokens[identity.GaiaID]
-			importable := dbErr == nil && hasToken && strings.HasPrefix(string(encrypted), "v20")
-			reason := ""
-			if !importable {
-				switch {
-				case dbErr != nil:
-					reason = "missing_token"
-				case !hasToken:
-					reason = "not_signed_in"
-				case len(encrypted) == 0:
-					reason = "missing_token"
-				default:
-					reason = "needs_reauth"
-				}
+			record, found := records[identity.GaiaID]
+			account := Account{Profile: profile, GaiaID: identity.GaiaID, DisplayName: info.Name, Email: identity.Email}
+			switch {
+			case recordsErr != nil:
+				account.Reason = ReasonReadFailed
+			case found && !strings.HasPrefix(string(record.encryptedToken), "v20"):
+				account.Reason = ReasonNeedsReauth
+			default:
+				account.Importable = found
 			}
-			accounts = append(accounts, Account{
-				Profile: profile, GaiaID: identity.GaiaID, DisplayName: info.Name, Email: identity.Email,
-				Importable: importable, Reason: reason,
-			})
+			accounts = append(accounts, account)
 		}
 	}
 	return accounts, nil
@@ -117,115 +110,99 @@ func profileIdentities(chromeRoot string, profile string) ([]profileIdentity, er
 	return preferences.Accounts, nil
 }
 
-func copyFile(src, dst string) error {
+// copyFile 把 src 复制为 dst
+func copyFile(src string, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-
 	_, err = io.Copy(out, in)
 	return err
 }
 
-func openWebData(chromeRoot string, profile string) (*sql.DB, func(), error) {
-	databasePath := filepath.Join(chromeRoot, profile, "Web Data")
-	cleanup := func() {}
-	uri := "file:" + filepath.ToSlash(databasePath) + "?mode=ro&immutable=1"
-
-	// 当 Chrome 正在运行时，直接以 mode=ro 打开 Web Data 会触发 SQLITE_BUSY (database is locked)。
-	// 为此将 Web Data 及其 WAL 文件拷贝到临时文件后再打开，既能由 SQLite 自动重建索引读取最新的 WAL 提交，又避开了 Chrome 的排他锁。
-	if tempDir, err := os.MkdirTemp("", "gemini-web2api-webdata-*"); err == nil {
-		tempDb := filepath.Join(tempDir, "Web Data")
-		if copyFile(databasePath, tempDb) == nil {
-			_ = copyFile(databasePath+"-wal", tempDb+"-wal")
-			uri = "file:" + filepath.ToSlash(tempDb)
-			cleanup = func() {
-				_ = os.RemoveAll(tempDir)
-			}
-		} else {
-			_ = os.RemoveAll(tempDir)
-		}
-	}
-
-	database, err := sql.Open("sqlite", uri)
+// openWebData 把 Profile 的 Web Data 与其 WAL 日志复制到临时目录后只读打开，绕过运行中 Chrome 的排他锁并包含尚未检查点的写入
+func openWebData(chromeRoot string, profile string) (database *sql.DB, closeDatabase func(), err error) {
+	tempDir, err := os.MkdirTemp("", "gemini-web2api-webdata-*")
 	if err != nil {
-		cleanup()
+		return nil, nil, fmt.Errorf("创建 Web Data 临时目录: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			os.RemoveAll(tempDir)
+		}
+	}()
+	databasePath := filepath.Join(chromeRoot, profile, "Web Data")
+	copyPath := filepath.Join(tempDir, "Web Data")
+	if err = copyFile(databasePath, copyPath); err != nil {
+		return nil, nil, fmt.Errorf("复制 %s Web Data: %w", profile, err)
+	}
+	if err = copyFile(databasePath+"-wal", copyPath+"-wal"); err != nil && !os.IsNotExist(err) {
+		return nil, nil, fmt.Errorf("复制 %s Web Data-wal: %w", profile, err)
+	}
+	uri := url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(copyPath), RawQuery: "mode=ro"}
+	if database, err = sql.Open("sqlite", uri.String()); err != nil {
 		return nil, nil, fmt.Errorf("打开 %s Web Data: %w", profile, err)
 	}
 	database.SetMaxOpenConns(1)
 	return database, func() {
 		database.Close()
-		cleanup()
+		os.RemoveAll(tempDir)
 	}, nil
 }
 
-// readProfileTokens 一次性读取指定 Profile 中全部账号的 encrypted_token，避免多账号循环重复拷贝数据库
-func readProfileTokens(chromeRoot string, profile string) (map[string][]byte, error) {
-	database, closeDb, err := openWebData(chromeRoot, profile)
+// tokenRecord 是 token_service 中一个账号的加密 refresh token 与 wrapped binding key
+type tokenRecord struct {
+	encryptedToken []byte
+	bindingKey     []byte
+}
+
+// readTokenServices 读取 Profile 中全部 Google 账号的 token_service 记录，键为 Gaia ID
+func readTokenServices(chromeRoot string, profile string) (map[string]tokenRecord, error) {
+	database, closeDatabase, err := openWebData(chromeRoot, profile)
 	if err != nil {
 		return nil, err
 	}
-	defer closeDb()
-
-	rows, err := database.Query("SELECT service, encrypted_token FROM token_service")
+	defer closeDatabase()
+	rows, err := database.Query("SELECT service, encrypted_token, binding_key FROM token_service WHERE service LIKE 'AccountId-%'")
 	if err != nil {
 		return nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
 	}
 	defer rows.Close()
-
-	tokens := make(map[string][]byte)
+	records := map[string]tokenRecord{}
 	for rows.Next() {
 		var service string
-		var encryptedToken []byte
-		if err := rows.Scan(&service, &encryptedToken); err != nil {
+		var record tokenRecord
+		if err := rows.Scan(&service, &record.encryptedToken, &record.bindingKey); err != nil {
 			return nil, fmt.Errorf("解析 %s token_service: %w", profile, err)
 		}
-		if gaiaID, ok := strings.CutPrefix(service, "AccountId-"); ok && gaiaID != "" {
-			tokens[gaiaID] = encryptedToken
-		}
+		records[strings.TrimPrefix(service, "AccountId-")] = record
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
 	}
-	return tokens, nil
+	return records, nil
 }
 
-// readTokenService 读取 Profile 中指定 Gaia ID 账号的 refresh token 与设备绑定密钥
+// readTokenService 返回一个账号的 Gaia ID、加密 refresh token 与 wrapped binding key
 func readTokenService(chromeRoot string, profile string, gaiaID string) (string, []byte, []byte, error) {
-	database, closeDb, err := openWebData(chromeRoot, profile)
+	records, err := readTokenServices(chromeRoot, profile)
 	if err != nil {
 		return "", nil, nil, err
 	}
-	defer closeDb()
-
-	rows, err := database.Query("SELECT service, encrypted_token, binding_key FROM token_service WHERE service = ?", "AccountId-"+gaiaID)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return "", nil, nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
-		}
+	record, found := records[gaiaID]
+	if !found {
 		return "", nil, nil, fmt.Errorf("%s 的 token_service 没有账号 %s", profile, gaiaID)
 	}
-	var service string
-	var encryptedToken []byte
-	var bindingKey []byte
-	if err := rows.Scan(&service, &encryptedToken, &bindingKey); err != nil {
-		return "", nil, nil, fmt.Errorf("解析 %s token_service: %w", profile, err)
-	}
-	if len(encryptedToken) == 0 {
+	if len(record.encryptedToken) == 0 {
 		return "", nil, nil, fmt.Errorf("%s 的 token_service 缺少认证材料", profile)
 	}
-	return strings.TrimPrefix(service, "AccountId-"), encryptedToken, bindingKey, nil
+	return gaiaID, record.encryptedToken, record.bindingKey, nil
 }
 
 func readProfileLanguage(chromeRoot string, profile string) (string, error) {

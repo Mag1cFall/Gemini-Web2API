@@ -100,7 +100,7 @@ Windows 便携包为桌面版可执行文件与 README、LICENSE、`.env.example
 | 中间件 | `internal/adapter/middleware.go` | 跨域、请求 ID、跟踪、账本、鉴权 |
 | 协议解析 | `internal/adapter` 各处理文件 | 请求转为统一生成参数 |
 | 提示词 | `internal/adapter/prompt.go`、`tool_bridge.go` | 消息序列与工具契约 |
-| 会话 | `internal/adapter/conversation.go` | 会话键与网页会话三元组 |
+| 会话 | `internal/adapter/conversation.go`、`history.go` | 会话键、网页会话三元组与按历史续接的会话键 |
 | 选号与重试 | `internal/adapter/stream.go` | 按模型选账号，可重试错误换号 |
 | 调度 | `internal/balancer/balancer.go` | 账号状态、冷却、会话粘连 |
 | 上游请求 | `internal/gemini/client.go`、`request.go`、`payload.go` | 请求槽、header、99 槽载荷 |

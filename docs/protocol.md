@@ -280,15 +280,18 @@ payload = [
 
 ```text
 Local State ──► App-Bound 主密钥
-Web Data   ──► v20 refresh token + wrapped binding key
+Web Data   ──► v20 refresh token + wrapped binding key（可为空）
 Preferences ─► Accept-Language
                        │
-                       ▼
-OAuthMultilogin challenge
-                       │ ES256 设备绑定断言
-                       ▼
-OAuthMultilogin directed response
-	                       │ 逐个 HPKE 解密 cookies[].value
+                       ├─ 有 binding key
+                       │    ▼
+                       │  OAuthMultilogin challenge
+                       │    │ ES256 设备绑定断言
+                       │    ▼
+                       │  OAuthMultilogin directed response
+                       │    │ 逐个 HPKE 解密 cookies[].value
+                       │    ▼
+                       └─ 没有 binding key：MultiBearer 头的 OAuthMultilogin 返回明文 Cookie
                        ▼
 完整 Google Cookie
 ```
@@ -299,7 +302,7 @@ OAuthMultilogin directed response
 | `geminiWeb2api.id` | 本地账号标识 |
 | `proxy` | 账号固定出口，`direct` 为直连 |
 | `language` | 请求的 `Accept-Language` |
-| `oauth` | Gaia ID、refresh token、wrapped binding key |
+| `oauth` | Gaia ID、refresh token、wrapped binding key（可为空） |
 
 ### Chrome 本地材料
 
@@ -307,10 +310,10 @@ OAuthMultilogin directed response
 | --- | --- |
 | `Local State` | `profile.info_cache`、`os_crypt.app_bound_encrypted_key` |
 | Profile `Preferences` | `account_info[].gaia`、`account_info[].email`：Profile 中登录的全部账号 |
-| Profile `Web Data` | `SELECT service, encrypted_token, binding_key FROM token_service WHERE service = 'AccountId-GAIA_ID'` |
+| Profile `Web Data` | `SELECT service, encrypted_token, binding_key FROM token_service WHERE service LIKE 'AccountId-%'` |
 | Profile `Preferences` | `intl.accept_languages`，回退 `intl.selected_languages`；按 Chrome 规则在地区语言后补基础语言、q 值从 0.9 起逐项减 0.1（最低 0.1），得到 `Accept-Language` |
 
-`token_service` 每个登录账号一行，`service` 形态为 `AccountId-GAIA_ID`；`account_info` 中没有对应行的账号不可导入。refresh token 密文形态为：
+Chrome 运行期间以排他锁打开 `Web Data`，程序把每个 Profile 的 `Web Data` 与 `Web Data-wal` 复制到临时目录后只读打开，读取后删除副本。`token_service` 每个登录账号一行，`service` 形态为 `AccountId-GAIA_ID`；`account_info` 中没有对应行的账号不可导入，refresh token 不以 `v20` 开头的账号需要在 Chrome 重新登录后导入。refresh token 密文形态为：
 
 ```text
 "v20" || NONCE_12_BYTES || AES_256_GCM_CIPHERTEXT_AND_TAG
@@ -330,12 +333,13 @@ AES-GCM 使用 32 字节 App-Bound 主密钥和空 AAD。解密结果必须为 1
 POST /oauth/multilogin?source=ChromiumAccountReconcilorDice&reuseCookies=0
 Host: accounts.google.com
 Authorization: MultiOAuth BASE64URL_PROTOBUF
+Authorization: MultiBearer REFRESH_TOKEN:GAIA_ID
 Content-Type: application/x-www-form-urlencoded
 User-Agent: Chrome/155
 Content-Length: 1
 ```
 
-`Authorization` 的无填充 Base64URL protobuf 结构为：
+设备绑定的账号使用 `MultiOAuth` 头，`token_service.binding_key` 为空的账号使用 `MultiBearer` 头，一次请求返回明文 Cookie。`MultiOAuth` 的无填充 Base64URL protobuf 结构为：
 
 ```proto
 message MultiOAuth {
@@ -663,7 +667,7 @@ sec-fetch-dest, sec-fetch-storage-access, referer, accept-encoding, accept-langu
 | `97` | 确认 Deep Research 计划时为 `[0,0]` |
 | `98` | `1` |
 
-`GEMINI_SAVE_HISTORY=false` 使用 Temporary Chat。显式网页 session 保存三元组与续接令牌并固定到产生它的账号；无 session 请求相互独立。客户端从会话最新一轮回答继续时按官网追问编码；从较早的回答继续时按官网“编辑该回答之后的提问”编码，从该回答分叉。
+`GEMINI_SAVE_HISTORY=false` 使用 Temporary Chat。显式网页 session 保存三元组与续接令牌并固定到产生它的账号。不带 session 的 Chat、Anthropic Messages 与 Responses 请求以 system、提示词中发送的函数定义（`tool_choice` 为 `none` 时不发送）、响应 JSON Schema 与最后一个 assistant 轮及之前的消息计算会话键；该键由本服务上一轮回答登记且所属账号有空闲请求槽时续接该网页 session，只发送最后一个 assistant 轮之后的消息，续接失败时新建会话发送完整历史；其余无 session 请求相互独立。登记的键按回答正文、渲染后的正文与带来源链接的正文各算一次，工具调用参数按键排序，工具调用 ID、思考块与 `cache_control` 不参与。客户端从会话最新一轮回答继续时按官网追问编码；从较早的回答继续时按官网“编辑该回答之后的提问”编码，从该回答分叉。
 
 ### 完整 `f.req` 编码
 
@@ -1191,7 +1195,7 @@ OpenAI Chat 与 Completions 的 `n` 大于 1 时与 `/v1/images` 一样逐个生
 需要调用工具时，只输出一个 JSON 对象，格式必须为 {"tool_calls":[{"name":"工具名称","arguments":{}}]}
 ```
 
-以上内容整体写入 Gemini Web 的普通提示词槽。`none` 使用对话与已有工具结果直接作答，提示中省略函数定义和调用格式，显式响应 JSON Schema 继续生效；`required`/`any` 要求调用任一声明工具，显式函数选择要求调用指定工具。支持 `previous_response_id` 或显式 conversation ID 的客户端会继续同一网页 session；无会话请求默认创建彼此独立的 Temporary Chat。
+以上内容整体写入 Gemini Web 的普通提示词槽。`none` 使用对话与已有工具结果直接作答，提示中省略函数定义和调用格式，显式响应 JSON Schema 继续生效；`required`/`any` 要求调用任一声明工具，显式函数选择要求调用指定工具。支持 `previous_response_id` 或显式 conversation ID 的客户端会继续同一网页 session，回传完整历史的客户端按会话键续接；续接时工具协议沿用会话前文的函数定义与 JSON Schema，只重申调用规则与格式。未续接的无会话请求默认创建彼此独立的 Temporary Chat。
 
 Google Search 与 Code Execution 由网页上游执行。Responses 的 `web_search_call` 根据 citations 输出 `completed` item；Code Execution 当前实测由 3.1 Pro 与 3.6 Flash 执行。
 

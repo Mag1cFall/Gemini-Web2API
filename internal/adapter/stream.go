@@ -199,6 +199,9 @@ func runGenerationAttempts(
 	if !pool.HasModel(requestedModel) {
 		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 404, Message: fmt.Sprintf("模型 %q 不可用", modelName)}
 	}
+	if isHistoryKey(sessionKey) && !pool.SessionIdle(sessionKey, requestedModel) {
+		sessionKey = ""
+	}
 	releaseSession := func() {}
 	if allowNewSession && sessionKey != "" {
 		var err error
@@ -215,6 +218,9 @@ func runGenerationAttempts(
 	}
 
 	requestAttempts := 1
+	if sessionKey == "" || newSession {
+		requestAttempts = 2
+	}
 	excludedAccountIDs := make(map[string]struct{})
 	availableAccounts := pool.Size()
 	if availableAccounts == 0 {
@@ -248,6 +254,15 @@ func runGenerationAttempts(
 		lastAccountID = accountID
 		if ctx.Err() != nil {
 			return generationResult{}, accountID, err
+		}
+		if isHistoryKey(sessionKey) && !newSession && (isAccountContextError(err) || retryableAccountError(err) && (hasVisibleOutput == nil || !hasVisibleOutput())) {
+			if retryableAccountError(err) && !isOutputMismatchError(err) {
+				pool.ReportFailure(accountID, requestedModel, err)
+			}
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
+			excludedAccountIDs[accountID] = struct{}{}
+			sessionKey, newSession, requestAttempts = "", true, 2
+			continue
 		}
 		if isAccountContextError(err) {
 			if sessionKey != "" && !newSession {
@@ -421,13 +436,14 @@ func runGenerationWithClient(
 			snapshot = conversation.Snapshot()
 		}
 		keys := []string{responseID, snapshot.CID}
-		if allowNewSession && sessionKey != "" {
+		remember := allowNewSession && sessionKey != "" && !isHistoryKey(sessionKey)
+		if remember {
 			keys = append(keys, sessionKey)
 		}
 		conversations.put(conversation, accountID, nextContextTokens, keys...)
 		pool.BindSession(responseID, accountID)
 		pool.BindSession(snapshot.CID, accountID)
-		if allowNewSession && sessionKey != "" {
+		if remember {
 			pool.BindSession(sessionKey, accountID)
 		}
 		accumulator.Session = snapshot

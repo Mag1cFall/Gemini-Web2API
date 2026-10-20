@@ -87,8 +87,8 @@ function ChromeImport() {
                   <Badge tone="neutral">{m.imported}</Badge>
                 ) : !profile.importable ? (
                   <Badge tone="warning">
-                    {profile.reason === 'missing_token'
-                      ? m.missingToken
+                    {profile.reason === 'read_failed'
+                      ? m.readFailed
                       : profile.reason === 'needs_reauth'
                         ? m.needsReauth
                         : m.notSignedIn}

@@ -3,10 +3,8 @@ package adapter
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -56,17 +54,13 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 		setUnsupportedParameters(c, unsupportedClaudeParameters(request))
-		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, extractHeaderSessionKey(c))
-		if sessionKey == "" && len(request.Messages) > 1 {
-			if lastIdx := findLastClaudeAssistantIndex(request.Messages); lastIdx >= 0 {
-				fp := claudeMessagesFingerprint(request.System, request.Messages[:lastIdx+1])
-				if conversations.has(fp) {
-					sessionKey = fp
-				}
-			}
-		}
-		if sessionKey != "" {
-			c.Set("session_key", sessionKey)
+		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, c.GetHeader("X-Conversation-ID"))
+		var system string
+		var turns []historyTurn
+		if sessionKey == "" {
+			system, _ = claude.ParseSystemPrompt(request.System)
+			turns = claudeHistoryTurns(request.Messages)
+			sessionKey = continuedHistoryKey(system, bridge, turns)
 		}
 		responseID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 
@@ -80,7 +74,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			result, accountID, err := runGeneration(
 				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-					return buildClaudePrompt(c, client, request, continuation, bridge)
+					return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 				}, func(event gemini.Event) error {
 					if event.Kind == gemini.EventMetadata && event.Usage != nil {
 						return processor.ProcessEvent(event)
@@ -118,6 +112,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				_ = processor.EmitError(streamFailure(c, err))
 				return
 			}
+			rememberHistory(pool, result, system, bridge, turns)
 			content, calls, err := bridge.Parse(primary.Text)
 			if err != nil {
 				_ = processor.EmitError(streamFailure(c, err))
@@ -176,7 +171,6 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			if len(calls) > 0 {
 				stopReason = "tool_use"
 			}
-			bindNextClaudeFingerprint(pool, request.System, request.Messages, sessionKey, responseID, result, bridge)
 			_ = processor.Finish(stopReason)
 			return
 		}
@@ -184,7 +178,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		result, accountID, err := runGeneration(
 			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-				return buildClaudePrompt(c, client, request, continuation, bridge)
+				return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 			}, nil, nil,
 		)
 		c.Set("account_id", accountID)
@@ -202,6 +196,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
+		rememberHistory(pool, result, system, bridge, turns)
 		content, calls, err := bridge.Parse(primary.Text)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
@@ -255,7 +250,6 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
 		c.Header("X-Provider-Model", result.ProviderModel)
-		bindNextClaudeFingerprint(pool, request.System, request.Messages, sessionKey, responseID, result, bridge)
 		c.JSON(http.StatusOK, response)
 	}
 }
@@ -323,18 +317,9 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 	if err != nil {
 		return "", nil, err
 	}
-	sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, extractHeaderSessionKey(c))
-	if sessionKey == "" && c != nil {
-		sessionKey = c.GetString("session_key")
-	}
-	var suffix string
-	if continuation && conversations.hasSameTools(sessionKey, bridge.fingerprint()) {
-		suffix = bridge.ContinuationSuffix()
-	} else {
-		suffix, err = bridge.PromptSuffix()
-		if err != nil {
-			return "", nil, err
-		}
+	suffix, err := bridge.PromptSuffix()
+	if err != nil {
+		return "", nil, err
 	}
 	return transcript + suffix, files, nil
 }
@@ -416,168 +401,4 @@ func unsupportedClaudeParameters(request claude.ClaudeRequest) []string {
 func thinkingSignature(messageID string, blockIndex int) string {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", messageID, blockIndex)))
 	return base64.StdEncoding.EncodeToString(digest[:])
-}
-
-func findLastClaudeAssistantIndex(messages []claude.Message) int {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" {
-			return i
-		}
-	}
-	return -1
-}
-
-func writeCanonicalClaudeContent(h io.Writer, raw json.RawMessage) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return
-	}
-	var str string
-	if err := json.Unmarshal(raw, &str); err == nil {
-		if trimmed := strings.TrimSpace(str); trimmed != "" {
-			_, _ = io.WriteString(h, "text:")
-			_, _ = io.WriteString(h, trimmed)
-			_, _ = h.Write([]byte{0})
-		}
-		return
-	}
-	var blocks []claude.ContentBlock
-	if err := json.Unmarshal(raw, &blocks); err == nil {
-		var textBuf strings.Builder
-		flushText := func() {
-			if trimmed := strings.TrimSpace(textBuf.String()); trimmed != "" {
-				_, _ = io.WriteString(h, "text:")
-				_, _ = io.WriteString(h, trimmed)
-				_, _ = h.Write([]byte{0})
-			}
-			textBuf.Reset()
-		}
-		for _, b := range blocks {
-			switch b.Type {
-			case "thinking", "redacted_thinking", "server_tool_use", "web_search_tool_result":
-				continue
-			case "text":
-				textBuf.WriteString(b.Text)
-			case "tool_use":
-				flushText()
-				_, _ = io.WriteString(h, "tool_use:")
-				_, _ = io.WriteString(h, b.Name)
-				_, _ = h.Write([]byte{0})
-				if b.Input != nil {
-					if inputBytes, err := json.Marshal(b.Input); err == nil {
-						_, _ = h.Write(inputBytes)
-					}
-				}
-				_, _ = h.Write([]byte{0})
-			case "tool_result":
-				flushText()
-				_, _ = io.WriteString(h, "tool_result:")
-				_, _ = io.WriteString(h, b.ToolUseID)
-				_, _ = h.Write([]byte{0})
-				_, _ = h.Write(canonicalJSONBytes(b.Content))
-				_, _ = h.Write([]byte{0})
-			default:
-				flushText()
-				_, _ = io.WriteString(h, b.Type)
-				_, _ = h.Write([]byte{0})
-				_, _ = h.Write(canonicalJSONBytes(b.Content))
-				_, _ = h.Write([]byte{0})
-			}
-		}
-		flushText()
-		return
-	}
-	_, _ = h.Write(canonicalJSONBytes(raw))
-}
-
-func claudeMessagesFingerprint(system json.RawMessage, messages []claude.Message) string {
-	if len(messages) == 0 {
-		return ""
-	}
-	h := sha256.New()
-	if len(system) > 0 {
-		if sysText, err := claude.ParseSystemPrompt(system); err == nil && strings.TrimSpace(sysText) != "" {
-			_, _ = io.WriteString(h, strings.TrimSpace(sysText))
-			_, _ = h.Write([]byte{0xFF})
-		}
-	}
-	for _, m := range messages {
-		_, _ = io.WriteString(h, m.Role)
-		_, _ = h.Write([]byte{0})
-		writeCanonicalClaudeContent(h, m.Content)
-		_, _ = h.Write([]byte{0xFF})
-	}
-	sum := h.Sum(nil)
-	return "fp_cld_" + hex.EncodeToString(sum[:16])
-}
-
-func bindNextClaudeFingerprint(pool *balancer.AccountPool, system json.RawMessage, messages []claude.Message, sessionKey string, responseID string, result generationResult, bridge ToolBridge) {
-	if result.ConversationID == "" {
-		return
-	}
-	toolsFp := bridge.fingerprint()
-	primary := result.Accumulator.Primary()
-	if primary.Text == "" && len(primary.Codes) == 0 {
-		conversations.setTools(toolsFp, result.ConversationID, responseID, sessionKey)
-		return
-	}
-	content, calls, err := bridge.Parse(primary.Text)
-	if err != nil {
-		content = primary.Text
-		calls = nil
-	}
-	rendered := renderCandidateMarkdown(content, primary, 0)
-	renderedWithCitations := renderCitationMarkdown(rendered, primary.Citations)
-
-	buildBlocks := func(textVal string) (json.RawMessage, bool) {
-		blocks := make([]claude.ContentBlock, 0, 1+len(calls))
-		if strings.TrimSpace(textVal) != "" {
-			blocks = append(blocks, claude.ContentBlock{Type: "text", Text: textVal})
-		}
-		for _, call := range calls {
-			var input map[string]interface{}
-			_ = json.Unmarshal(call.Arguments, &input)
-			blocks = append(blocks, claude.ContentBlock{Type: "tool_use", Name: call.Name, Input: &input})
-		}
-		if len(blocks) == 0 {
-			return nil, false
-		}
-		raw, err := json.Marshal(blocks)
-		return raw, err == nil
-	}
-
-	var fps []string
-	for _, candidateText := range []string{renderedWithCitations, rendered, content} {
-		assistantContent, ok := buildBlocks(candidateText)
-		if !ok {
-			continue
-		}
-		nextMessages := make([]claude.Message, len(messages)+1)
-		copy(nextMessages, messages)
-		nextMessages[len(messages)] = claude.Message{Role: "assistant", Content: assistantContent}
-		fp := claudeMessagesFingerprint(system, nextMessages)
-		if fp != "" {
-			seen := false
-			for _, existing := range fps {
-				if existing == fp {
-					seen = true
-					break
-				}
-			}
-			if !seen {
-				fps = append(fps, fp)
-			}
-		}
-	}
-	if len(fps) == 0 {
-		conversations.setTools(toolsFp, result.ConversationID, responseID, sessionKey)
-		return
-	}
-	if state, accountID, ctxTokens, ok := conversations.get(result.ConversationID); ok {
-		conversations.put(state, accountID, ctxTokens, fps...)
-		for _, fp := range fps {
-			pool.BindSession(fp, accountID)
-		}
-	}
-	allKeys := append([]string{result.ConversationID, responseID, sessionKey}, fps...)
-	conversations.setTools(toolsFp, allKeys...)
 }

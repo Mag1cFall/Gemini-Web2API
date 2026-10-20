@@ -349,6 +349,19 @@ func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, e
 	return entry.Client, entry.AccountID
 }
 
+// SessionIdle 判断会话绑定的账号可调度该模型且有空闲请求槽
+func (p *AccountPool) SessionIdle(sessionKey string, modelID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	binding, ok := p.sessions[sessionKey]
+	if !ok || !now.Before(binding.ExpiresAt) {
+		return false
+	}
+	entry := p.entry(binding.AccountID)
+	return entry != nil && entry.schedulable(now, modelID) && !entry.Client.Busy()
+}
+
 // RetryAfter 返回目标模型最早结束冷却的时间，没有冷却中的账号时为零值
 func (p *AccountPool) RetryAfter(modelID string) time.Time {
 	p.mu.Lock()

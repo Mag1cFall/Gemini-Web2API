@@ -34,8 +34,16 @@ type Account struct {
 	DisplayName string `json:"displayName"`
 	Email       string `json:"email"`
 	Importable  bool   `json:"importable"`
-	Reason      string `json:"reason,omitempty"`
+	// Reason 是账号不可导入的原因，不可导入且为空时表示该账号未在 Chrome 登录
+	Reason string `json:"reason,omitempty"`
 }
+
+const (
+	// ReasonReadFailed 表示读取 Profile 的 Web Data 失败
+	ReasonReadFailed = "read_failed"
+	// ReasonNeedsReauth 表示 refresh token 不是 App-Bound 加密，需要在 Chrome 重新登录该账号
+	ReasonNeedsReauth = "needs_reauth"
+)
 
 // ImportOptions 保存批量导入参数
 type ImportOptions struct {
@@ -82,7 +90,7 @@ func Discover(chromeRoot string) ([]Account, error) {
 	return discoverPlatform(chromeRoot)
 }
 
-// Refresh 使用已保存的设备绑定材料重新签发 Google Cookie
+// Refresh 使用已保存的 OAuth 续签材料重新签发 Google Cookie
 func Refresh(ctx context.Context, material auth.OAuthMaterial, proxy string) ([]gemini.Cookie, error) {
 	if err := ensurePlatformImport(); err != nil {
 		return nil, err
@@ -144,7 +152,7 @@ func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResu
 	return results[0], modelCount, nil
 }
 
-// Import 通过设备绑定 OAuth 认证材料生成协议账号状态
+// Import 用本机 Chrome 的 OAuth 续签材料生成协议账号状态
 func Import(ctx context.Context, options ImportOptions) ([]ImportResult, int, error) {
 	if err := ensurePlatformImport(); err != nil {
 		return nil, 0, err

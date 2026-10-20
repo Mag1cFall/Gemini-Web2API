@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -46,42 +45,6 @@ type Metadata struct {
 	AuthUser int            `json:"authUser,omitempty"`
 	OAuth    *OAuthMaterial `json:"oauth,omitempty"`
 	Disabled bool           `json:"disabled,omitempty"`
-}
-
-// UnmarshalJSON 兼容数字与字符串形式的 authUser
-func (m *Metadata) UnmarshalJSON(data []byte) error {
-	type Alias Metadata
-	var aux struct {
-		Alias
-		RawAuthUser json.RawMessage `json:"authUser,omitempty"`
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	*m = Metadata(aux.Alias)
-	if len(aux.RawAuthUser) > 0 && string(aux.RawAuthUser) != "null" {
-		var intVal int
-		if err := json.Unmarshal(aux.RawAuthUser, &intVal); err == nil {
-			if intVal < 0 {
-				return fmt.Errorf("authUser 不能为负数: %d", intVal)
-			}
-			m.AuthUser = intVal
-		} else {
-			var strVal string
-			if err := json.Unmarshal(aux.RawAuthUser, &strVal); err != nil {
-				return fmt.Errorf("解析 authUser: %w", err)
-			}
-			trimmed := strings.TrimSpace(strVal)
-			if trimmed != "" {
-				n, err := strconv.Atoi(trimmed)
-				if err != nil || n < 0 {
-					return fmt.Errorf("无效的 authUser 值: %q", strVal)
-				}
-				m.AuthUser = n
-			}
-		}
-	}
-	return nil
 }
 
 // StorageState 是兼容 Playwright 的认证状态文件

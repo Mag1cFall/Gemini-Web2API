@@ -2,10 +2,6 @@ package adapter
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,7 +26,6 @@ type conversationEntry struct {
 	snapshot      gemini.ConversationSnapshot
 	accountID     string
 	contextTokens int
-	toolsHash     string
 	expiresAt     time.Time
 }
 
@@ -84,13 +79,8 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 	r.mu.Lock()
 	now := time.Now()
 	r.cleanupLocked(now)
-	var toolsHash string
-	if prev, ok := r.states[state.Snapshot().CID]; ok {
-		toolsHash = prev.toolsHash
-	}
 	entry := conversationEntry{
-		snapshot: state.Snapshot(), accountID: accountID, contextTokens: contextTokens,
-		toolsHash: toolsHash, expiresAt: now.Add(r.ttl),
+		snapshot: state.Snapshot(), accountID: accountID, contextTokens: contextTokens, expiresAt: now.Add(r.ttl),
 	}
 	for _, key := range keys {
 		if key != "" {
@@ -224,16 +214,6 @@ func (r *conversationRegistry) cleanupLocked(now time.Time) {
 	}
 }
 
-func (r *conversationRegistry) has(key string) bool {
-	if key == "" {
-		return false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry, ok := r.states[key]
-	return ok && time.Now().Before(entry.expiresAt)
-}
-
 func conversationKey(previousResponseID string, conversationID string, headerValue string) string {
 	if previousResponseID != "" {
 		return previousResponseID
@@ -242,92 +222,4 @@ func conversationKey(previousResponseID string, conversationID string, headerVal
 		return conversationID
 	}
 	return headerValue
-}
-
-func extractHeaderSessionKey(c interface{ GetHeader(string) string }) string {
-	if c == nil {
-		return ""
-	}
-	for _, header := range []string{
-		"X-Conversation-ID",
-		"Conversation-ID",
-		"X-Session-ID",
-		"Session-ID",
-		"X-Chat-ID",
-		"Chat-ID",
-		"anthropic-session-id",
-	} {
-		if val := strings.TrimSpace(c.GetHeader(header)); val != "" {
-			return val
-		}
-	}
-	return ""
-}
-
-func (r *conversationRegistry) hasSameTools(key string, toolsHash string) bool {
-	if toolsHash == "" {
-		return true
-	}
-	if key == "" {
-		return false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry, ok := r.states[key]
-	if !ok || time.Now().After(entry.expiresAt) {
-		return false
-	}
-	if entry.toolsHash == "" {
-		return true
-	}
-	return entry.toolsHash == toolsHash
-}
-
-func (r *conversationRegistry) setTools(toolsHash string, keys ...string) {
-	if toolsHash == "" {
-		toolsHash = "none"
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, key := range keys {
-		if key == "" {
-			continue
-		}
-		if entry, ok := r.states[key]; ok {
-			entry.toolsHash = toolsHash
-			r.states[key] = entry
-		}
-	}
-}
-
-func (b ToolBridge) fingerprint() string {
-	if len(b.Definitions) == 0 && len(b.JSONSchema) == 0 {
-		return ""
-	}
-	h := sha256.New()
-	if len(b.Definitions) > 0 {
-		if data, err := json.Marshal(b.Definitions); err == nil {
-			h.Write(data)
-		}
-	}
-	h.Write([]byte{0xFF})
-	if len(b.JSONSchema) > 0 {
-		h.Write(canonicalJSONBytes(b.JSONSchema))
-	}
-	sum := h.Sum(nil)
-	return hex.EncodeToString(sum[:16])
-}
-
-func canonicalJSONBytes(raw []byte) []byte {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
-		return nil
-	}
-	var v interface{}
-	if err := json.Unmarshal([]byte(trimmed), &v); err == nil {
-		if norm, err := json.Marshal(v); err == nil {
-			return norm
-		}
-	}
-	return []byte(trimmed)
 }
