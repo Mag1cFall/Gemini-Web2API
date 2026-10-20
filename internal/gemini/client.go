@@ -858,12 +858,19 @@ func initialReqID() (int64, error) {
 // ErrCaptcha 表示 Google 以人机验证页（/sorry）拦截了请求，出口 IP 与账号会话被判定为异常流量
 var ErrCaptcha = errors.New("请求被 Google 人机验证页拦截")
 
-// responseStatusError 把非 200 响应转为协议错误，重定向到 google.com/sorry 时为人机验证拦截，按 429 处理
+// responseStatusError 把非 200 响应转为协议错误，重定向到 google.com/sorry 时为人机验证拦截，按 429 处理；/u/N 页面重定向到 Gemini 其他页面时表示 Cookie 会话中没有第 N 个账号，按会话失效处理
 func responseStatusError(resp *http.Response, operation string) *ProtocolError {
-	if location, err := resp.Location(); err == nil && strings.HasSuffix(location.Hostname(), "google.com") && strings.HasPrefix(location.Path, "/sorry") {
+	location, err := resp.Location()
+	if err == nil && strings.HasSuffix(location.Hostname(), "google.com") && strings.HasPrefix(location.Path, "/sorry") {
 		return &ProtocolError{
 			HTTPStatus: http.StatusTooManyRequests, Code: http.StatusTooManyRequests, Retryable: true, Cause: ErrCaptcha,
 			Message: fmt.Sprintf("gemini %s 被 Google 人机验证页拦截（HTTP %d 重定向到 %s%s）", operation, resp.StatusCode, location.Host, location.Path),
+		}
+	}
+	if err == nil && location.Hostname() == resp.Request.URL.Hostname() && strings.HasPrefix(resp.Request.URL.Path, "/u/") {
+		return &ProtocolError{
+			HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,
+			Message: fmt.Sprintf("gemini %s 的 %s 重定向到 %s，Cookie 会话中没有该账号序号", operation, resp.Request.URL.Path, location.Path),
 		}
 	}
 	return httpStatusError(resp.StatusCode, operation)

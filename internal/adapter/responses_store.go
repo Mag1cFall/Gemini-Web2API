@@ -163,7 +163,7 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 		saveResponse(ctx, store, request, run.id, run.created, running)
 		result, _, err := runGeneration(ctx, pool, run.sessionKey, request.PreviousResponseID == "", request.Model, run.id, run.media, run.thinkingLevel, run.bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-				return buildResponsesPrompt(background, client, request, continuation, run.bridge)
+				return buildResponsesPrompt(background, client, request, continuation, run.bridge.declared(continuation && isHistoryKey(run.sessionKey)))
 			}, nil, nil)
 		if err == nil {
 			err = inlineResultMedia(ctx, &result)
@@ -171,6 +171,9 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 		var response gin.H
 		if err == nil {
 			response, err = buildResponsesObject(run.id, run.created, request.PreviousResponseID, result, run.bridge, run.includeThoughts)
+		}
+		if err == nil {
+			rememberHistory(pool, result, request.Instructions, run.bridge, run.turns)
 		}
 		status := http.StatusOK
 		cancelled := finishResponseJob(run.id)
@@ -271,6 +274,7 @@ type responsesRun struct {
 	thinkingLevel   gemini.ThinkingLevel
 	bridge          ToolBridge
 	includeThoughts bool
+	turns           []historyTurn
 }
 
 // storedResponseOrNotFound 读取保存的响应，不存在时写入 404

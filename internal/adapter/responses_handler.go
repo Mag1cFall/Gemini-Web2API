@@ -107,13 +107,18 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			return
 		}
 		sessionKey := conversationKey(request.PreviousResponseID, conversationID, c.GetHeader("X-Conversation-ID"))
+		var turns []historyTurn
+		if sessionKey == "" {
+			turns = responsesHistoryTurns(request.Input)
+			sessionKey = continuedHistoryKey(request.Instructions, bridge, turns)
+		}
 		responseID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
 		media := generationMedia{requireImage: bridge.RequireImageGeneration, aspectRatio: bridge.AspectRatio}
 		if request.Background && !request.Stream {
 			startBackgroundResponse(c, pool, store, request, responsesRun{
 				id: responseID, created: created, sessionKey: sessionKey, media: media,
-				thinkingLevel: thinkingLevel, bridge: bridge, includeThoughts: includeThoughts,
+				thinkingLevel: thinkingLevel, bridge: bridge, includeThoughts: includeThoughts, turns: turns,
 			})
 			return
 		}
@@ -150,7 +155,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			result, accountID, err := runGeneration(
 				ctx, pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, media, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-					return buildResponsesPrompt(c, client, request, continuation, bridge)
+					return buildResponsesPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 				}, func(event gemini.Event) error {
 					if event.Kind == gemini.EventImageProgress {
 						projection.bufferText = true
@@ -187,6 +192,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 				saveFailedResponse(ctx, store, request, responseID, created, publicError(c, err))
 				return
 			}
+			rememberHistory(pool, result, request.Instructions, bridge, turns)
 			applyRequestFields(response, request)
 			if !finishResponseJob(responseID) {
 				saveResponse(ctx, store, request, responseID, created, response)
@@ -200,7 +206,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 		result, accountID, err := runGeneration(
 			ctx, pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, media, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-				return buildResponsesPrompt(c, client, request, continuation, bridge)
+				return buildResponsesPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 			}, nil, nil,
 		)
 		c.Set("account_id", accountID)
@@ -218,6 +224,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
 			return
 		}
+		rememberHistory(pool, result, request.Instructions, bridge, turns)
 		applyRequestFields(response, request)
 		saveResponse(ctx, store, request, responseID, created, response)
 		c.Header("X-Response-ID", responseID)

@@ -127,6 +127,11 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, c.GetHeader("X-Conversation-ID"))
+		var turns []historyTurn
+		if sessionKey == "" {
+			turns = chatHistoryTurns(request.Messages)
+			sessionKey = continuedHistoryKey("", bridge, turns)
+		}
 		allowNewSession := request.PreviousResponseID == ""
 		responseID := fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
@@ -139,7 +144,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			result, accountID, err := runGeneration(
 				c.Request.Context(), pool, key, allowNew, request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-					return buildOpenAIChatPrompt(c, client, request, continuation, bridge)
+					return buildOpenAIChatPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(key)))
 				},
 				onEvent, hasVisibleOutput,
 			)
@@ -200,6 +205,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					_ = writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "output_validation_error", streamFailure(c, err))
 					return
 				}
+				if choice == 0 {
+					rememberHistory(pool, result, "", bridge, turns)
+				}
 				if err := writeOpenAIFinish(c.Writer, responseID, created, streamModel, choice, result, bridge); err != nil {
 					return
 				}
@@ -230,6 +238,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			if err != nil {
 				writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
 				return
+			}
+			if choice == 0 {
+				rememberHistory(pool, result, "", bridge, turns)
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
 			if response == nil {

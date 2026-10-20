@@ -100,7 +100,7 @@ Windows 首次使用时，直接运行交互式配置：
 .\gemini-web2api.exe setup --email "name@example.com"
 ```
 
-也可以粘贴浏览器请求头中 `Cookie` 字段的一行值；这种状态在现有 Cookie 有效期内使用，不具备设备绑定续签能力：
+也可以粘贴浏览器请求头中 `Cookie` 字段的一行值；这种状态在现有 Cookie 有效期内使用，不具备 OAuth 续签能力：
 
 ```powershell
 .\gemini-web2api.exe setup --cookie "SAPISID=...; __Secure-1PSID=..." --id account-name
@@ -124,13 +124,13 @@ Cookie 来自登录了多个 Google 账号的浏览器时，用 `--authuser` 指
 .\gemini-web2api.exe setup --email "name@example.com" --remote https://example.com
 ```
 
-`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。Chrome 导入还会保存浏览器退出后续签所需的设备绑定材料。日常启动只需运行：
+`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。Chrome 导入还会保存浏览器退出后续签所需的 OAuth 续签材料。日常启动只需运行：
 
 ```powershell
 .\gemini-web2api.exe
 ```
 
-默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以在现有 Cookie 有效期内使用已经生成的 `auth` 目录；设备绑定续签仍需在原 Windows 设备执行。
+默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以在现有 Cookie 有效期内使用已经生成的 `auth` 目录；续签仍需在原 Windows 设备执行。
 
 服务运行期间每 10 分钟为每个账号轮换一次登录 Cookie，与 Gemini 网页相同；响应中变化的 Cookie 写回 `auth/<账号>/storage-state.json`，重启后直接沿用。Chrome 导入的账号在登录态失效时自动续签。
 
@@ -211,7 +211,7 @@ GET    /v1/models
 ```
 
 - **Responses**：默认保存到 `data/requests.db`，可读取、列出输入与删除，`store: false` 不保存；`background: true` 立即返回 `queued`，之后轮询或取消
-- **续接**：`previous_response_id` 与会话 ID 在服务重启后的 `SESSION_TTL` 内仍可续接
+- **续接**：`previous_response_id` 与会话 ID 在服务重启后的 `SESSION_TTL` 内仍可续接；每轮发送完整历史的客户端在历史与上一轮回答一致时续接同一网页会话，只发送新消息
 - **文件**：上传的文件保存在 `data/files/`，生成请求以 `file_id` 引用
 - **朗读**：`/v1/audio/speech` 使用官网回答的朗读功能，输出 mp3、opus、wav、flac 或 pcm，`voice` 与 `speed` 不生效
 - **转写与翻译**：由所选对话模型完成

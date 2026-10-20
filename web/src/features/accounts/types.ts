@@ -74,6 +74,8 @@ export interface ChromeProfile {
   email: string
   importable: boolean
   imported: boolean
+  // reason 为账号不可导入的原因，不可导入且缺省时为未在 Chrome 登录
+  reason?: 'read_failed' | 'needs_reauth'
 }
 
 // ChromeProfiles 对应 GET /api/accounts/import/chrome 的响应

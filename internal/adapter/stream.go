@@ -199,6 +199,9 @@ func runGenerationAttempts(
 	if !pool.HasModel(requestedModel) {
 		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 404, Message: fmt.Sprintf("模型 %q 不可用", modelName)}
 	}
+	if isHistoryKey(sessionKey) && !pool.SessionIdle(sessionKey, requestedModel) {
+		sessionKey = ""
+	}
 	releaseSession := func() {}
 	if allowNewSession && sessionKey != "" {
 		var err error
@@ -251,6 +254,15 @@ func runGenerationAttempts(
 		lastAccountID = accountID
 		if ctx.Err() != nil {
 			return generationResult{}, accountID, err
+		}
+		if isHistoryKey(sessionKey) && !newSession && (isAccountContextError(err) || retryableAccountError(err) && (hasVisibleOutput == nil || !hasVisibleOutput())) {
+			if retryableAccountError(err) && !isOutputMismatchError(err) {
+				pool.ReportFailure(accountID, requestedModel, err)
+			}
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
+			excludedAccountIDs[accountID] = struct{}{}
+			sessionKey, newSession, requestAttempts = "", true, 2
+			continue
 		}
 		if isAccountContextError(err) {
 			if sessionKey != "" && !newSession {
@@ -406,9 +418,9 @@ func runGenerationWithClient(
 	if accumulator.Usage == nil {
 		accumulator.Usage = estimatedUsage(accumulator, promptTokens)
 	}
-	nextContextTokens := accumulator.Usage.TotalTokens
+	nextContextTokens := accumulator.Usage.PromptTokens + accumulator.Usage.CompletionTokens
 	primary := accumulator.Primary()
-	if primary.Text != "" || primary.Thought != "" || len(primary.Codes) > 0 || len(primary.Media) > 0 {
+	if primary.Text != "" || len(primary.Codes) > 0 || len(primary.Media) > 0 {
 		nextContextTokens++
 	}
 
@@ -424,13 +436,14 @@ func runGenerationWithClient(
 			snapshot = conversation.Snapshot()
 		}
 		keys := []string{responseID, snapshot.CID}
-		if allowNewSession && sessionKey != "" {
+		remember := allowNewSession && sessionKey != "" && !isHistoryKey(sessionKey)
+		if remember {
 			keys = append(keys, sessionKey)
 		}
 		conversations.put(conversation, accountID, nextContextTokens, keys...)
 		pool.BindSession(responseID, accountID)
 		pool.BindSession(snapshot.CID, accountID)
-		if allowNewSession && sessionKey != "" {
+		if remember {
 			pool.BindSession(sessionKey, accountID)
 		}
 		accumulator.Session = snapshot

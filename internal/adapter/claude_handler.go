@@ -55,6 +55,13 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 		setUnsupportedParameters(c, unsupportedClaudeParameters(request))
 		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, c.GetHeader("X-Conversation-ID"))
+		var system string
+		var turns []historyTurn
+		if sessionKey == "" {
+			system, _ = claude.ParseSystemPrompt(request.System)
+			turns = claudeHistoryTurns(request.Messages)
+			sessionKey = continuedHistoryKey(system, bridge, turns)
+		}
 		responseID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 
 		if request.Stream {
@@ -67,7 +74,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			result, accountID, err := runGeneration(
 				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-					return buildClaudePrompt(c, client, request, continuation, bridge)
+					return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 				}, func(event gemini.Event) error {
 					if event.Kind == gemini.EventMetadata && event.Usage != nil {
 						return processor.ProcessEvent(event)
@@ -105,6 +112,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				_ = processor.EmitError(streamFailure(c, err))
 				return
 			}
+			rememberHistory(pool, result, system, bridge, turns)
 			content, calls, err := bridge.Parse(primary.Text)
 			if err != nil {
 				_ = processor.EmitError(streamFailure(c, err))
@@ -170,7 +178,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		result, accountID, err := runGeneration(
 			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-				return buildClaudePrompt(c, client, request, continuation, bridge)
+				return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 			}, nil, nil,
 		)
 		c.Set("account_id", accountID)
@@ -188,6 +196,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
+		rememberHistory(pool, result, system, bridge, turns)
 		content, calls, err := bridge.Parse(primary.Text)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
