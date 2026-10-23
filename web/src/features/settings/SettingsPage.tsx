@@ -37,6 +37,8 @@ const editableKeys = [
   'routing_strategy',
   'log_level',
   'request_body_log',
+  'log_file',
+  'log_max_total_mb',
   'admin_auth_enabled',
   'admin_username',
   'listen_addr',
@@ -415,6 +417,29 @@ export function SettingsPage() {
                 { value: 'text', label: 'text' },
                 { value: 'json', label: 'json' },
               ]}
+            />
+          </SettingRow>
+          <SettingRow id="log_file" label={m.logFile} hint={m.logFileHint}>
+            <SwitchControl
+              id="log_file"
+              checked={value.log_file}
+              onCheckedChange={(next) => {
+                set('log_file', next)
+              }}
+            />
+          </SettingRow>
+          <SettingRow id="log_max_total_mb" label={m.logMaxTotal} hint={m.logMaxTotalHint}>
+            <NumberInput
+              id="log_max_total_mb"
+              aria-describedby="log_max_total_mb-hint"
+              value={value.log_max_total_mb}
+              min={20}
+              max={100000}
+              decreaseLabel={m.decrease}
+              increaseLabel={m.increase}
+              onChange={(next) => {
+                set('log_max_total_mb', next)
+              }}
             />
           </SettingRow>
           <SettingRow id="request_body_log" label={m.requestBodyLog} hint={m.requestBodyLogHint}>

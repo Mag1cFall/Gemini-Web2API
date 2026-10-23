@@ -26,7 +26,7 @@ import {
 import { fixedProxy } from '@/features/accounts/proxy'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { ProxyValue } from '@/features/accounts/ProxyValue'
-import { accountsKey, useAccounts } from '@/features/accounts/queries'
+import { accountsKey, useAccounts, useClearCooldown } from '@/features/accounts/queries'
 import type { Account, AccountsUsage, UsageWindow } from '@/features/accounts/types'
 import { stateTone, windowTone } from '@/features/accounts/usage'
 import { api } from '@/lib/api'
@@ -100,6 +100,7 @@ export function AccountPage() {
   const client = useQueryClient()
   const accounts = useAccounts()
   const [proxyOpen, setProxyOpen] = useState(false)
+  const clearCooldown = useClearCooldown()
   const verify = useMutation({
     mutationFn: () =>
       api('/api/accounts/' + encodeURIComponent(id) + '/verify', { method: 'POST' }),
@@ -171,7 +172,7 @@ export function AccountPage() {
         title={
           <span className="flex flex-wrap items-center gap-3">
             <Badge tone={stateTone(account.state)}>{sm[account.state]}</Badge>
-            <span className="break-all">{account.account_id}</span>
+            <span className="break-all">{account.email ?? account.account_id}</span>
           </span>
         }
         description={[
@@ -243,12 +244,23 @@ export function AccountPage() {
       />
 
       {account.cooldown_until && new Date(account.cooldown_until) > now && (
-        <p className="rounded-md bg-warning-soft px-4 py-3 text-sm text-warning-text">
-          {fill(m.accountCooldown, {
-            time: formatDateTime(new Date(account.cooldown_until), now, locale),
-            reason: cooldownReason(rm, account.cooldown_reason ?? ''),
-          })}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-warning-soft px-4 py-3 text-sm text-warning-text">
+          <p>
+            {fill(m.accountCooldown, {
+              time: formatDateTime(new Date(account.cooldown_until), now, locale),
+              reason: cooldownReason(rm, account.cooldown_reason ?? ''),
+            })}
+          </p>
+          <Button
+            size="sm"
+            loading={clearCooldown.isPending && clearCooldown.variables.scope === '*'}
+            onClick={() => {
+              clearCooldown.mutate({ account: account.account_id, scope: '*' })
+            }}
+          >
+            {m.clearCooldown}
+          </Button>
+        </div>
       )}
 
       <Card>
@@ -313,11 +325,23 @@ export function AccountPage() {
                 <li key={model} className="flex items-center gap-2 text-sm">
                   <Tag>{model}</Tag>
                   {cooldown ? (
-                    <Badge tone="warning">
-                      {fill(m.cooling, {
-                        time: formatDateTime(new Date(cooldown.until), now, locale),
-                      })}
-                    </Badge>
+                    <>
+                      <Badge tone="warning">
+                        {fill(m.cooling, {
+                          time: formatDateTime(new Date(cooldown.until), now, locale),
+                        })}
+                      </Badge>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        loading={clearCooldown.isPending && clearCooldown.variables.scope === model}
+                        onClick={() => {
+                          clearCooldown.mutate({ account: account.account_id, scope: model })
+                        }}
+                      >
+                        {m.clearCooldown}
+                      </Button>
+                    </>
                   ) : (
                     <Badge tone="success">{m.available}</Badge>
                   )}
@@ -343,7 +367,7 @@ export function AccountPage() {
           </div>
           <div className="flex min-w-0 flex-col gap-1">
             <dt className="text-foreground-muted">{m.proxy}</dt>
-            <dd className="truncate font-mono">
+            <dd className="truncate font-mono" title={account.proxy}>
               <ProxyValue account={account} source />
             </dd>
           </div>

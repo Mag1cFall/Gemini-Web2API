@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -28,6 +29,8 @@ type generationResult struct {
 	ResponseID     string
 	Model          string
 	ProviderModel  string
+	// StopSequence 是截断正文的停止序列
+	StopSequence string
 }
 
 type adapterEmitError struct{ err error }
@@ -42,8 +45,10 @@ type accountContextError struct {
 func (e *accountContextError) Error() string { return e.err.Error() }
 func (e *accountContextError) Unwrap() error { return e.err }
 
+// outputMismatchError 是回答不符合请求要求的输出形式时的可重试错误，validation 表示结构化输出没有通过解析或校验
 type outputMismatchError struct {
-	err *gemini.ProtocolError
+	err        *gemini.ProtocolError
+	validation bool
 }
 
 func (e *outputMismatchError) Error() string { return e.err.Error() }
@@ -63,7 +68,7 @@ type streamProjection struct {
 func newStreamProjection(bridge ToolBridge, includeThought bool) *streamProjection {
 	disallowHostedTools := bridge.disallowsHostedTools()
 	return &streamProjection{
-		bufferText:     len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || bridge.WebSearch || bridge.RequireImageGeneration || bridge.RequireCodeExecution || disallowHostedTools,
+		bufferText:     len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 || bridge.WebSearch || bridge.RequireImageGeneration || bridge.RequireCodeExecution || disallowHostedTools,
 		bufferThought:  bridge.RequireImageGeneration || disallowHostedTools,
 		includeThought: includeThought,
 	}
@@ -86,9 +91,6 @@ func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) e
 	buffered := &p.bufferText
 	emitted := &p.emittedText
 	if event.Kind == gemini.EventThought {
-		if !p.emittedText {
-			p.bufferText = true
-		}
 		buffered = &p.bufferThought
 		emitted = &p.emittedThought
 	}
@@ -134,16 +136,31 @@ func streamEventName(kind gemini.EventKind) string {
 	return "文本"
 }
 
-func modelStatus(pool *balancer.AccountPool, modelName string) (bool, bool) {
-	modelID := config.MapModel(modelName)
-	return pool.HasModel(modelID), pool.HasReadyModel(modelID)
+// sessionPolicy 是带会话键的请求在会话未登记或无法续接时的处理方式
+type sessionPolicy int
+
+const (
+	// sessionCreate 在会话键未登记时新建会话并登记到该键
+	sessionCreate sessionPolicy = iota
+	// sessionContinue 只续接已登记的会话
+	sessionContinue
+	// sessionRebuild 续接已登记的会话，会话未登记或无法续接时在首个可见输出前以重建的完整历史新建会话
+	sessionRebuild
+)
+
+// previousResponsePolicy 返回只有会话标识的请求的处理方式：带 previous_response_id 时只续接已登记的会话
+func previousResponsePolicy(previousResponseID string) sessionPolicy {
+	if previousResponseID != "" {
+		return sessionContinue
+	}
+	return sessionCreate
 }
 
 func runGeneration(
 	ctx context.Context,
 	pool *balancer.AccountPool,
 	sessionKey string,
-	allowNewSession bool,
+	policy sessionPolicy,
 	modelName string,
 	responseID string,
 	media generationMedia,
@@ -154,8 +171,8 @@ func runGeneration(
 	hasVisibleOutput func() bool,
 ) (generationResult, string, error) {
 	trace := logging.FromContext(ctx)
-	result, accountID, err := runGenerationAttempts(ctx, pool, sessionKey, allowNewSession, modelName, responseID, media, thinkingLevel, prepare, onEvent, hasVisibleOutput)
-	err = cancelledError(ctx, err)
+	result, accountID, err := runGenerationAttempts(ctx, pool, sessionKey, policy, modelName, responseID, media, thinkingLevel, bridge, prepare, onEvent, hasVisibleOutput)
+	err = accountSessionError(cancelledError(ctx, err))
 	if err != nil {
 		trace.Fail(upstreamStatus(err), err.Error())
 		return result, accountID, err
@@ -180,15 +197,24 @@ func cancelledError(ctx context.Context, err error) error {
 	return err
 }
 
+// accountSessionError 把账号会话失效与续签失败改为写明账号原因的 503，客户端凭据错误只由本服务 API key 校验返回 401
+func accountSessionError(err error) error {
+	if !errors.Is(err, gemini.ErrSignedOut) {
+		return err
+	}
+	return &gemini.ProtocolError{HTTPStatus: http.StatusServiceUnavailable, Message: "Gemini 账号会话失效：" + err.Error(), Retryable: true, Cause: err}
+}
+
 func runGenerationAttempts(
 	ctx context.Context,
 	pool *balancer.AccountPool,
 	sessionKey string,
-	allowNewSession bool,
+	policy sessionPolicy,
 	modelName string,
 	responseID string,
 	media generationMedia,
 	thinkingLevel gemini.ThinkingLevel,
+	bridge ToolBridge,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 	hasVisibleOutput func() bool,
@@ -196,14 +222,18 @@ func runGenerationAttempts(
 	trace := logging.FromContext(ctx)
 	trace.SetResponseID(responseID)
 	requestedModel := config.MapModel(modelName)
-	if !pool.HasModel(requestedModel) {
-		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 404, Message: fmt.Sprintf("模型 %q 不可用", modelName)}
+	if err := modelKnown(pool, modelName); err != nil {
+		return generationResult{}, "", err
 	}
+	rebuildable := policy == sessionRebuild || isHistoryKey(sessionKey)
 	if isHistoryKey(sessionKey) && !pool.SessionIdle(sessionKey, requestedModel) {
 		sessionKey = ""
 	}
+	if _, _, _, exists := conversations.get(sessionKey); policy == sessionRebuild && !exists {
+		sessionKey = ""
+	}
 	releaseSession := func() {}
-	if allowNewSession && sessionKey != "" {
+	if policy == sessionCreate && sessionKey != "" {
 		var err error
 		releaseSession, err = conversations.acquire(ctx, sessionKey)
 		if err != nil {
@@ -211,8 +241,8 @@ func runGenerationAttempts(
 		}
 	}
 	defer releaseSession()
-	newSession := allowNewSession
-	if allowNewSession && sessionKey != "" {
+	newSession := policy == sessionCreate || sessionKey == ""
+	if policy == sessionCreate && sessionKey != "" {
 		_, _, _, exists := conversations.get(sessionKey)
 		newSession = !exists
 	}
@@ -234,19 +264,41 @@ func runGenerationAttempts(
 		if newSession {
 			selectionKey = ""
 		}
-		client, accountID := pool.NextForModelExcluding(selectionKey, requestedModel, excludedAccountIDs)
+		trace.SetStage("等待账号")
+		client, accountID, releaseRequest, err := pool.AcquireForModel(ctx, selectionKey, requestedModel, excludedAccountIDs)
+		if err != nil {
+			return generationResult{}, accountID, err
+		}
 		if client == nil {
+			if sessionKey != "" && !newSession && accountID != "" {
+				if rebuildable {
+					sessionKey, newSession, requestAttempts = "", true, 2
+					continue
+				}
+				return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: fmt.Sprintf("会话所在账号 %s，会话没有保存的响应链，无法在其他账号续接", pool.AccountReason(accountID, requestedModel))}
+			}
 			if lastErr != nil {
 				return generationResult{}, lastAccountID, lastErr
 			}
 			return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: "没有可用账号", Retryable: true}
 		}
-		result, err := runGenerationWithClient(
-			ctx, pool, client, accountID, sessionKey, newSession, requestedModel, responseID,
-			media, thinkingLevel, prepare, onEvent,
-		)
+		result, err := func() (generationResult, error) {
+			defer releaseRequest()
+			result, err := runGenerationWithClient(
+				ctx, pool, client, accountID, sessionKey, newSession, requestedModel, responseID,
+				media, thinkingLevel, bridge, prepare, onEvent,
+			)
+			if err == nil {
+				pool.ReportSuccess(accountID, requestedModel)
+			} else if ctx.Err() == nil && retryableAccountError(err) && !isOutputMismatchError(err) {
+				if usageLimitError(err) {
+					_, _ = client.FetchUsage(ctx)
+				}
+				pool.ReportFailure(accountID, requestedModel, err)
+			}
+			return result, err
+		}()
 		if err == nil {
-			pool.ReportSuccess(accountID, requestedModel)
 			result.Model = requestedModel
 			return result, accountID, nil
 		}
@@ -255,10 +307,12 @@ func runGenerationAttempts(
 		if ctx.Err() != nil {
 			return generationResult{}, accountID, err
 		}
-		if isHistoryKey(sessionKey) && !newSession && (isAccountContextError(err) || retryableAccountError(err) && (hasVisibleOutput == nil || !hasVisibleOutput())) {
-			if retryableAccountError(err) && !isOutputMismatchError(err) {
-				pool.ReportFailure(accountID, requestedModel, err)
-			}
+		if errors.Is(err, gemini.ErrConversationLost) && rebuildable && !newSession && (hasVisibleOutput == nil || !hasVisibleOutput()) {
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
+			sessionKey, newSession, requestAttempts = "", true, 2
+			continue
+		}
+		if rebuildable && sessionKey != "" && !newSession && (isAccountContextError(err) || errors.Is(err, gemini.ErrGuestAttachments) || retryableAccountError(err) && (hasVisibleOutput == nil || !hasVisibleOutput())) {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
 			sessionKey, newSession, requestAttempts = "", true, 2
@@ -273,9 +327,6 @@ func runGenerationAttempts(
 			continue
 		}
 		usedRequestAttempts++
-		if retryableAccountError(err) && !isOutputMismatchError(err) {
-			pool.ReportFailure(accountID, requestedModel, err)
-		}
 		if usedRequestAttempts >= requestAttempts || !retryableAccountError(err) ||
 			hasVisibleOutput != nil && hasVisibleOutput() {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, false)
@@ -298,16 +349,11 @@ func runGenerationWithClient(
 	responseID string,
 	media generationMedia,
 	thinkingLevel gemini.ThinkingLevel,
+	bridge ToolBridge,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 ) (generationResult, error) {
 	trace := logging.FromContext(ctx)
-	trace.SetStage("等待账号 " + accountID)
-	releaseRequest, err := client.AcquireRequest(ctx)
-	if err != nil {
-		return generationResult{}, err
-	}
-	defer releaseRequest()
 	trace.AccountReady(accountID, requestedModel)
 
 	model, err := client.ResolveModel(requestedModel)
@@ -346,7 +392,7 @@ func runGenerationWithClient(
 		}
 		return generationResult{}, &gemini.ProtocolError{HTTPStatus: 400, Message: err.Error()}
 	}
-	promptTokens := contextTokens + tokencount.Content(prompt)
+	promptTokens := contextTokens + tokencount.Content(prompt) + mediaTokens(files)
 	if contextWindow := client.ContextWindow(); contextWindow > 0 && promptTokens > contextWindow {
 		return generationResult{}, &accountContextError{err: &gemini.ProtocolError{
 			HTTPStatus: 413,
@@ -359,7 +405,10 @@ func runGenerationWithClient(
 	}
 	accumulator := NewEventAccumulator()
 	initialUsageSent := false
-	err = client.Stream(ctx, gemini.GenerateRequest{
+	cutter := newStopCutter(bridge.Stop)
+	streamCtx, stopStream := context.WithCancel(ctx)
+	defer stopStream()
+	err = client.Stream(streamCtx, gemini.GenerateRequest{
 		Prompt:        prompt,
 		Model:         model.ID,
 		ThinkingLevel: thinkingLevel,
@@ -369,6 +418,9 @@ func runGenerationWithClient(
 		Conversation:  conversation,
 		Branch:        branch,
 	}, func(event gemini.Event) error {
+		if cutter != nil && cutter.matched != "" {
+			return nil
+		}
 		switch event.Kind {
 		case gemini.EventText, gemini.EventThought, gemini.EventCode, gemini.EventMedia, gemini.EventImageProgress:
 			if event.Candidate == 0 {
@@ -390,6 +442,18 @@ func runGenerationWithClient(
 		if err := accumulator.Apply(event); err != nil {
 			return err
 		}
+		if cutter != nil && event.Kind == gemini.EventText && event.Candidate == 0 {
+			delta, hit := cutter.cut(accumulator.Primary().Text)
+			if hit {
+				stopStream()
+			}
+			if event.Operation == gemini.SnapshotAppend {
+				if delta == "" {
+					return nil
+				}
+				event = gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: delta}
+			}
+		}
 		if onEvent != nil {
 			if err := onEvent(event); err != nil {
 				return adapterEmitError{err: err}
@@ -397,6 +461,19 @@ func runGenerationWithClient(
 		}
 		return nil
 	})
+	if cutter != nil && cutter.matched != "" && errors.Is(err, context.Canceled) && ctx.Err() == nil {
+		err = nil
+	}
+	if err == nil && cutter != nil {
+		if cutter.matched != "" {
+			accumulator.candidate(0).Text = cutter.text[:cutter.cutAt]
+			accumulator.FinishReason = gemini.FinishStop
+		} else if rest := cutter.rest(); rest != "" && onEvent != nil {
+			if err := onEvent(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: rest}); err != nil {
+				return generationResult{}, adapterEmitError{err: err}
+			}
+		}
+	}
 	if err != nil {
 		if usage := estimatedUsage(accumulator, promptTokens); usage.CompletionTokens+usage.ThoughtTokens > 0 {
 			trace.SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
@@ -415,14 +492,19 @@ func runGenerationWithClient(
 			return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: "Gemini Web 未返回生成图片", Retryable: true}}
 		}
 	}
+	primary := accumulator.Primary()
+	if primary.Text == "" && len(primary.Codes) == 0 && len(primary.Media) == 0 && (cutter == nil || cutter.matched == "") {
+		return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: "Gemini Web 完成了回答但没有正文、代码、媒体或工具调用", Retryable: true}}
+	}
+	if len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 {
+		if _, _, err := bridge.Parse(primary.Text); err != nil {
+			return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: err.Error(), Retryable: true}, validation: len(bridge.Definitions) == 0}
+		}
+	}
 	if accumulator.Usage == nil {
 		accumulator.Usage = estimatedUsage(accumulator, promptTokens)
 	}
-	nextContextTokens := accumulator.Usage.PromptTokens + accumulator.Usage.CompletionTokens
-	primary := accumulator.Primary()
-	if primary.Text != "" || len(primary.Codes) > 0 || len(primary.Media) > 0 {
-		nextContextTokens++
-	}
+	nextContextTokens := accumulator.Usage.PromptTokens + accumulator.Usage.CompletionTokens + 1
 
 	if conversation == nil && accumulator.Session.CID != "" {
 		session := accumulator.Session
@@ -456,13 +538,17 @@ func runGenerationWithClient(
 			break
 		}
 	}
-	return generationResult{
+	result := generationResult{
 		Accumulator:    accumulator,
 		Client:         client,
 		ConversationID: accumulator.Session.CID,
 		ResponseID:     responseID,
 		ProviderModel:  providerModel,
-	}, nil
+	}
+	if cutter != nil {
+		result.StopSequence = cutter.matched
+	}
+	return result, nil
 }
 
 // estimatedUsage 按已收到的正文、代码与思考的本地计数估算用量
@@ -523,4 +609,10 @@ func actualProviderModel(client *gemini.Client, requestedModel string, metadata 
 		return metadata.ModelHash
 	}
 	return requestedModel
+}
+
+// usageLimitError 判断错误是否为官网用量上限 1037 或用量用满后的模型降级，此时先读取账号用量再按其重置时刻冷却
+func usageLimitError(err error) bool {
+	var protocolErr *gemini.ProtocolError
+	return errors.As(err, &protocolErr) && protocolErr.Code == 1037 || errors.Is(err, gemini.ErrModelMismatch)
 }

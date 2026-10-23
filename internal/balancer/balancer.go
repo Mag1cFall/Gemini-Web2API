@@ -3,9 +3,13 @@ package balancer
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/url"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -146,6 +150,24 @@ type AccountPool struct {
 	lastSessionGC time.Time
 	mu            sync.Mutex
 	transport     func()
+	// changed 在账号状态、冷却或请求槽变化时关闭并替换，唤醒等待账号的请求
+	changed chan struct{}
+	// queues 为按排队键分组、按到达顺序排列的等待请求唤醒通道
+	queues map[string][]chan struct{}
+	// restored 为上次运行保存、账号尚未就绪的冷却，账号就绪时恢复
+	restored map[string][]Cooldown
+	// saveCooldowns 为冷却变化后保存全部冷却的函数
+	saveCooldowns func([]Cooldown)
+	// persistMu 串行化从取冷却快照到保存完成的过程
+	persistMu sync.Mutex
+}
+
+// Cooldown 是一个账号或其某个模型的冷却，Model 为空表示整个账号
+type Cooldown struct {
+	Account string
+	Model   string
+	Until   time.Time
+	Reason  string
 }
 
 // NewAccountPool 创建账号池，轮询从随机位置开始
@@ -155,7 +177,80 @@ func NewAccountPool(cooldown time.Duration, sessionTTL time.Duration) *AccountPo
 		cooldown:   cooldown,
 		sessionTTL: sessionTTL,
 		index:      rand.Uint64(),
+		changed:    make(chan struct{}),
+		queues:     make(map[string][]chan struct{}),
+		restored:   make(map[string][]Cooldown),
 	}
+}
+
+// RestoreCooldowns 恢复上次运行保存的冷却，账号尚未就绪时在就绪时恢复
+func (p *AccountPool) RestoreCooldowns(cooldowns []Cooldown) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, value := range cooldowns {
+		if entry := p.entry(value.Account); entry != nil && entry.State == StateReady {
+			entry.restore(value)
+			continue
+		}
+		p.restored[value.Account] = append(p.restored[value.Account], value)
+	}
+}
+
+// OnCooldownChange 登记冷却变化后保存全部冷却的函数
+func (p *AccountPool) OnCooldownChange(save func([]Cooldown)) {
+	p.mu.Lock()
+	p.saveCooldowns = save
+	p.mu.Unlock()
+}
+
+// Cooldowns 返回尚未结束的账号与模型冷却，含尚未就绪账号待恢复的冷却
+func (p *AccountPool) Cooldowns() []Cooldown {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cooldownsLocked(time.Now())
+}
+
+func (p *AccountPool) cooldownsLocked(now time.Time) []Cooldown {
+	var cooldowns []Cooldown
+	for _, values := range p.restored {
+		for _, value := range values {
+			if now.Before(value.Until) {
+				cooldowns = append(cooldowns, value)
+			}
+		}
+	}
+	for _, entry := range p.entries {
+		if now.Before(entry.Cooldown.until) {
+			cooldowns = append(cooldowns, Cooldown{Account: entry.AccountID, Until: entry.Cooldown.until, Reason: entry.Cooldown.reason})
+		}
+		for model, value := range entry.ModelCooldowns {
+			if now.Before(value.until) {
+				cooldowns = append(cooldowns, Cooldown{Account: entry.AccountID, Model: model, Until: value.until, Reason: value.reason})
+			}
+		}
+	}
+	return cooldowns
+}
+
+// persistCooldowns 在冷却变化后把全部冷却交给 OnCooldownChange 登记的函数
+func (p *AccountPool) persistCooldowns() {
+	p.persistMu.Lock()
+	defer p.persistMu.Unlock()
+	p.mu.Lock()
+	save, cooldowns := p.saveCooldowns, p.cooldownsLocked(time.Now())
+	p.mu.Unlock()
+	if save != nil {
+		save(cooldowns)
+	}
+}
+
+// restore 恢复一条保存的冷却
+func (e *accountEntry) restore(value Cooldown) {
+	if value.Model == "" {
+		e.Cooldown = cooldown{until: value.Until, reason: value.Reason}
+		return
+	}
+	e.ModelCooldowns[value.Model] = cooldown{until: value.Until, reason: value.Reason}
 }
 
 // SetStrategy 修改无会话请求的调度策略
@@ -200,6 +295,8 @@ func (p *AccountPool) SetClient(accountID string, client *gemini.Client) {
 	defer p.mu.Unlock()
 	if entry := p.entry(accountID); entry != nil {
 		entry.Client = client
+		client.SetReleaseHook(p.notify)
+		p.notifyLocked()
 	}
 }
 
@@ -214,6 +311,11 @@ func (p *AccountPool) MarkReady(accountID string) {
 	entry.State, entry.ReadyAt = StateReady, time.Now()
 	entry.LastError, entry.LastErrorAt = "", time.Time{}
 	entry.Cooldown, entry.ConsecutiveFails = cooldown{}, 0
+	for _, value := range p.restored[accountID] {
+		entry.restore(value)
+	}
+	delete(p.restored, accountID)
+	p.notifyLocked()
 }
 
 // MarkFailed 把账号标为不可用或待认证并记录原因，返回状态是否变化
@@ -232,6 +334,7 @@ func (p *AccountPool) MarkFailed(accountID string, err error) bool {
 	changed := entry.State != state || entry.LastError != errorText(err)
 	entry.State = state
 	entry.LastError, entry.LastErrorAt = errorText(err), time.Now()
+	p.notifyLocked()
 	return changed
 }
 
@@ -267,6 +370,7 @@ func (p *AccountPool) SetDisabled(accountID string, disabled bool) {
 	if entry == nil {
 		return
 	}
+	defer p.notifyLocked()
 	if disabled {
 		entry.State = StateDisabled
 		return
@@ -300,6 +404,7 @@ func (p *AccountPool) Remove(accountID string) {
 			delete(p.sessions, key)
 		}
 	}
+	p.notifyLocked()
 }
 
 // Client 返回账号的协议客户端
@@ -312,9 +417,90 @@ func (p *AccountPool) Client(accountID string) *gemini.Client {
 	return nil
 }
 
-// NextForModel 为新请求选择真正支持目标模型的健康账号
-func (p *AccountPool) NextForModel(sessionKey string, modelID string) (*gemini.Client, string) {
-	return p.NextForModelExcluding(sessionKey, modelID, nil)
+// AcquireForModel 选择可调度该模型的账号并占用一个请求槽，返回客户端、账号与释放函数；同一排队键的请求按到达顺序排队，队首在任一账号空出、就绪或状态变化后重新选择，没有可调度账号时客户端为空
+func (p *AccountPool) AcquireForModel(ctx context.Context, sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (*gemini.Client, string, func(), error) {
+	key, wake := p.joinQueue(sessionKey, modelID, excludedAccountIDs)
+	defer p.leaveQueue(key, wake)
+	accountID := ""
+	for {
+		if p.queueHead(key, wake) {
+			var client *gemini.Client
+			client, accountID = p.NextForModelExcluding(sessionKey, modelID, excludedAccountIDs)
+			if client == nil {
+				return nil, accountID, nil, nil
+			}
+			if release, ok := client.TryAcquireRequest(); ok {
+				return client, accountID, release, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, accountID, nil, ctx.Err()
+		case <-wake:
+		}
+	}
+}
+
+// joinQueue 把请求排到排队键的队尾，返回排队键与唤醒通道；排队键为模型、会话绑定的账号与排除的账号
+func (p *AccountPool) joinQueue(sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (string, chan struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	bound := ""
+	if binding, ok := p.sessions[sessionKey]; ok && sessionKey != "" && time.Now().Before(binding.ExpiresAt) {
+		bound = binding.AccountID
+	}
+	key := modelID + "\x00" + bound + "\x00" + strings.Join(slices.Sorted(maps.Keys(excludedAccountIDs)), ",")
+	wake := make(chan struct{}, 1)
+	p.queues[key] = append(p.queues[key], wake)
+	return key, wake
+}
+
+// leaveQueue 移除排队请求，它位于队首时唤醒下一个请求
+func (p *AccountPool) leaveQueue(key string, wake chan struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	waiters := p.queues[key]
+	index := slices.Index(waiters, wake)
+	waiters = slices.Delete(waiters, index, index+1)
+	if len(waiters) == 0 {
+		delete(p.queues, key)
+		return
+	}
+	p.queues[key] = waiters
+	if index == 0 {
+		signal(waiters[0])
+	}
+}
+
+// queueHead 报告排队请求是否位于队首
+func (p *AccountPool) queueHead(key string, wake chan struct{}) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.queues[key][0] == wake
+}
+
+// signal 不阻塞地唤醒排队请求
+func signal(wake chan struct{}) {
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+// notify 唤醒等待账号的请求
+func (p *AccountPool) notify() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.notifyLocked()
+}
+
+// notifyLocked 唤醒等待账号变化的调用方与每个排队键的队首，调用方持有 p.mu
+func (p *AccountPool) notifyLocked() {
+	close(p.changed)
+	p.changed = make(chan struct{})
+	for _, waiters := range p.queues {
+		signal(waiters[0])
+	}
 }
 
 // NextForModelExcluding 为无会话重试选择未排除的同能力账号
@@ -385,20 +571,36 @@ func (p *AccountPool) RetryAfter(modelID string) time.Time {
 
 // ReportSuccess 清除账号与该模型的失败状态
 func (p *AccountPool) ReportSuccess(accountID string, modelID string) {
+	cleared := false
+	defer func() {
+		if cleared {
+			p.persistCooldowns()
+		}
+	}()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if entry := p.entry(accountID); entry != nil {
+		_, modelCooling := entry.ModelCooldowns[modelID]
+		cleared = !entry.Cooldown.until.IsZero() || modelCooling
 		entry.ConsecutiveFails = 0
 		entry.Cooldown = cooldown{}
 		delete(entry.ModelCooldowns, modelID)
+		p.notifyLocked()
 	}
 }
 
 // ReportFailure 按错误类型把账号或该模型移入冷却，会话失效时把账号标为待认证，网络层失败只记录错误
 func (p *AccountPool) ReportFailure(accountID string, modelID string, err error) {
+	cooled := false
+	defer func() {
+		if cooled {
+			p.persistCooldowns()
+		}
+	}()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	defer p.notifyLocked()
 
 	entry := p.entry(accountID)
 	if entry == nil {
@@ -423,6 +625,7 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 		until = reset
 	}
 	value := cooldown{until: until, reason: reason}
+	cooled = true
 	if modelScope && modelID != "" {
 		entry.ModelCooldowns[modelID] = value
 		logging.Warn(accountID, "模型冷却", "模型", modelID, "至", until, "原因", reason)
@@ -507,22 +710,24 @@ func (p *AccountPool) Size() int {
 	return status.Available
 }
 
-// ReadyAccount 是一个已就绪账号的 ID 与客户端
-type ReadyAccount struct {
+// CatalogAccount 是一个已就绪或已读取模型目录的账号，Ready 表示已就绪
+type CatalogAccount struct {
 	ID     string
 	Client *gemini.Client
+	Ready  bool
 }
 
-// ReadyAccounts 返回已就绪账号，用于汇总模型目录
-func (p *AccountPool) ReadyAccounts() []ReadyAccount {
+// CatalogAccounts 返回已就绪或已读取模型目录的账号，用于汇总模型目录
+func (p *AccountPool) CatalogAccounts() []CatalogAccount {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	accounts := make([]ReadyAccount, 0, len(p.entries))
+	accounts := make([]CatalogAccount, 0, len(p.entries))
 	for _, entry := range p.entries {
-		if entry.Client != nil && entry.State == StateReady {
-			accounts = append(accounts, ReadyAccount{ID: entry.AccountID, Client: entry.Client})
+		if entry.Client == nil || entry.State != StateReady && len(entry.Client.Models()) == 0 {
+			continue
 		}
+		accounts = append(accounts, CatalogAccount{ID: entry.AccountID, Client: entry.Client, Ready: entry.State == StateReady})
 	}
 	return accounts
 }
@@ -546,31 +751,74 @@ func (p *AccountPool) ModelAccounts() map[string]int {
 	return counts
 }
 
-// HasModel 报告已就绪账号是否发现目标模型
-func (p *AccountPool) HasModel(modelID string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for _, entry := range p.entries {
-		if entry.Client != nil && entry.State == StateReady && entry.supportsModel(modelID) {
-			return true
-		}
-	}
-	return false
+// ModelAvailability 是目标模型在账号池中的调度情况
+type ModelAvailability struct {
+	// Catalog 表示至少一个账号已就绪或已读取模型目录
+	Catalog bool
+	// Known 表示至少一个账号的模型目录含该模型
+	Known bool
+	// Ready 表示有可调度该模型的账号
+	Ready bool
+	// Reasons 为不可调度时支持该模型的各账号的原因
+	Reasons []string
+	// Pending 为尚未读取模型目录的未停用账号的状态
+	Pending []string
 }
 
-// HasReadyModel 报告当前是否有可调度账号可以运行目标模型
-func (p *AccountPool) HasReadyModel(modelID string) bool {
+// ModelAvailability 按全部账号的模型目录返回目标模型的调度情况
+func (p *AccountPool) ModelAvailability(modelID string) ModelAvailability {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := time.Now()
+	var availability ModelAvailability
 	for _, entry := range p.entries {
-		if entry.schedulable(now, modelID) {
-			return true
+		if entry.Client == nil || entry.State != StateReady && len(entry.Client.Models()) == 0 {
+			if entry.State != StateDisabled {
+				availability.Pending = append(availability.Pending, entry.unavailableReason(now, modelID))
+			}
+			continue
 		}
+		availability.Catalog = true
+		if !entry.supportsModel(modelID) {
+			continue
+		}
+		availability.Known = true
+		if entry.schedulable(now, modelID) {
+			availability.Ready = true
+			continue
+		}
+		availability.Reasons = append(availability.Reasons, entry.unavailableReason(now, modelID))
 	}
-	return false
+	if availability.Ready {
+		availability.Reasons = nil
+	}
+	return availability
+}
+
+// AccountReason 返回账号不能调度该模型的原因：冷却截止时间或账号状态
+func (p *AccountPool) AccountReason(accountID string, modelID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entry := p.entry(accountID); entry != nil {
+		return entry.unavailableReason(time.Now(), modelID)
+	}
+	return accountID + " 已移除"
+}
+
+// unavailableReason 返回账号不能调度该模型的原因，调用方持有 p.mu
+func (e *accountEntry) unavailableReason(now time.Time, modelID string) string {
+	if until := e.blockedUntil(now, modelID); e.State == StateReady && !until.IsZero() {
+		return fmt.Sprintf("%s 冷却至 %s", e.AccountID, until.Local().Format(time.TimeOnly))
+	}
+	return e.AccountID + " " + string(e.State)
+}
+
+// Changed 返回账号状态下一次变化或请求槽释放时关闭的通道
+func (p *AccountPool) Changed() <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.changed
 }
 
 // Status 返回账号池状态快照

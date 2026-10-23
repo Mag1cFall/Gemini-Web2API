@@ -44,7 +44,7 @@ export function Select<T extends string>({
           className,
         )}
       >
-        <span className="truncate">
+        <span className="truncate" title={options.find((option) => option.value === value)?.label}>
           <Primitive.Value />
         </span>
         <Primitive.Icon className="shrink-0 text-foreground-muted">

@@ -217,7 +217,7 @@ export const dashboardMessages = defineMessages({
     title: 'Vue d’ensemble',
     description: 'État du service, requêtes en direct et configuration des clients',
     accounts: 'Comptes',
-    accountsReady: '{ready}/{total} prêts',
+    accountsReady: 'Prêts : {ready}/{total}',
     steps: 'Prise en main',
     stepImportHint:
       'Importez des comptes Gemini depuis Chrome, des cookies ou un appairage à distance',

@@ -5,14 +5,12 @@ package app
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/desktop"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // appName 是桌面版的应用名与数据目录名
@@ -46,7 +44,7 @@ func desktopDataDir() (string, error) {
 	return filepath.Join(base, appName), nil
 }
 
-// runDefault 以桌面窗口与托盘运行服务，日志写入数据目录并按大小轮转
+// runDefault 以桌面窗口与托盘运行服务
 func runDefault(args []string) error {
 	hidden := slices.Contains(args, "--"+desktop.HiddenFlag)
 	args = slices.DeleteFunc(slices.Clone(args), func(arg string) bool { return arg == "--"+desktop.HiddenFlag })
@@ -58,29 +56,22 @@ func runDefault(args []string) error {
 	if err != nil {
 		return err
 	}
-	logFile := &lumberjack.Logger{Filename: filepath.Join(dataDir, "logs", "gemini-web2api.log"), MaxSize: 10, MaxBackups: 5, LocalTime: true}
-	defer logFile.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("定位可执行文件: %w", err)
+	}
 	return desktop.Run(desktop.Options{
 		URL:     AdminURL(cfg.ListenAddress),
 		Title:   appName,
 		DataDir: filepath.Join(workDir, dataDir, "webview"),
 		Hidden:  hidden,
 		Serve: func(ctx context.Context) error {
-			instance, err := Start(cfg, fileTee{logFile}, true)
+			instance, err := Start(cfg, nil, true)
 			if err != nil {
 				return err
 			}
+			instance.executable, instance.restart = executable, desktopRestart
 			return instance.Serve(ctx)
 		},
 	})
-}
-
-// fileTee 把日志写到标准错误与日志文件，没有控制台时标准错误写入失败，文件照常写入
-type fileTee struct {
-	file io.Writer
-}
-
-func (tee fileTee) Write(data []byte) (int, error) {
-	_, _ = os.Stderr.Write(data)
-	return tee.file.Write(data)
 }

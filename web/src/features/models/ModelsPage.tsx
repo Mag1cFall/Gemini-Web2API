@@ -1,5 +1,5 @@
 import { Boxes } from 'lucide-react'
-import { useState } from 'react'
+import { useSearchParams } from 'react-router'
 
 import { Badge } from '@/components/ui/badge'
 import { Card, CardEmpty, CardHeader, CountBadge, PageHeader } from '@/components/ui/page'
@@ -9,13 +9,14 @@ import { Table, Td, Th } from '@/components/ui/table'
 import { modelsMessages } from '@/features/models/messages'
 import { useModels } from '@/features/models/queries'
 import { formatNumber } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 
-// ModelsPage 列出公开模型目录
+// ModelsPage 列出公开模型目录，搜索词写入地址的 q 参数
 export function ModelsPage() {
   const m = useMessages(modelsMessages)
   const { locale } = useI18n()
-  const [q, setQ] = useState('')
+  const [params, setParams] = useSearchParams()
+  const q = params.get('q') ?? ''
   const models = useModels()
   if (models.isPending) return <Loading label={m.title} />
   if (models.isError) {
@@ -49,7 +50,10 @@ export function ModelsPage() {
                 placeholder={m.search}
                 value={q}
                 onChange={(event) => {
-                  setQ(event.target.value)
+                  const search = new URLSearchParams(params)
+                  if (event.target.value) search.set('q', event.target.value)
+                  else search.delete('q')
+                  setParams(search, { replace: true })
                 }}
                 className="w-[240px]"
               />
@@ -108,7 +112,10 @@ export function ModelsPage() {
                     <Td className="whitespace-nowrap">
                       <div className="flex flex-nowrap gap-1">
                         <Badge tone="success">
-                          {fill(m.available, { count: model.accounts.length })}
+                          {fill(
+                            plural(locale, model.accounts.length, m.availableOne, m.available),
+                            { count: model.accounts.length },
+                          )}
                         </Badge>
                         {model.cooling_accounts.length > 0 && (
                           <Badge tone="warning">

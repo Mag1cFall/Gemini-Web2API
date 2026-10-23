@@ -236,10 +236,7 @@ func (m *Manager) launch(account auth.LoadedAccount, firstDone func()) {
 	}
 
 	if account.OAuth != nil {
-		material, proxy := *account.OAuth, account.ProxyURL
-		account.Source.Refresh = func(ctx context.Context) ([]gemini.Cookie, error) {
-			return chromeauth.Refresh(ctx, material, proxy)
-		}
+		account.Source.Refresh = newChromeRenewal(account).refresh
 	}
 	account.Source.Concurrency = settings.Concurrency
 	client, err := gemini.NewClient(account.Source, account.ProxyURL, settings.SaveHistory)
@@ -309,6 +306,10 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 		case gemini.IsAuthenticationError(err):
 			if m.pool.MarkFailed(account.ID, err) {
 				logging.Warn(account.ID, "账号会话失效", "下次检查", next, "错误", err)
+			}
+		case errors.Is(err, gemini.ErrAccountRestricted):
+			if m.pool.MarkFailed(account.ID, err) {
+				logging.Warn(account.ID, "账号不可用", "下次检查", next, "错误", err)
 			}
 		default:
 			m.pool.RecordError(account.ID, err)

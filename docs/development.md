@@ -4,7 +4,7 @@ Gemini-Web2API 以纯 Go 进程连接 Gemini Web，再将一条规范事件流�
 
 ## 本地开发
 
-源码构建需要 Go 1.25.0 或更高版本，以及构建管理端前端的 Node.js 与 pnpm。发布版可执行文件可直接运行。Windows 首次运行可以直接执行根目录的 `start.bat`，开发时使用以下命令：
+源码构建需要 Go 1.26.0 或更高版本，以及构建管理端前端的 Node.js 与 pnpm。发布版可执行文件可直接运行，开发时使用以下命令：
 
 ```powershell
 pnpm -C web install
@@ -13,9 +13,9 @@ go run ./cmd/gemini-web2api setup
 go run ./cmd/gemini-web2api
 ```
 
-`start.bat` 优先启动现有可执行文件，文件不存在时先构建前端再编译。修改源码后使用 `go build -o gemini-web2api.exe ./cmd/gemini-web2api` 重建；不带参数启动会打开浏览器，开发调试时加 `--open-ui=false`。
+修改源码后使用 `go build -tags nomsgpack -o gemini-web2api.exe ./cmd/gemini-web2api` 重建命令行版，build tag `nomsgpack` 去掉 gin 的 MsgPack 编解码，Release 与 Docker 镜像都按此构建；不带参数启动会打开浏览器，开发调试时加 `--open-ui=false`。
 
-程序从当前目录读取 `.env`。`setup` 与日常服务共同使用 `PROXY`；`setup --proxy` 为本次导入的账号指定代理，并写入认证文件作为该账号运行时的固定出口。认证状态保存在 `auth/`，不得提交 Cookie、refresh token、wrapped binding key、请求日志或账号信息。
+程序从当前目录读取 `.env`。`setup` 与日常服务共同使用 `PROXY`；`setup --proxy` 为本次导入的账号指定代理，并写入认证文件作为该账号运行时的固定出口。认证状态保存在 `auth/`，运行数据与日志保存在 `data/`；这两个目录与 `.env` 都在 `.gitignore` 中，Cookie、refresh token、wrapped binding key、请求日志与账号信息只留在本机。
 
 无需读取本机 Chrome 时，可以用 `setup --cookie "<Cookie value>" --id <name>` 导入请求头中 `Cookie` 字段的一行值。这种状态只使用现有 Cookie，失效后重新导入。
 
@@ -71,7 +71,7 @@ pnpm build        # 构建到 ../internal/webui/dist
 
 - **接口调用**：页面只调用管理端 `/api/*`，统一经 `src/lib/api.ts` 的 `api()` 发出，数据查询与缓存用 TanStack Query，写在各功能的 `queries.ts`
 - **接口类型**：各功能的 `types.ts` 按 `internal/admin` 与 `internal/requestdb` 返回的 JSON 手写，后端字段变化时同步修改
-- **实时数据**：`src/app/events.ts` 用 `EventSource` 订阅 `/api/events`，接收服务状态、账号、模型、冷却、进行中与最近结束的请求以及日志，再更新查询缓存
+- **实时数据**：`src/app/events.ts` 用 `EventSource` 订阅 `/api/events`，接收服务状态、账号、模型、冷却、进行中与最近结束的 20 个生成请求以及日志，再更新查询缓存；连接建立时先以一条 `logs` 事件回放最近 2000 条日志，再推送进行中请求的快照，之后的日志逐条以 `log` 事件推送
 - **多语言**：每个功能的 `messages.ts` 用 `src/lib/i18n.tsx` 的 `defineMessages` 声明 zh-CN、zh-TW、en、ja、ko、fr、de 七种语言，键以简体中文为准，类型检查要求七种语言的键一致；页面用 `useMessages` 取当前语言的文案
 - **样式**：颜色、间距、字号、圆角、阴影与动效只在 `src/index.css` 的 `@theme` 中定义，组件只使用这些 token
 - **提交前检查**：`pnpm lint`、`pnpm format:check`、`pnpm typecheck`、`pnpm test`、`pnpm build`，与 CI 的 `web` 任务相同
@@ -83,12 +83,14 @@ pnpm build        # 构建到 ../internal/webui/dist
 ```powershell
 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.29
 wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest build/windows/wails.exe.manifest -info build/windows/info.json -out cmd/gemini-web2api/wails_windows_amd64.syso
-go build -tags desktop,production -ldflags="-H windowsgui" -o bin/gemini-web2api.exe ./cmd/gemini-web2api
+go build -tags desktop,production,nomsgpack -ldflags="-H windowsgui" -o bin/gemini-web2api.exe ./cmd/gemini-web2api
 ```
 
-生成的 `wails_windows_amd64.syso` 同样作用于命令行版：保留该文件执行 `go build -o gemini-web2api.exe ./cmd/gemini-web2api`，Windows 可执行文件即带应用图标与版本信息，Release 的 Windows 命令行包按此构建。
+生成的 `wails_windows_amd64.syso` 同样作用于命令行版：保留该文件执行 `go build -tags nomsgpack -o gemini-web2api.exe ./cmd/gemini-web2api`，Windows 可执行文件即带应用图标与版本信息。
 
-Windows 便携包为桌面版可执行文件与 README、LICENSE、`.env.example` 的 zip。macOS 与 Linux 需要 CGO，Linux 另需 `libgtk-4-dev` 与 `libwebkitgtk-6.0-dev`；完整打包步骤见 `.github/workflows/build.yml`。`--hidden` 启动时只显示托盘图标，开机启动使用该参数。
+Release 的 Windows 包是只含桌面版 `gemini-web2api.exe` 的 zip，`setup`、`version` 与 `--help` 附加到启动它的控制台，没有控制台时新建一个；Linux 与 macOS 的命令行包是只含 `gemini-web2api` 的 tar.gz，Linux 桌面版便携包同样只含可执行文件，macOS 便携包为通用 `Gemini-Web2API.app` 的 tar.gz。macOS 与 Linux 需要 CGO，Linux 另需 `libgtk-4-dev` 与 `libwebkitgtk-6.0-dev`；完整打包步骤见 `.github/workflows/build.yml`。`--hidden` 启动时只显示托盘图标，开机启动使用该参数。
+
+在线更新在 `internal/app/update*.go`：`GET /api/update` 读取 GitHub 最新发行版本（缓存一小时，`?refresh=1` 重新读取），`POST /api/update` 按发行版本记录的 `sha256:` 摘要校验当前平台的发行包。命令行版取 `gemini-web2api-<版本>-<系统>-<架构>` 包中的可执行文件，经 `minio/selfupdate` 替换后停机，以原参数加 `--open-ui=false` 启动新版本；桌面版在 Windows 上取同一个 Windows 包，在 macOS 与 Linux 上取 `gemini-web2api-desktop-<版本>-…` 包，经 Wails 更新器暂存，退出后由更新器的辅助进程替换文件并启动新版本，macOS 替换整个 `Gemini-Web2API.app`；Linux 与 macOS 上新版本暂存在被替换的可执行文件或 `.app` 所在目录，与替换目标位于同一文件系统。重启前移除启动时从 `.env` 写入进程环境的变量，新版本按当前 `.env` 读取配置，启动前已有的环境变量保持优先。Windows 上运行中的可执行文件只能改名，替换后旧文件以 `.gemini-web2api.exe.old`（命令行版，隐藏文件）或 `gemini-web2api.exe.old.<时间戳>`（桌面版）留在同一目录，新版本启动后可以删除。版本号不是正式 semver 标签的构建按源码构建处理，在 Docker 容器中运行时随镜像更新，“关于”页对这两种运行方式显示对应的更新方法。
 
 ## 请求链路
 
@@ -130,7 +132,7 @@ Windows 便携包为桌面版可执行文件与 README、LICENSE、`.env.example
 
 - **启动**：`internal/app` 读取配置后创建 `AccountPool` 与 `accounts.Manager`，`Start` 为每个账号启动独立的初始化与轮换循环，并另建访客会话
 - **管理端操作**：`internal/admin` 的账号接口调用 `Manager` 的对应方法，Chrome 导入、Cookie 导入与远程配对分别经 `ImportChrome`、`ImportCookie`、`ImportState` 写入认证目录后加入调度
-- **状态读取**：管理端与 `/v1/accounts/health` 读取 `AccountPool.Status`，账号用量读取 `AccountPool.Usage`
+- **状态读取**：管理端读取 `AccountPool.Status` 并附上各账号首页 `oPEP7c` 的登录邮箱，账号用量读取 `AccountPool.Usage`
 - **冷却原因**：以代码记录，取值为 `usage_limit`、`rate_limited`、`model_mismatch`、`ip_restricted`、`captcha` 与 `upstream_error`，管理端按代码显示当前语言的文案
 
 ## 日志与请求账本
@@ -189,7 +191,7 @@ go vet ./...
 go build ./cmd/gemini-web2api
 ```
 
-GitHub Actions 对 `main` 提交和 Pull Request 使用 `go.mod` 最低版本执行检查，再用当前稳定版 Go 构建 Windows amd64、Linux amd64/arm64、macOS amd64/arm64 发布包，以及 Windows 便携包、macOS 通用 dmg、Linux AppImage 与 deb 桌面版。推送 `v*` 版本标签后自动创建 Release，附件包含二进制、Windows 启动文件、示例配置和文档；含 `-` 的标签发布为预发布版本。普通构建产物保留七天，Release 附件长期保留。
+GitHub Actions 对 `main` 提交和 Pull Request 使用 `go.mod` 最低版本执行检查，再用当前稳定版 Go 构建上文“桌面版”一节所述的 Windows 包、Linux 与 macOS 命令行包及桌面版便携包。推送 `v*` 版本标签后自动创建 Release 并上传这些包；含 `-` 的标签发布为预发布版本。普通构建产物保留七天，Release 附件长期保留。
 
 提交前在本地运行与 CI 相同的检查：
 
@@ -207,10 +209,10 @@ CI 由 `.github/workflows/build.yml` 定义：
 | 任务 | 触发 | 作用 |
 | --- | --- | --- |
 | `web` | 全部 | 解析版本号，前端检查与构建 |
-| `headless` | 全部 | Go 测试、静态检查、五平台命令行包 |
-| `desktop-windows` | 全部 | Windows 便携包 |
-| `desktop-macos` | 全部 | macOS 通用 dmg |
-| `desktop-linux` | 全部 | Linux AppImage 与 deb |
+| `headless` | 全部 | Go 测试、静态检查、Linux 与 macOS 命令行包 |
+| `desktop-windows` | 全部 | Windows 包 |
+| `desktop-macos` | 全部 | macOS 通用 `.app` 便携包 |
+| `desktop-linux` | 全部 | Linux amd64/arm64 便携包 |
 | `release` | `v*` 标签 | 创建 Release 并上传全部包 |
 | `docker` | `v*` 标签 | 推送 `ghcr.io` 多架构镜像 |
 

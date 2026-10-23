@@ -15,7 +15,7 @@ import { usePreference } from '@/features/usage/preference'
 import { recordsParams, type RecordsScope, useUsageRecords } from '@/features/usage/queries'
 import { RecordDrawer } from '@/features/usage/RecordDrawer'
 import type { UsageRecord } from '@/features/usage/types'
-import { fill, useMessages } from '@/lib/i18n'
+import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 
 // Column 是请求记录表可开关的列
 type Column = 'model' | 'account' | 'protocol' | 'tokens' | 'latency' | 'queue' | 'attempts'
@@ -70,6 +70,7 @@ export function RecordsTable({
   onSearch: (q: string) => void
 }) {
   const m = useMessages(usageMessages)
+  const { locale } = useI18n()
   const f = useUsageFormat()
   const id = useId()
   const [pageSize, setPageSize] = usePreference('pageSize', 20, isPageSize)
@@ -211,7 +212,9 @@ export function RecordsTable({
           </h2>
           {!status && !q && (
             <p className="text-xs text-foreground-muted">
-              {fill(total === 1 ? m.recordsCountOne : m.recordsCount, { count: f.integer(total) })}
+              {fill(plural(locale, total, m.recordsCountOne, m.recordsCount), {
+                count: f.integer(total),
+              })}
             </p>
           )}
         </div>

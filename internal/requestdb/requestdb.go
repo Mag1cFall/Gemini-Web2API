@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS requests (
  model TEXT NOT NULL, provider_model TEXT NOT NULL, response_id TEXT NOT NULL, account TEXT NOT NULL,
  status INTEGER NOT NULL, state TEXT NOT NULL, duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL,
- total_tokens INTEGER NOT NULL, tool_calls INTEGER NOT NULL, error TEXT NOT NULL, attempts TEXT NOT NULL);
+ total_tokens INTEGER NOT NULL, tool_calls INTEGER NOT NULL, error TEXT NOT NULL, attempts TEXT NOT NULL,
+ thinking TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS requests_time ON requests(time);
 CREATE INDEX IF NOT EXISTS requests_model_time ON requests(model, time);
 CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
@@ -75,7 +76,9 @@ CREATE INDEX IF NOT EXISTS videos_created ON videos(created_at);
 CREATE TABLE IF NOT EXISTS sessions (
  key TEXT PRIMARY KEY, cid TEXT NOT NULL, rid TEXT NOT NULL, rcid TEXT NOT NULL, token TEXT NOT NULL,
  model_mode INTEGER NOT NULL, turns INTEGER NOT NULL, account TEXT NOT NULL, context_tokens INTEGER NOT NULL, expires_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);`
+CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS cooldowns (
+ account TEXT NOT NULL, model TEXT NOT NULL, until INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY (account, model));`
 
 // Body 是一次请求捕获的请求与响应正文及其原始字节数
 type Body struct {
@@ -116,12 +119,25 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
 	}
+	if err := addThinking(db); err != nil {
+		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
+	}
 	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{})}
 	if err := store.alignDays(); err != nil {
 		return nil, errors.Join(fmt.Errorf("重建本地日汇总: %w", err), db.Close())
 	}
 	go store.run()
 	return store, nil
+}
+
+// addThinking 为没有思考强度列的请求表追加该列，已有记录为空
+func addThinking(db *sql.DB) error {
+	var exists bool
+	if err := db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('requests') WHERE name = 'thinking'`).Scan(&exists); err != nil || exists {
+		return err
+	}
+	_, err := db.Exec(`ALTER TABLE requests ADD COLUMN thinking TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // Close 写完已排队的记录后关闭数据库
@@ -295,10 +311,10 @@ func (store *Store) write(batch []write) (err error) {
 				return err
 			}
 			usage := usageOf(info)
-			result, err := tx.Exec(`INSERT OR IGNORE INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			result, err := tx.Exec(`INSERT OR IGNORE INTO requests (id,time,protocol,path,model,provider_model,response_id,account,status,state,duration_ms,first_event_ms,queue_ms,input_tokens,reasoning_tokens,reply_tokens,total_tokens,tool_calls,error,attempts,thinking) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				info.ID, finishedAt(info).UnixMilli(), info.Protocol, info.Path, info.Model, info.ProviderModel, info.ResponseID,
 				info.Account, info.Status, info.State, info.DurationMS, info.FirstEventMS, info.QueueMS,
-				usage.InputTokens, usage.ReasoningTokens, usage.ReplyTokens, usage.TotalTokens, info.ToolCalls, info.Error, string(encoded))
+				usage.InputTokens, usage.ReasoningTokens, usage.ReplyTokens, usage.TotalTokens, info.ToolCalls, info.Error, string(encoded), info.Thinking)
 			if err != nil {
 				return err
 			}

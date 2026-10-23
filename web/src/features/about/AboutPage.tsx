@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Card, CardHeader, PageHeader } from '@/components/ui/page'
 import { ErrorState, Loading } from '@/components/ui/states'
+import { UpdateCard } from '@/features/about/UpdateCard'
 import { useStatus } from '@/features/service/queries'
 import { formatFullDateTime } from '@/lib/format'
 import { defineMessages, useI18n, useMessages } from '@/lib/i18n'
@@ -136,14 +137,14 @@ const aboutMessages = defineMessages({
 // Row 是关于页的一行键值
 function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="flex flex-col gap-1 border-t border-border py-3 first:border-t-0 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex flex-col gap-1 border-t border-border py-3 first:border-t-0 sm:flex-row sm:items-center sm:justify-between lg:nth-2:border-t-0">
       <dt className="text-sm text-foreground-muted">{label}</dt>
       <dd className="font-mono break-all">{value}</dd>
     </div>
   )
 }
 
-// AboutPage 展示版本、运行方式与项目链接
+// AboutPage 展示版本、运行方式、在线更新与项目链接
 export function AboutPage() {
   const m = useMessages(aboutMessages)
   const app = useMessages(appMessages)
@@ -165,8 +166,34 @@ export function AboutPage() {
     <>
       <PageHeader title={m.title} description={m.tagline} />
       <Card>
-        <CardHeader title="Gemini-Web2API" />
-        <dl className="px-5 py-1">
+        <CardHeader
+          title="Gemini-Web2API"
+          actions={
+            <>
+              <Button variant="ghost" asChild>
+                <a
+                  href="https://github.com/Mag1cFall/Gemini-Web2API"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {m.homepage}
+                  <ExternalLink size={16} aria-hidden />
+                </a>
+              </Button>
+              <Button variant="ghost" asChild>
+                <a
+                  href="https://github.com/Mag1cFall/Gemini-Web2API/releases"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {m.releases}
+                  <ExternalLink size={16} aria-hidden />
+                </a>
+              </Button>
+            </>
+          }
+        />
+        <dl className="grid px-5 py-1 lg:grid-cols-2 lg:gap-x-10">
           <Row label={m.version} value={data.version} />
           <Row label={m.host} value={data.desktop ? m.hostDesktop : m.hostWeb} />
           <Row label={m.listen} value={data.listen_addr} />
@@ -183,24 +210,7 @@ export function AboutPage() {
           <Row label={m.started} value={formatFullDateTime(new Date(data.started_at), locale)} />
         </dl>
       </Card>
-      <div className="flex flex-wrap gap-3">
-        <Button variant="secondary" asChild>
-          <a href="https://github.com/Mag1cFall/Gemini-Web2API" target="_blank" rel="noreferrer">
-            {m.homepage}
-            <ExternalLink size={16} aria-hidden />
-          </a>
-        </Button>
-        <Button variant="secondary" asChild>
-          <a
-            href="https://github.com/Mag1cFall/Gemini-Web2API/releases"
-            target="_blank"
-            rel="noreferrer"
-          >
-            {m.releases}
-            <ExternalLink size={16} aria-hidden />
-          </a>
-        </Button>
-      </div>
+      <UpdateCard />
     </>
   )
 }

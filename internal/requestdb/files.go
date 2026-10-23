@@ -37,6 +37,8 @@ type FileQuery struct {
 	Ascending bool
 	// After 为上一页最后一个文件 ID
 	After string
+	// IDs 非空时只返回其中的文件
+	IDs   []string
 	Limit int
 }
 
@@ -163,6 +165,12 @@ func (store *Store) Files(ctx context.Context, query FileQuery) ([]StoredFile, b
 	where, args := []string{"1=1"}, []any{}
 	if query.Purpose != "" {
 		where, args = append(where, "purpose=?"), append(args, query.Purpose)
+	}
+	if len(query.IDs) > 0 {
+		where = append(where, "id IN (?"+strings.Repeat(",?", len(query.IDs)-1)+")")
+		for _, id := range query.IDs {
+			args = append(args, id)
+		}
 	}
 	comparison, order := "<", "DESC"
 	if query.Ascending {

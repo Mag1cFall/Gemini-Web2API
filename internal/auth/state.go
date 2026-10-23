@@ -244,6 +244,15 @@ func (f *File) Proxy() string {
 	return f.state.Metadata.Proxy
 }
 
+// SetOAuth 更新续签材料与来源 Profile 并写回
+func (f *File) SetOAuth(material OAuthMaterial, profile string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state.Metadata.OAuth = &material
+	f.state.Metadata.Source.Profile = profile
+	return f.writeLocked()
+}
+
 // SaveCookies 更新 Cookie 并原子写回认证状态
 func (f *File) SaveCookies(cookies []gemini.Cookie) error {
 	f.mu.Lock()

@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -25,6 +26,17 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 )
+
+// ErrCredentialsRejected 表示 OAuthMultilogin 以 INVALID_TOKENS 拒绝了保存的续签材料
+var ErrCredentialsRejected = errors.New("Chrome OAuth 续签材料被拒绝")
+
+// multiloginStatusError 返回 OAuthMultilogin 某一阶段的失败，INVALID_TOKENS 时包含 ErrCredentialsRejected
+func multiloginStatusError(phase string, statusCode int, status string) error {
+	if status == "INVALID_TOKENS" {
+		return fmt.Errorf("%w: OAuthMultilogin %s 阶段失败 HTTP %d status %s", ErrCredentialsRejected, phase, statusCode, status)
+	}
+	return fmt.Errorf("OAuthMultilogin %s 阶段失败 HTTP %d status %s", phase, statusCode, status)
+}
 
 // multiloginURL 是 OAuthMultilogin 的地址
 var multiloginURL = "https://accounts.google.com/oauth/multilogin?source=ChromiumAccountReconcilorDice&reuseCookies=0"
@@ -84,7 +96,7 @@ func fetchBearerCookies(ctx context.Context, client tls_client.HttpClient, gaiaI
 		return nil, err
 	}
 	if status != http.StatusOK || response.Status != "OK" {
-		return nil, fmt.Errorf("OAuthMultilogin bearer 阶段失败 HTTP %d status %s", status, response.Status)
+		return nil, multiloginStatusError("bearer", status, response.Status)
 	}
 	if err := checkMultiloginCookies(response.Cookies); err != nil {
 		return nil, err
@@ -110,7 +122,7 @@ func fetchBoundCookies(ctx context.Context, client tls_client.HttpClient, gaiaID
 	}
 	challenge := findChallenge(first)
 	if first.Status != "RETRY" || challenge == "" {
-		return nil, fmt.Errorf("OAuthMultilogin challenge 阶段失败 HTTP %d status %s", firstStatus, first.Status)
+		return nil, multiloginStatusError("challenge", firstStatus, first.Status)
 	}
 
 	ephemeralPrivateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -126,7 +138,7 @@ func fetchBoundCookies(ctx context.Context, client tls_client.HttpClient, gaiaID
 		return nil, err
 	}
 	if secondStatus != http.StatusOK || second.Status != "OK" {
-		return nil, fmt.Errorf("OAuthMultilogin assertion 阶段失败 HTTP %d status %s", secondStatus, second.Status)
+		return nil, multiloginStatusError("assertion", secondStatus, second.Status)
 	}
 	if len(second.Directed) == 0 || bytes.Equal(second.Directed, []byte("null")) {
 		return nil, fmt.Errorf("OAuthMultilogin 响应缺少 token_binding_directed_response")
@@ -188,12 +200,12 @@ func requestMultilogin(ctx context.Context, client tls_client.HttpClient, gaiaID
 	request.Header.Set("User-Agent", gemini.ChromeUserAgent)
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, multiloginResponse{}, fmt.Errorf("OAuthMultilogin 请求失败: %w", err)
+		return 0, multiloginResponse{}, fmt.Errorf("OAuthMultilogin 请求失败: %w", errors.Join(gemini.ErrTransport, err))
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if err != nil {
-		return response.StatusCode, multiloginResponse{}, fmt.Errorf("读取 OAuthMultilogin 响应: %w", err)
+		return response.StatusCode, multiloginResponse{}, fmt.Errorf("读取 OAuthMultilogin 响应: %w", errors.Join(gemini.ErrTransport, err))
 	}
 	body = bytes.TrimSpace(body)
 	if bytes.HasPrefix(body, []byte(")]}'")) {

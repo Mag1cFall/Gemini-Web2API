@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -16,6 +19,8 @@ type ToolDefinition struct {
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
 	Namespace   string          `json:"-"`
+	// Kind 为 Responses 客户端工具类型：custom、local_shell、shell、apply_patch，普通函数为空
+	Kind string `json:"-"`
 }
 
 // ToolCall 描述模型选择执行的函数工具
@@ -38,8 +43,16 @@ type ToolBridge struct {
 	RequireImageGeneration bool
 	// AspectRatio 为生图请求的宽高比
 	AspectRatio string
+	// Enum 为 text/x.enum 响应可选的取值
+	Enum []string
+	// LegacyFunctions 表示工具来自 Chat 旧式 functions，调用以 function_call 返回
+	LegacyFunctions bool
 	// Declared 表示工具定义与 JSON Schema 已在本网页会话的前几轮发送，提示词只重申规则
 	Declared bool
+	// SchemaUnchecked 表示结构化输出不按 JSON Schema 校验，OpenAI json_schema 的 strict 为 false 或缺省时为 true
+	SchemaUnchecked bool
+	// Stop 是请求的停止序列，正文在首个命中处截断
+	Stop []string
 }
 
 // declared 返回标记工具定义是否已在会话中发送的副本
@@ -66,25 +79,23 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 		if choice == "" {
 			choice = "auto"
 		}
-		rule := "需要调用工具时，只输出一个 JSON 对象；无需调用工具时，直接输出正常回答"
+		rule, otherwise := "需要调用工具时", "。无需调用工具时，直接输出正常回答"
 		switch strings.ToLower(choice) {
 		case "required", "any":
-			rule = "必须调用一个可用工具，只输出一个 JSON 对象"
+			rule, otherwise = "必须调用一个可用工具", ""
 		case "auto":
 		default:
-			rule = fmt.Sprintf("必须调用工具 %s，只输出一个 JSON 对象", choice)
+			rule, otherwise = fmt.Sprintf("必须调用工具 %s", choice), ""
 		}
 
-		sections = append(sections, fmt.Sprintf(`工具协议：
-可用工具：%s
-工具选择：%s
-%s，格式必须为 {"tool_calls":[{"name":"工具名称","arguments":{}}]}，不要输出 Markdown 代码块或额外文字`, available, choice, rule))
+		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行，结果会在下一条消息中返回。%s，输出一个 ```json 代码块，内容为 {\"tool_calls\":[{\"name\":\"工具名称\",\"arguments\":{}}]}，代码块之后不再输出内容；对话要求在调用工具前说明时，把说明写在代码块之前。参数中的字符串按 JSON 转义原样写出%s", available, choice, rule, otherwise))
+	}
+
+	if len(b.Enum) > 0 {
+		sections = append(sections, "输出协议：只输出以下取值之一，不加引号、代码块或其他文字："+strings.Join(b.Enum, "、"))
 	}
 
 	if len(b.JSONSchema) > 0 {
-		if _, err := compileJSONSchema(b.JSONSchema); err != nil {
-			return "", fmt.Errorf("响应 JSON Schema 无效: %w", err)
-		}
 		schema := fmt.Sprintf("以下 JSON Schema 的 JSON 值，不要输出 Markdown 代码块或额外文字\n%s", b.JSONSchema)
 		if b.Declared {
 			schema = "本会话前文 JSON Schema 的 JSON 值，不要输出 Markdown 代码块或额外文字"
@@ -121,78 +132,195 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 	return "\n\n" + strings.Join(sections, "\n\n"), nil
 }
 
-// Parse 解析严格工具调用并验证结构化输出
+// Parse 解析工具调用并验证结构化输出，工具调用信封前后的文字作为正文与调用一起返回
 func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	trimmed := stripJSONFence(strings.TrimSpace(text))
 
-	toolJSON := extractToolCallJSON(trimmed)
-	if len(b.Definitions) > 0 && toolJSON != "" {
-		var envelope struct {
-			ToolCalls []struct {
-				Name      string          `json:"name"`
-				Arguments json.RawMessage `json:"arguments"`
-			} `json:"tool_calls"`
-		}
-		if err := json.Unmarshal([]byte(toolJSON), &envelope); err == nil && len(envelope.ToolCalls) > 0 {
+	if len(b.Definitions) > 0 {
+		if before, envelope, after, found := splitToolEnvelope(trimmed); found {
 			if strings.EqualFold(strings.TrimSpace(b.Choice), "none") {
 				return "", nil, fmt.Errorf("模型在 tool_choice=none 时返回了工具调用")
 			}
-			calls := make([]ToolCall, 0, len(envelope.ToolCalls))
-			for index, call := range envelope.ToolCalls {
-				if !b.hasTool(call.Name) {
-					return "", nil, fmt.Errorf("模型返回了未声明的工具 %q", call.Name)
-				}
-				if b.explicitTool() != "" && call.Name != b.explicitTool() {
-					return "", nil, fmt.Errorf("模型返回工具 %q，预期工具 %q", call.Name, b.explicitTool())
-				}
-				if len(call.Arguments) == 0 || !json.Valid(call.Arguments) {
-					return "", nil, fmt.Errorf("工具 %q 的 arguments 不是有效 JSON", call.Name)
-				}
-				definition := b.tool(call.Name)
-				if err := validateJSONSchema(definition.Parameters, call.Arguments); err != nil {
-					return "", nil, fmt.Errorf("工具 %q 的 arguments 不符合参数结构: %w", call.Name, err)
-				}
-				calls = append(calls, ToolCall{
-					ID:        fmt.Sprintf("call_%d", index+1),
-					Name:      call.Name,
-					Arguments: call.Arguments,
-				})
+			calls, err := b.parseToolEnvelope(envelope)
+			if err != nil {
+				return "", nil, err
 			}
-			return "", calls, nil
+			return strings.Join(slices.DeleteFunc([]string{before, after}, func(part string) bool { return part == "" }), "\n\n"), calls, nil
 		}
 	}
 
 	if b.requiresTool() {
 		return "", nil, fmt.Errorf("模型没有返回必需的工具调用")
 	}
+	if len(b.Enum) > 0 {
+		value := strings.Trim(trimmed, "\"'` \n")
+		if !slices.Contains(b.Enum, value) {
+			head := []rune(trimmed)
+			return "", nil, fmt.Errorf("模型返回内容不是枚举取值之一；返回内容开头：%q", string(head[:min(len(head), 200)]))
+		}
+		return value, nil, nil
+	}
+	if len(b.JSONSchema) > 0 && b.SchemaUnchecked {
+		return trimmed, nil, nil
+	}
 	if len(b.JSONSchema) > 0 {
 		if err := validateJSONSchema(b.JSONSchema, []byte(trimmed)); err != nil {
-			head := []rune(trimmed)
-			return "", nil, fmt.Errorf("模型返回内容不符合 JSON Schema: %w；返回内容开头：%q", err, string(head[:min(len(head), 200)]))
+			repaired := repairModelJSON(trimmed)
+			if validateJSONSchema(b.JSONSchema, []byte(repaired)) != nil {
+				head := []rune(trimmed)
+				return "", nil, fmt.Errorf("模型返回内容不符合 JSON Schema: %w；返回内容开头：%q", err, string(head[:min(len(head), 200)]))
+			}
+			trimmed = repaired
 		}
 		return trimmed, nil, nil
 	}
 	return text, nil, nil
 }
 
-func extractToolCallJSON(text string) string {
-	if json.Valid([]byte(text)) {
-		return text
+// toolEnvelopeStart 匹配工具调用信封的开头
+var toolEnvelopeStart = regexp.MustCompile(`\{\s*"tool_calls"\s*:`)
+
+// splitToolEnvelope 把回答分为信封前的文字、信封与信封后的文字，代码块标记不计入文字
+func splitToolEnvelope(text string) (string, string, string, bool) {
+	location := toolEnvelopeStart.FindStringIndex(text)
+	if location == nil {
+		return "", "", "", false
 	}
-	for offset := 0; offset < len(text); {
-		relative := strings.IndexByte(text[offset:], '{')
-		if relative < 0 {
-			return ""
+	before, rest := strings.TrimSpace(text[:location[0]]), text[location[0]:]
+	if line := strings.LastIndex(before, "\n") + 1; strings.HasPrefix(before[line:], "```") {
+		before = strings.TrimSpace(before[:line])
+		if end := closingFence(rest); end >= 0 {
+			return before, rest[:end], strings.TrimSpace(rest[end+3:]), true
 		}
-		start := offset + relative
-		candidate := strings.TrimSpace(text[start:])
-		candidate = strings.TrimSpace(strings.TrimSuffix(candidate, "```"))
-		if json.Valid([]byte(candidate)) && strings.Contains(candidate, `"tool_calls"`) {
-			return candidate
-		}
-		offset = start + 1
+		return before, rest, "", true
 	}
-	return ""
+	decoder := json.NewDecoder(strings.NewReader(rest))
+	var value json.RawMessage
+	if decoder.Decode(&value) != nil {
+		return before, rest, "", true
+	}
+	return before, rest[:decoder.InputOffset()], strings.TrimSpace(rest[decoder.InputOffset():]), true
+}
+
+// closingFence 返回代码块中信封之后的结束标记位置：信封是有效 JSON 时取 JSON 之后的第一个标记，否则取第一个位于行首的标记
+func closingFence(rest string) int {
+	decoder := json.NewDecoder(strings.NewReader(rest))
+	var value json.RawMessage
+	if decoder.Decode(&value) == nil {
+		offset := int(decoder.InputOffset())
+		if end := strings.Index(rest[offset:], "```"); end >= 0 {
+			return offset + end
+		}
+		return -1
+	}
+	if end := strings.Index(rest, "\n```"); end >= 0 {
+		return end + 1
+	}
+	return strings.Index(rest, "```")
+}
+
+// parseToolEnvelope 解析信封中的工具调用并按声明校验，无法解析时修复非法转义、控制字符与缺失的闭合括号后再解析
+func (b ToolBridge) parseToolEnvelope(envelope string) ([]ToolCall, error) {
+	var parsed struct {
+		ToolCalls []struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(envelope), &parsed); err != nil {
+		if repairErr := json.Unmarshal([]byte(repairModelJSON(envelope)), &parsed); repairErr != nil {
+			head := []rune(envelope)
+			return nil, fmt.Errorf("模型返回的工具调用不是有效 JSON: %w；返回内容开头：%q", err, string(head[:min(len(head), 200)]))
+		}
+	}
+	if len(parsed.ToolCalls) == 0 {
+		return nil, fmt.Errorf("模型返回的工具调用为空")
+	}
+	calls := make([]ToolCall, 0, len(parsed.ToolCalls))
+	for index, call := range parsed.ToolCalls {
+		name := call.Name
+		if !b.hasTool(name) && b.hasTool(strings.TrimLeft(name, "_")) {
+			name = strings.TrimLeft(name, "_")
+		}
+		if !b.hasTool(name) {
+			return nil, fmt.Errorf("模型返回了未声明的工具 %q", call.Name)
+		}
+		if b.explicitTool() != "" && name != b.explicitTool() {
+			return nil, fmt.Errorf("模型返回工具 %q，预期工具 %q", name, b.explicitTool())
+		}
+		if len(call.Arguments) == 0 || !json.Valid(call.Arguments) {
+			return nil, fmt.Errorf("工具 %q 的 arguments 不是有效 JSON", name)
+		}
+		if err := validateJSONSchema(b.tool(name).Parameters, call.Arguments); err != nil {
+			return nil, fmt.Errorf("工具 %q 的 arguments 不符合参数结构: %w", name, err)
+		}
+		calls = append(calls, ToolCall{ID: fmt.Sprintf("call_%d", index+1), Name: name, Arguments: call.Arguments})
+	}
+	return calls, nil
+}
+
+// repairModelJSON 修复模型输出的 JSON：字符串中非法转义的反斜杠与控制字符改为转义，缺失的闭合括号按嵌套补齐
+func repairModelJSON(text string) string {
+	var builder strings.Builder
+	var closers []byte
+	inString := false
+	for index := 0; index < len(text); index++ {
+		char := text[index]
+		if inString {
+			switch {
+			case char == '\\' && index+1 < len(text) && validEscape(text[index+1:]):
+				builder.WriteByte(char)
+				index++
+				char = text[index]
+			case char == '\\':
+				builder.WriteString(`\\`)
+				continue
+			case char == '"':
+				inString = false
+			case char < 0x20:
+				fmt.Fprintf(&builder, `\u%04x`, char)
+				continue
+			}
+			builder.WriteByte(char)
+			continue
+		}
+		switch char {
+		case '"':
+			inString = true
+		case '{':
+			closers = append(closers, '}')
+		case '[':
+			closers = append(closers, ']')
+		case '}', ']':
+			for len(closers) > 0 && closers[len(closers)-1] != char {
+				builder.WriteByte(closers[len(closers)-1])
+				closers = closers[:len(closers)-1]
+			}
+			if len(closers) > 0 {
+				closers = closers[:len(closers)-1]
+			}
+		}
+		builder.WriteByte(char)
+	}
+	for index := len(closers) - 1; index >= 0; index-- {
+		builder.WriteByte(closers[index])
+	}
+	return builder.String()
+}
+
+// validEscape 判断反斜杠后的内容是否为 JSON 字符串的合法转义
+func validEscape(rest string) bool {
+	switch rest[0] {
+	case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+		return true
+	case 'u':
+		if len(rest) < 5 {
+			return false
+		}
+		_, err := strconv.ParseUint(rest[1:5], 16, 16)
+		return err == nil
+	}
+	return false
 }
 
 func (b ToolBridge) hasTool(name string) bool {
@@ -260,14 +388,12 @@ func stripJSONFence(text string) string {
 	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 }
 
+// validateJSONSchema 按 Schema 校验 JSON 值，Schema 编译不了时只校验 JSON 语法
 func validateJSONSchema(schemaDocument json.RawMessage, instanceDocument []byte) error {
 	if len(schemaDocument) == 0 {
 		return nil
 	}
-	schema, err := compileJSONSchema(schemaDocument)
-	if err != nil {
-		return err
-	}
+	schema, compileErr := compileJSONSchema(schemaDocument)
 	decoder := json.NewDecoder(bytes.NewReader(instanceDocument))
 	decoder.UseNumber()
 	var instance interface{}
@@ -277,8 +403,14 @@ func validateJSONSchema(schemaDocument json.RawMessage, instanceDocument []byte)
 	if err := ensureJSONEnd(decoder); err != nil {
 		return err
 	}
+	if compileErr != nil {
+		return nil
+	}
 	return schema.Validate(instance)
 }
+
+// schemaResourceURL 是编译请求中 JSON Schema 时的资源地址，校验错误以它指代该 Schema
+const schemaResourceURL = "mem:///schema.json"
 
 func compileJSONSchema(schemaDocument json.RawMessage) (*jsonschema.Schema, error) {
 	compiler := jsonschema.NewCompiler()
@@ -288,10 +420,10 @@ func compileJSONSchema(schemaDocument json.RawMessage) (*jsonschema.Schema, erro
 	if err := schemaDecoder.Decode(&schemaResource); err != nil {
 		return nil, err
 	}
-	if err := compiler.AddResource("schema.json", schemaResource); err != nil {
+	if err := compiler.AddResource(schemaResourceURL, schemaResource); err != nil {
 		return nil, err
 	}
-	schema, err := compiler.Compile("schema.json")
+	schema, err := compiler.Compile(schemaResourceURL)
 	if err != nil {
 		return nil, err
 	}

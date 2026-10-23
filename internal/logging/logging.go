@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/term"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // historyLimit 是保留供管理端回放的最近事件数
@@ -60,6 +61,11 @@ type Hub struct {
 	console     func(Event)
 	history     []Event
 	subscribers map[chan Event]struct{}
+	// format 是控制台格式，日志文件使用同一格式
+	format string
+	// file 是开启时的轮转日志文件，fileWrite 把事件写入其中
+	file      *lumberjack.Logger
+	fileWrite func(Event)
 }
 
 var std = newHub()
@@ -82,7 +88,8 @@ func Setup(options Options) error {
 		disableQuickEdit()
 	}
 	var console func(Event)
-	switch strings.ToLower(strings.TrimSpace(options.Format)) {
+	format := strings.ToLower(strings.TrimSpace(options.Format))
+	switch format {
 	case "", "text":
 		console = newTextConsole(writer).write
 	case "json":
@@ -91,7 +98,7 @@ func Setup(options Options) error {
 		return fmt.Errorf("LOG_FORMAT 必须是 text 或 json")
 	}
 	std.mu.Lock()
-	std.level, std.console = level, console
+	std.level, std.console, std.format = level, console, format
 	std.mu.Unlock()
 	return nil
 }
@@ -143,6 +150,9 @@ func Publish(event Event) {
 		return
 	}
 	std.console(event)
+	if std.fileWrite != nil {
+		std.fileWrite(event)
+	}
 	std.history = append(std.history, event)
 	if len(std.history) > historyLimit {
 		std.history = append(std.history[:0:0], std.history[len(std.history)-historyLimit:]...)

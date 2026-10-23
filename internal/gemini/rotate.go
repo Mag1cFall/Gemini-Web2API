@@ -98,6 +98,7 @@ func (r *CookieRotator) rotateSession(ctx context.Context) (bool, error) {
 	defer release()
 	first := !r.rotated
 	r.rotated = true
+	version := c.cookieVersion.Load()
 	err = r.rotate(ctx)
 	if err == nil {
 		listed, signedIn, err := c.listAccountsSignedIn(ctx)
@@ -113,7 +114,7 @@ func (r *CookieRotator) rotateSession(ctx context.Context) (bool, error) {
 	} else if !isAuthenticationError(err) || c.refresh == nil {
 		return false, err
 	}
-	if err := c.refreshCookies(ctx); err != nil {
+	if err := c.refreshCookies(ctx, version); err != nil {
 		return false, err
 	}
 	r.rotation = nil

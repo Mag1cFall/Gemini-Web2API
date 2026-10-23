@@ -165,7 +165,7 @@ func decryptAppBoundCiphertext(chromePath string, encrypted []byte) ([]byte, err
 	}
 	defer windows.CloseHandle(process)
 	defer windows.CloseHandle(thread)
-	defer windows.TerminateProcess(process, 0)
+	defer stopChrome(process)
 
 	if _, err := windows.ResumeThread(thread); err != nil {
 		return nil, fmt.Errorf("启动临时 Chrome: %w", err)
@@ -186,6 +186,12 @@ func decryptAppBoundCiphertext(chromePath string, encrypted []byte) ([]byte, err
 		time.Sleep(abePollInterval)
 	}
 	return nil, fmt.Errorf("Chrome ABE helper 超时")
+}
+
+// stopChrome 结束临时 Chrome 并等主进程退出，之后临时目录中的文件才能删除
+func stopChrome(process windows.Handle) {
+	_ = windows.TerminateProcess(process, 0)
+	_, _ = windows.WaitForSingleObject(process, uint32((5 * time.Second).Milliseconds()))
 }
 
 // temporaryEnvValue 保存父进程环境变量原值

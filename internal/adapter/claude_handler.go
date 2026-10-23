@@ -27,19 +27,23 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
+		suffix, err := takeModelSuffix(&request.Model)
+		if err != nil {
+			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
 		logging.FromContext(c.Request.Context()).Begin("messages", request.Model, request.Stream, len(request.Messages), len(request.Tools))
 		bindScope(c, pool, request.Model)
-		if request.Model == "" || len(request.Messages) == 0 || request.MaxTokens == nil {
-			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "model, messages and max_tokens are required")
+		if request.Model == "" {
+			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 			return
 		}
-		knownModel, readyModel := modelStatus(pool, request.Model)
-		if !knownModel {
-			writeClaudeError(c, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is unavailable", request.Model))
+		if len(request.Messages) == 0 && claudeSystemEmpty(request.System) {
+			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "messages 与 system 不能同时为空")
 			return
 		}
-		if !readyModel {
-			writeClaudeError(c, http.StatusServiceUnavailable, "overloaded_error", "No account is ready for the requested model")
+		if err := awaitModel(c, pool, request.Model); err != nil {
+			writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
 			return
 		}
 		thinkingLevel, includeThoughts, err := claudeThinkingSettings(request)
@@ -47,6 +51,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
+		thinkingLevel, includeThoughts = suffix.apply(thinkingLevel, includeThoughts)
 
 		bridge, err := claudeToolBridge(request)
 		if err != nil {
@@ -66,16 +71,18 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 
 		if request.Stream {
 			setSSEHeaders(c)
-			defer startKeepalive(c, anthropicKeepalive)()
+			stream, stop := holdStream(c, anthropicKeepalive)
+			defer stop()
 			processor := claude.NewStreamProcessor(config.MapModel(request.Model), c.Writer, responseID)
 			projection := newStreamProjection(bridge, includeThoughts)
 			thinkingOpen := false
 			thinkingBlock := 0
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
+				c.Request.Context(), pool, sessionKey, previousResponsePolicy(request.PreviousResponseID), request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 				}, func(event gemini.Event) error {
+					stream.release()
 					if event.Kind == gemini.EventMetadata && event.Usage != nil {
 						return processor.ProcessEvent(event)
 					}
@@ -97,7 +104,9 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
-				if !projection.errorSent {
+				if stream.reject() {
+					writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
+				} else if !projection.errorSent {
 					_ = processor.EmitErrorType(claudeUpstreamType(err), streamFailure(c, err))
 				}
 				return
@@ -167,6 +176,10 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					return
 				}
 			}
+			if result.StopSequence != "" && len(calls) == 0 {
+				_ = processor.FinishStopSequence(result.StopSequence)
+				return
+			}
 			stopReason := "end_turn"
 			if len(calls) > 0 {
 				stopReason = "tool_use"
@@ -176,7 +189,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
+			c.Request.Context(), pool, sessionKey, previousResponsePolicy(request.PreviousResponseID), request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 				return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 			}, nil, nil,
@@ -229,16 +242,16 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			_ = json.Unmarshal(call.Arguments, &input)
 			blocks = append(blocks, claude.ContentBlock{Type: "tool_use", ID: call.ID, Name: call.Name, Input: &input})
 		}
-		if len(blocks) == 0 {
-			blocks = append(blocks, claude.ContentBlock{Type: "text"})
-		}
 		stopReason := "end_turn"
+		var stopSequence *string
 		if len(calls) > 0 {
 			stopReason = "tool_use"
+		} else if result.StopSequence != "" {
+			stopReason, stopSequence = "stop_sequence", &result.StopSequence
 		}
 		response := claude.ClaudeResponse{
 			ID: responseID, Type: "message", Role: "assistant", Model: result.Model, Content: blocks,
-			StopReason: stopReason, ConversationID: result.ConversationID, Usage: &claude.Usage{},
+			StopReason: stopReason, StopSequence: stopSequence, ConversationID: result.ConversationID, Usage: &claude.Usage{},
 		}
 		if result.Accumulator.Usage != nil {
 			usage := result.Accumulator.Usage
@@ -262,14 +275,17 @@ func ClaudeCountTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-		if request.Model == "" || len(request.Messages) == 0 {
-			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "model and messages are required")
+		if _, err := takeModelSuffix(&request.Model); err != nil {
+			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		if request.Model == "" {
+			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 			return
 		}
 		bindScope(c, pool, request.Model)
-		knownModel, _ := modelStatus(pool, request.Model)
-		if !knownModel {
-			writeClaudeError(c, http.StatusNotFound, "not_found_error", fmt.Sprintf("model %q is unavailable", request.Model))
+		if err := modelKnown(pool, request.Model); err != nil {
+			writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
 			return
 		}
 		bridge, err := claudeToolBridge(request)
@@ -277,7 +293,7 @@ func ClaudeCountTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-		prompt, files, err := buildClaudePrompt(c, countClient(pool, request.Model), request, false, bridge)
+		prompt, files, err := buildClaudePrompt(c, countClient(pool), request, false, bridge)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
@@ -325,7 +341,7 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 }
 
 func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
-	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice)}
+	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice), Stop: request.StopSequences}
 	webTool := false
 	for _, tool := range request.Tools {
 		if tool.IsWebSearch() {
@@ -345,6 +361,16 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 			description = *tool.Description
 		}
 		bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: *tool.Name, Description: description, Parameters: parameters})
+	}
+	format := request.OutputFormat
+	if request.OutputConfig != nil && request.OutputConfig.Format != nil {
+		format = request.OutputConfig.Format
+	}
+	if format != nil {
+		if format.Type != "json_schema" {
+			return ToolBridge{}, fmt.Errorf("不支持的输出格式类型 %q", format.Type)
+		}
+		bridge.JSONSchema = format.Schema
 	}
 	choice := strings.ToLower(strings.TrimSpace(bridge.Choice))
 	switch choice {
@@ -381,8 +407,17 @@ func claudeToolChoice(raw json.RawMessage) string {
 	return "auto"
 }
 
+// claudeSystemEmpty 判断 system 是否为空
+func claudeSystemEmpty(raw json.RawMessage) bool {
+	system, err := claude.ParseSystemPrompt(raw)
+	return err == nil && strings.TrimSpace(system) == ""
+}
+
 func unsupportedClaudeParameters(request claude.ClaudeRequest) []string {
-	fields := []string{"max_tokens"}
+	var fields []string
+	if request.MaxTokens != nil {
+		fields = append(fields, "max_tokens")
+	}
 	if request.Temperature != nil {
 		fields = append(fields, "temperature")
 	}
@@ -391,9 +426,6 @@ func unsupportedClaudeParameters(request claude.ClaudeRequest) []string {
 	}
 	if request.TopK != nil {
 		fields = append(fields, "top_k")
-	}
-	if len(request.StopSequences) > 0 {
-		fields = append(fields, "stop_sequences")
 	}
 	return fields
 }

@@ -31,6 +31,11 @@ export function fill(template: string, vars: Record<string, string | number>) {
   )
 }
 
+// plural 按 language 的复数规则为 count 选用单数文案 one 或复数文案 other
+export function plural(language: Language, count: number, one: string, other: string) {
+  return new Intl.PluralRules(language).select(count) === 'one' ? one : other
+}
+
 // languageKey 是本地存储中保存界面语言的键
 const languageKey = 'gemini-web2api.language'
 

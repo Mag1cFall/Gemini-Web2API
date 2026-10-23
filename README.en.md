@@ -9,7 +9,9 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **OpenAI compatible**: `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/files`, `/v1/audio/*`, `/v1/videos`, `/v1/models`
 - **Claude compatible**: `/v1/messages`, Files API
 - **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:predictLongRunning`, Files API
-- **Streaming**: streams text and reasoning deltas; each protocol's thinking controls map to the official Low, Medium, and High levels
+- **Streaming**: streams text and reasoning deltas; each protocol's thinking controls map to the official Low, Medium, and High levels, and a model name can also carry a suffix such as `(high)`, `(low)`, or `(-1)` to set the thinking level
+- **Structured output**: OpenAI `response_format`, Anthropic `output_format`, and Gemini `responseSchema` and `responseFormat` (including `text/x.enum` enums) constrain the answer with a JSON Schema
+- **Function tools**: function tools in all four protocols are bridged through the web prompt; text the model writes before a call is returned with the call, and an unparseable call is retried on another account before any output is visible
 - **Images**: supports multimodal input, image generation, and image editing; generated images are returned at full size through the official "Download full size image" request
 - **Official tools**: Create video, Create music, Canvas, Deep Research, Guided Learning, and Task mode are available as separate model IDs
 - **Multi-account balancing**: schedules Google accounts by model availability; usage and rate limits cool down only the affected model, with configurable concurrency and routing strategy
@@ -17,7 +19,7 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Console and desktop app**: the web console shows live logs, active requests, usage and cost statistics, account import and management, the model catalog, settings, and a playground; desktop apps for Windows, macOS, and Linux add a tray icon, single instance, and launch at login
 - **Run logs**: colored columnar console logs that record each request's start, account selection, uploads, first output, account switches, waits, and completion
 - **Request ledger**: SQLite stores per-request usage, with statistics by model, account, and protocol and cost estimates at Gemini API prices
-- **Gems**: each account's Gems are available as `gem-<Gem ID>` model IDs
+- **Gems**: each account's own Gems and Google's pre-made Gems are available as `gem-<Gem ID>` model IDs
 - **Proxy pool**: multiple HTTP, HTTPS, SOCKS4 and SOCKS5 proxies form a pool; each account stays bound to one of them, proxies are checked periodically, and accounts move automatically when their proxy fails; fixed per-account proxies, direct connections and the system proxy are supported
 - **Model aliases**: maps external model names to current Gemini models
 - **Protocol-only runtime**: runs without a browser or frontend scripts after account setup
@@ -45,33 +47,38 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Images**: the image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` support 1:1, 9:16, 3:4, 4:3, and 16:9
 - **Video**: for video IDs, `imageConfig.aspectRatio` supports landscape 16:9 and portrait 9:16
 - **Chat history**: Task, Deep Research, and video requests use saved chats, which remain in the account history
-- **Deep Research**: the research plan and progress are returned as reasoning and the report as text; a run usually takes over ten minutes, so set the client request timeout longer than that
-- **Quotas**: context windows, model access, and quotas depend on the account's plan and region; account usage is available from `/v1/accounts/usage`
+- **Deep Research**: the research plan and progress are returned as reasoning and the report as text, with the report's citations returned as web sources in each protocol's citation fields; a run usually takes over ten minutes, so set the client request timeout longer than that
+- **Quotas**: context windows, model access, and quotas depend on the account's plan and region; account usage is shown on the admin Accounts page
 - **Token usage**: text input, visible output, and reasoning summaries are counted with a local Gemini tokenizer; the token counting endpoints estimate images, audio, video, and PDFs with the Gemini API counting rules
 
 ## Quick Start
 
 ### One-click Windows start
 
-Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases), extract it, and double-click `start.bat`, or invoke it from cmd, PowerShell, or Git Bash. The script starts the executable in the same directory, building the console frontend with pnpm and then the source with Go 1.25.0+ when the executable is absent. An invocation without arguments starts interactive setup when no account state exists, then starts the service and opens the console in the browser; an invocation with arguments passes them directly to the executable.
+Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases), extract it, and double-click `gemini-web2api.exe`:
+
+- The console opens in a desktop window that uses the system WebView2 runtime; the app stays in the tray after the window closes, and the tray menu copies the API address and toggles launch at login
+- Double-clicking `gemini-web2api.exe` again brings back the running window
+- Import accounts from local Chrome, cookies, or remote pairing on the console's Import account page
+- `.env`, `auth/`, and `data/` all live in the folder containing `gemini-web2api.exe`
+
+To run commands from cmd or PowerShell, write them as `cmd /c start /wait gemini-web2api.exe <arguments>` so the prompt returns after the program exits:
 
 ```powershell
-.\start.bat
-.\start.bat --help
-.\start.bat setup --email "name@example.com"
+cmd /c start /wait gemini-web2api.exe --help
+cmd /c start /wait gemini-web2api.exe setup --email "name@example.com"
 ```
 
-### Desktop app
+### macOS and Linux desktop app
 
 Download the desktop build for your system from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases):
 
 | System | Package | Data directory |
 | --- | --- | --- |
-| Windows | `desktop-…-windows-amd64.zip` | Folder containing `gemini-web2api.exe` |
-| macOS | `darwin-universal.dmg` | `~/Library/Application Support/Gemini-Web2API` |
-| Linux | `AppImage` or `deb` | `~/.config/Gemini-Web2API` |
+| macOS | `desktop-…-darwin-universal.tar.gz` | `~/Library/Application Support/Gemini-Web2API` |
+| Linux | `desktop-…-linux-amd64.tar.gz` or `desktop-…-linux-arm64.tar.gz` | `~/.config/Gemini-Web2API` |
 
-- On Windows the desktop app is portable: unzip it and double-click `gemini-web2api.exe`; the window uses the system WebView2 runtime
+- Every desktop build is portable: on macOS, extract it and open `Gemini-Web2API.app`; on Linux, extract it and run `gemini-web2api`, which needs the system GTK 4 and WebKitGTK 6.0
 - The desktop app opens the console in a window and stays in the tray after the window closes; the tray menu copies the API address and toggles launch at login
 - Import accounts from local Chrome, cookies, or remote pairing on the console's Import account page
 - `.env`, `auth/`, and `data/` live in the data directory listed above
@@ -83,7 +90,7 @@ Build the console frontend, then the executable:
 ```bash
 pnpm -C web install
 pnpm -C web build
-go build -o gemini-web2api.exe ./cmd/gemini-web2api
+go build -tags nomsgpack -o gemini-web2api.exe ./cmd/gemini-web2api
 ```
 
 On Windows, import accounts already signed into the local Chrome installation:
@@ -136,7 +143,7 @@ While running, the service rotates each account's sign-in cookies every 10 minut
 
 ### Optional configuration
 
-The executable automatically reads `.env` from the current directory. Setup and the daily service share the same `PROXY`. Copy `.env.example` to `.env` only when configuration needs to change.
+The executable automatically reads `.env` from the current directory. Setup and the daily service share the same `PROXY`. Write `.env` from the repository's [`.env.example`](.env.example) only when configuration needs to change.
 
 ```dotenv
 # Use Gemini Temporary Chat without writing website history
@@ -164,11 +171,11 @@ docker compose up -d
 
 `PROXY` is the proxy pool, comma-separated, for example `PROXY=socks5://127.0.0.1:1080,http://user:pass@10.0.0.2:7890`. Supported schemes are `http`, `https`, `socks4`, `socks4a`, `socks5` and `socks5h`. In the console, edit it one proxy per line under Settings → Service → Egress proxy; changes apply on save.
 
-- **Assignment**: accounts without a fixed proxy and the guest session each stay bound to one proxy; a new account goes to the proxy with the fewest accounts. When the proxy list changes, accounts are rebalanced with the fewest moves
+- **Assignment**: accounts without a fixed proxy and the guest session each stay bound to one proxy; a new account goes to the proxy with the fewest accounts, the earlier one in the list on a tie. When the proxy list changes, accounts are rebalanced with the fewest moves
 - **Checks**: at startup, every 5 minutes, when an account fails to connect, and when you click Check now in the console, the service requests the Gemini home page through each proxy
 - **Failover**: accounts on an unavailable proxy move to an available proxy and re-initialize; when every proxy is unavailable, accounts keep their proxy
 - **Status**: the proxy pool card on the settings page shows each proxy's status, latency and the accounts using it
-- **System proxy**: when `PROXY` is empty, the `HTTPS_PROXY` environment variable is used; without it, Windows uses the system proxy setting; otherwise connections are direct
+- **System proxy**: when `PROXY` is empty, the `HTTPS_PROXY` environment variable is used; without it, Windows uses the system proxy setting (per-protocol settings are taken in the order https, http, socks, and socks is SOCKS4); otherwise connections are direct
 
 An account can also have a fixed proxy, which takes priority over the pool; `direct` makes that account connect without a proxy. Set it with Edit proxy on the account page, or when importing:
 
@@ -252,10 +259,7 @@ GET    /v1beta/models
 ### Service status
 
 ```text
-GET  /healthz
 GET  /readyz
-GET  /v1/accounts/health
-GET  /v1/accounts/usage
 ```
 
 Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, `x-goog-api-key`, and `x-api-key`. Without `PROXY_API_KEY`, only web pages opened from a local address can call the API from a browser; pages on other sites need a key configured on the service and sent with each request.
@@ -264,9 +268,10 @@ Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, `x-goog-api-key`
 
 Open `http://127.0.0.1:8007/` in a browser for the console, which uses the `/api/*` endpoints.
 
-- **Remote access**: only local connections are accepted by default; with `ADMIN_AUTH_ENABLED=true`, `ADMIN_PASSWORD`, and `LISTEN_ADDR` on an externally reachable address, other devices can sign in
+- **Remote access**: only local connections are accepted by default; with `ADMIN_AUTH_ENABLED=true`, `ADMIN_PASSWORD`, and `LISTEN_ADDR` on an externally reachable address, other devices can sign in; after 5 consecutive failed sign-ins, sign-in returns 429 with `Retry-After` for 60 seconds
 - **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service; in nginx, use `proxy_set_header Host $host;`
 - **Applying settings**: settings saved in the console are written back to `.env`; the listen address, auth paths, and log format take effect after a restart, and everything else applies immediately
+- **Online update**: the About page shows the latest GitHub release and its notes; after confirmation the command-line and desktop builds download the package for the current platform, verify its SHA-256, replace the executable, and restart into the new version; downloads go through the first proxy in `PROXY`, or the system proxy when it is unset; Docker deployments update with the image
 
 ## Example
 
@@ -328,6 +333,8 @@ build/               # Desktop icons and packaging configuration
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `LOG_FORMAT` | Console log format: `text` or `json` | `text` |
 | `REQUEST_BODY_LOG` | Keep the latest 1000 request and response bodies in the ledger | `false` |
+| `LOG_FILE` | Also write logs to `data/logs/gemini-web2api.log`, rotating every 10 MB | `true` |
+| `LOG_MAX_TOTAL_MB` | Size limit of the log directory in MB; the oldest files are deleted beyond it, at least 20 | `500` |
 | `ADMIN_AUTH_ENABLED` | Console sign-in | `false` |
 | `ADMIN_USERNAME` | Console username | `admin` |
 | `ADMIN_PASSWORD` | Console password | empty |

@@ -88,7 +88,7 @@ func runVideoJob(c *gin.Context, pool *balancer.AccountPool, store *requestdb.St
 
 // generateVideo 调用 Create video 并把成品写入文件存储
 func generateVideo(ctx context.Context, pool *balancer.AccountPool, store *requestdb.Store, job videoJob) videoResult {
-	result, _, err := runGeneration(ctx, pool, "", false, job.model, job.id, generationMedia{aspectRatio: job.size}, gemini.ThinkingLow, ToolBridge{},
+	result, _, err := runGeneration(ctx, pool, "", sessionContinue, job.model, job.id, generationMedia{aspectRatio: job.size}, gemini.ThinkingLow, ToolBridge{},
 		func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 			return job.prompt, job.files, nil
 		}, nil, nil)
@@ -117,6 +117,9 @@ func generateVideo(ctx context.Context, pool *balancer.AccountPool, store *reque
 		file, err := store.CreateFile(context.WithoutCancel(ctx), requestdb.StoredFile{
 			ID: randomID("", 12, true), Filename: filepath.Base(name), MIMEType: mimeType, Purpose: "video", Source: "generated",
 		}, bytes.NewReader(data))
+		if err == nil {
+			saveVideoThumbnail(ctx, result.Client, store, file.ID, media)
+		}
 		return videoResult{file: file, width: media.Width, height: media.Height, err: err}
 	}
 	text := strings.TrimSpace(result.Accumulator.Primary().Text)
@@ -236,17 +239,16 @@ func VideoCreateHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.
 			writeOpenAIError(c, http.StatusNotFound, "model_not_found", unavailableCapability("video generation on the ready accounts"))
 			return
 		}
-		knownModel, readyModel := modelStatus(pool, request.Model)
-		if !knownModel {
-			writeOpenAIError(c, http.StatusNotFound, "model_not_found", modelNotFoundMessage(pool, request.Model))
+		if err := modelKnown(pool, request.Model); err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		if !videoModel(pool, request.Model) {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("model %q does not generate videos; use %s", request.Model, defaultVideoModel(pool)))
 			return
 		}
-		if !readyModel {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+		if err := awaitModel(c, pool, request.Model); err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		if request.Seconds != "" && request.Seconds != videoDuration {
@@ -304,28 +306,38 @@ func VideoRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
 	}
 }
 
-// VideoContentHandler 返回已完成视频的 MP4 内容
+// VideoContentHandler 按 variant 返回已完成视频的 MP4 或缩略图
 func VideoContentHandler(store *requestdb.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		video, ok := storedVideoOrNotFound(c, store)
 		if !ok {
 			return
 		}
-		if variant := c.DefaultQuery("variant", "video"); variant != "video" {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("variant %q is not available: Gemini Web returns only the video file", variant))
+		variant := c.DefaultQuery("variant", "video")
+		switch variant {
+		case "video", "thumbnail":
+		case "spritesheet":
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "variant \"spritesheet\" is not available: Gemini Web returns a video file and a thumbnail but no spritesheet")
+			return
+		default:
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("Invalid variant %q: expected one of video, thumbnail, spritesheet.", variant))
 			return
 		}
 		if video.Status != "completed" || video.FileID == "" {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("Video '%s' is %s; content is available after it completes.", video.ID, video.Status))
 			return
 		}
-		serveStoredFile(c, store, video.FileID, func() {
+		fileID := video.FileID
+		if variant == "thumbnail" {
+			fileID = videoThumbnailFileID(video.FileID)
+		}
+		serveStoredFile(c, store, fileID, func() {
 			writeOpenAIError(c, http.StatusNotFound, "video_not_found", fmt.Sprintf("Content of video '%s' was not found.", video.ID))
 		}, func(err error) { writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error()) })
 	}
 }
 
-// VideoListHandler 按 after、limit 与 order 分页列出 OpenAI 视频对象
+// VideoListHandler 按 after、limit 与 order 分页列出 OpenAI 视频对象，未知的 after 返回空页
 func VideoListHandler(store *requestdb.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		limit := 20
@@ -344,8 +356,7 @@ func VideoListHandler(store *requestdb.Store) gin.HandlerFunc {
 		}
 		videos, more, err := store.Videos(c.Request.Context(), "openai", order == "asc", c.Query("after"), limit)
 		if errors.Is(err, requestdb.ErrNotFound) {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("after video %q was not found", c.Query("after")))
-			return
+			videos, more, err = nil, false, nil
 		}
 		if err != nil {
 			writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error())
@@ -375,6 +386,10 @@ func VideoDeleteHandler(store *requestdb.Store) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error())
 			return
 		}
+		if _, err := store.DeleteFile(c.Request.Context(), videoThumbnailFileID(video.FileID)); err != nil {
+			writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error())
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"id": video.ID, "object": "video.deleted", "deleted": true})
 	}
 }
@@ -398,12 +413,12 @@ func geminiVideoOperation(c *gin.Context, pool *balancer.AccountPool, store *req
 		writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
-	if len(request.Instances) != 1 || strings.TrimSpace(request.Instances[0].Prompt) == "" {
-		writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "instances must contain one instance with a prompt")
+	if len(request.Instances) != 1 || strings.TrimSpace(request.Instances[0].Prompt) == "" && (request.Instances[0].Image == nil || request.Instances[0].Image.BytesBase64Encoded == "") {
+		writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "instances must contain one instance with a prompt or an image")
 		return
 	}
-	if _, readyModel := modelStatus(pool, model); !readyModel {
-		writeGeminiError(c, http.StatusServiceUnavailable, "UNAVAILABLE", "No account is ready for the requested model")
+	if err := awaitModel(c, pool, model); err != nil {
+		writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
 		return
 	}
 	instance := request.Instances[0]

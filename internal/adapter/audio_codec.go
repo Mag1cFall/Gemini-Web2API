@@ -13,6 +13,7 @@ import (
 	"github.com/mewkiz/flac/meta"
 	"github.com/thesyncim/gopus"
 	"github.com/thesyncim/gopus/container/ogg"
+	aacpcm "github.com/tphakala/go-aac/pcm"
 )
 
 // audioPCM 是 16 位小端交错 PCM 及其采样率与声道数
@@ -24,7 +25,7 @@ type audioPCM struct {
 
 // audioContentTypes 是各输出格式的 Content-Type
 var audioContentTypes = map[string]string{
-	"mp3": "audio/mpeg", "opus": "audio/ogg", "wav": "audio/wav", "pcm": "audio/pcm", "pcm16": "audio/pcm", "flac": "audio/flac",
+	"mp3": "audio/mpeg", "opus": "audio/ogg", "wav": "audio/wav", "pcm": "audio/pcm", "pcm16": "audio/pcm", "flac": "audio/flac", "aac": "audio/aac",
 }
 
 // transcodeMP3 把 MP3 转为 OpenAI 音频格式，返回数据与 Content-Type；pcm 为 24 kHz 单声道
@@ -34,7 +35,7 @@ func transcodeMP3(data []byte, format string) ([]byte, string, error) {
 	}
 	contentType, ok := audioContentTypes[format]
 	if !ok {
-		return nil, "", fmt.Errorf("audio format %q is not available: Gemini Web returns MP3 audio and this service converts it to mp3, opus, wav, flac or pcm", format)
+		return nil, "", fmt.Errorf("audio format %q is not available: Gemini Web returns MP3 audio and this service converts it to mp3, opus, aac, wav, flac or pcm", format)
 	}
 	audio, err := decodeMP3(data)
 	if err != nil {
@@ -47,6 +48,9 @@ func transcodeMP3(data []byte, format string) ([]byte, string, error) {
 		return resamplePCM(mixMono(audio), 24000).Data, contentType, nil
 	case "flac":
 		encoded, err := encodeFLAC(audio)
+		return encoded, contentType, err
+	case "aac":
+		encoded, err := encodeAAC(audio)
 		return encoded, contentType, err
 	default:
 		encoded, err := encodeOggOpus(resamplePCM(audio, 48000))
@@ -166,6 +170,14 @@ func encodeFLAC(audio audioPCM) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+// encodeAAC 把 PCM 重采样到 44.1 kHz 后编码为 ADTS 封装的 AAC-LC
+func encodeAAC(audio audioPCM) ([]byte, error) {
+	audio = resamplePCM(audio, 44100)
+	var output bytes.Buffer
+	err := aacpcm.EncodeInterleaved(&output, aacpcm.Config{SampleRate: audio.SampleRate, BitDepth: 16, Channels: audio.Channels}, audio.Data)
+	return output.Bytes(), err
 }
 
 // encodeOggOpus 以 20 ms 帧把 48 kHz PCM 编码为 Ogg Opus

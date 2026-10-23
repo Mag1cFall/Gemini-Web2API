@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// MinLogTotalMB 是日志目录总量上限的最小值，容纳当前文件与一个轮转文件
+const MinLogTotalMB = 20
+
 const (
 	defaultListenAddress = "127.0.0.1:8007"
 	defaultCooldown      = 2 * time.Minute
@@ -31,6 +34,9 @@ type Config struct {
 	LogLevel        string
 	LogFormat       string
 	RequestBodyLog  bool
+	// LogFile 为 true 时日志同时写入数据目录的轮转文件，LogMaxTotalMB 是日志目录总量上限
+	LogFile       bool
+	LogMaxTotalMB int
 	// PerAccountConcurrency 是每个账号同时进行的上游请求数
 	PerAccountConcurrency int
 	// RoutingStrategy 为 round-robin 或 fill-first
@@ -68,6 +74,18 @@ func Load() (Config, error) {
 	}
 	if cfg.AdminAuthEnabled, err = parseBool("ADMIN_AUTH_ENABLED"); err != nil {
 		return Config{}, err
+	}
+	cfg.LogFile = true
+	if strings.TrimSpace(os.Getenv("LOG_FILE")) != "" {
+		if cfg.LogFile, err = parseBool("LOG_FILE"); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.LogMaxTotalMB, err = parsePositiveInt("LOG_MAX_TOTAL_MB", 500); err != nil {
+		return Config{}, err
+	}
+	if cfg.LogMaxTotalMB < MinLogTotalMB {
+		return Config{}, fmt.Errorf("LOG_MAX_TOTAL_MB 不能小于 %d", MinLogTotalMB)
 	}
 	if cfg.PerAccountConcurrency, err = parsePositiveInt("PER_ACCOUNT_CONCURRENCY", 1); err != nil {
 		return Config{}, err

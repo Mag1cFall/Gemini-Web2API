@@ -71,6 +71,7 @@ type RequestInfo struct {
 	ClientIP       string    `json:"client_ip,omitempty"`
 	Model          string    `json:"model,omitempty"`
 	ProviderModel  string    `json:"provider_model,omitempty"`
+	Thinking       string    `json:"thinking,omitempty"`
 	Account        string    `json:"account,omitempty"`
 	Stream         bool      `json:"stream"`
 	Status         int       `json:"status,omitempty"`
@@ -229,6 +230,16 @@ func (r *Request) Stage(stage string, fields ...any) {
 	defer r.mu.Unlock()
 	r.info.Stage = stage
 	r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, Message(stage, fields...))
+}
+
+// SetThinking 记录按账号模型目录选定的网页思考强度
+func (r *Request) SetThinking(level string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.info.Thinking = level
+	r.mu.Unlock()
 }
 
 // SetStage 记录当前阶段名，不输出日志，等待诊断与取消日志使用该名称
@@ -505,6 +516,9 @@ func finishMessage(info RequestInfo, stage string) (string, string) {
 		if seconds := duration.Seconds(); seconds > 0 {
 			fields = append(fields, "", fmt.Sprintf("%.1f tokens/s", float64(info.Usage.OutputTokens)/seconds))
 		}
+	}
+	if info.Thinking != "" {
+		fields = append(fields, "思考强度", info.Thinking)
 	}
 	if info.ToolCalls > 0 {
 		fields = append(fields, "工具调用", info.ToolCalls)

@@ -106,6 +106,34 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 	}
 }
 
+// configureCooldownStore 让账号与模型冷却写入账本库，并恢复上次运行保存的未结束冷却
+func configureCooldownStore(pool *balancer.AccountPool, store *requestdb.Store) {
+	if store == nil {
+		return
+	}
+	stored, err := store.Cooldowns(context.Background(), time.Now())
+	if err != nil {
+		logging.Warn(logging.SourceService, "读取冷却失败", "错误", err)
+	}
+	cooldowns := make([]balancer.Cooldown, 0, len(stored))
+	for _, value := range stored {
+		cooldowns = append(cooldowns, balancer.Cooldown{Account: value.Account, Model: value.Model, Until: value.Until, Reason: value.Reason})
+	}
+	pool.RestoreCooldowns(cooldowns)
+	pool.OnCooldownChange(func(cooldowns []balancer.Cooldown) {
+		values := make([]requestdb.StoredCooldown, 0, len(cooldowns))
+		for _, value := range cooldowns {
+			values = append(values, requestdb.StoredCooldown{Account: value.Account, Model: value.Model, Until: value.Until, Reason: value.Reason})
+		}
+		if err := store.SaveCooldowns(context.Background(), values); err != nil {
+			logging.Warn(logging.SourceService, "保存冷却失败", "错误", err)
+		}
+	})
+	if len(cooldowns) > 0 {
+		logging.Info(logging.SourceService, "恢复冷却", "数量", len(cooldowns))
+	}
+}
+
 // configureSessionStore 让会话登记写入账本库，并恢复上次运行保存的未过期会话
 func configureSessionStore(pool *balancer.AccountPool, store *requestdb.Store) {
 	if store == nil {

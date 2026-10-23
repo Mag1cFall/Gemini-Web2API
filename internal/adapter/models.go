@@ -29,11 +29,11 @@ func Catalog(pool *balancer.AccountPool) []CatalogModel {
 	return availableModels(pool)
 }
 
-// availableModels 汇总已就绪账号的模型目录，并追加 MODEL_MAPPING 中指向已有模型的别名
+// availableModels 汇总已就绪或已读取目录的账号的模型目录，并追加 MODEL_MAPPING 中指向已有模型的别名
 func availableModels(pool *balancer.AccountPool) []CatalogModel {
 	byID := make(map[string]CatalogModel)
 	defaultVotes := make(map[string]int)
-	for _, account := range pool.ReadyAccounts() {
+	for _, account := range pool.CatalogAccounts() {
 		client := account.Client
 		for _, model := range client.Models() {
 			if model.Default {
@@ -41,8 +41,10 @@ func availableModels(pool *balancer.AccountPool) []CatalogModel {
 			}
 			availability := byID[model.ID]
 			availability.Model = model
-			availability.AccountCount++
-			availability.Accounts = append(availability.Accounts, account.ID)
+			if account.Ready {
+				availability.AccountCount++
+				availability.Accounts = append(availability.Accounts, account.ID)
+			}
 			contextWindow := client.ContextWindow()
 			if availability.MinInputTokenLimit == 0 || contextWindow < availability.MinInputTokenLimit {
 				availability.MinInputTokenLimit = contextWindow
@@ -100,6 +102,17 @@ func findModel(pool *balancer.AccountPool, id string) (CatalogModel, bool) {
 	return CatalogModel{}, false
 }
 
+// lookupModel 在公开目录中查找模型 ID 或别名，找不到时按 modelKnown 返回 503 或 404 错误
+func lookupModel(pool *balancer.AccountPool, id string) (CatalogModel, error) {
+	if model, ok := findModel(pool, id); ok {
+		return model, nil
+	}
+	if err := modelKnown(pool, id); err != nil {
+		return CatalogModel{}, err
+	}
+	return CatalogModel{}, &gemini.ProtocolError{HTTPStatus: http.StatusNotFound, Message: modelNotFoundMessage(pool, id)}
+}
+
 // modelNotFoundMessage 返回模型不存在的说明并列出可用模型
 func modelNotFoundMessage(pool *balancer.AccountPool, id string) string {
 	models := availableModels(pool)
@@ -150,9 +163,17 @@ func geminiModelObject(model CatalogModel) gin.H {
 	}
 }
 
-// ListModelsHandler 返回 OpenAI 模型目录，带 anthropic-version 头时返回 Anthropic 格式
+// ListModelsHandler 返回 OpenAI 模型目录，带 anthropic-version 头时返回 Anthropic 格式，没有任何目录时返回 503
 func ListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if len(pool.CatalogAccounts()) == 0 {
+			if c.GetHeader("anthropic-version") != "" {
+				writeClaudeError(c, http.StatusServiceUnavailable, "overloaded_error", errCatalogNotReady.Message)
+				return
+			}
+			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", errCatalogNotReady.Message)
+			return
+		}
 		models := availableModels(pool)
 		if c.GetHeader("anthropic-version") != "" {
 			data := make([]gin.H, 0, len(models))
@@ -177,14 +198,14 @@ func ListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 // RetrieveModelHandler 返回单个模型，带 anthropic-version 头时返回 Anthropic 格式
 func RetrieveModelHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("model")
-		model, ok := findModel(pool, id)
+		bindScope(c, pool, c.Param("model"))
+		model, err := lookupModel(pool, c.Param("model"))
 		anthropic := c.GetHeader("anthropic-version") != ""
 		switch {
-		case !ok && anthropic:
-			writeClaudeError(c, http.StatusNotFound, "not_found_error", modelNotFoundMessage(pool, id))
-		case !ok:
-			writeOpenAIError(c, http.StatusNotFound, "model_not_found", modelNotFoundMessage(pool, id))
+		case err != nil && anthropic:
+			writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
+		case err != nil:
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 		case anthropic:
 			c.JSON(http.StatusOK, claudeModelObject(model))
 		default:
@@ -193,9 +214,13 @@ func RetrieveModelHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	}
 }
 
-// GeminiListModelsHandler 返回 Gemini 模型目录
+// GeminiListModelsHandler 返回 Gemini 模型目录，没有任何目录时返回 503
 func GeminiListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if len(pool.CatalogAccounts()) == 0 {
+			writeGeminiError(c, http.StatusServiceUnavailable, "UNAVAILABLE", errCatalogNotReady.Message)
+			return
+		}
 		models := availableModels(pool)
 		data := make([]gin.H, 0, len(models))
 		for _, model := range models {
@@ -208,10 +233,10 @@ func GeminiListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 // GeminiGetModelHandler 返回单个 Gemini 模型
 func GeminiGetModelHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("model")
-		model, ok := findModel(pool, id)
-		if !ok {
-			writeGeminiError(c, http.StatusNotFound, "NOT_FOUND", modelNotFoundMessage(pool, id))
+		bindScope(c, pool, c.Param("model"))
+		model, err := lookupModel(pool, c.Param("model"))
+		if err != nil {
+			writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
 			return
 		}
 		c.JSON(http.StatusOK, geminiModelObject(model))

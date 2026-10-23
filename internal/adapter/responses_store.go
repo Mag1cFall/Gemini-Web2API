@@ -161,10 +161,8 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 		running := responseShell(run.id, config.MapModel(request.Model), run.created, "in_progress")
 		applyRequestFields(running, request)
 		saveResponse(ctx, store, request, run.id, run.created, running)
-		result, _, err := runGeneration(ctx, pool, run.sessionKey, request.PreviousResponseID == "", request.Model, run.id, run.media, run.thinkingLevel, run.bridge,
-			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-				return buildResponsesPrompt(background, client, request, continuation, run.bridge.declared(continuation && isHistoryKey(run.sessionKey)))
-			}, nil, nil)
+		result, _, err := runGeneration(ctx, pool, run.sessionKey, run.policy, request.Model, run.id, run.media, run.thinkingLevel, run.bridge,
+			responsesPrompt(background, request, run.rebuilt, run.sessionKey, run.bridge), nil, nil)
 		if err == nil {
 			err = inlineResultMedia(ctx, &result)
 		}
@@ -270,6 +268,8 @@ type responsesRun struct {
 	id              string
 	created         int64
 	sessionKey      string
+	policy          sessionPolicy
+	rebuilt         *ResponsesRequest
 	media           generationMedia
 	thinkingLevel   gemini.ThinkingLevel
 	bridge          ToolBridge
@@ -469,6 +469,23 @@ func itemID(raw json.RawMessage) string {
 	return head.ID
 }
 
+// rebuiltResponsesRequest 返回把 previous_response_id 的已保存响应链与本次输入合并为完整输入的请求，前序响应没有保存时返回 nil
+func rebuiltResponsesRequest(ctx context.Context, store *requestdb.Store, request ResponsesRequest) *ResponsesRequest {
+	if store == nil || request.PreviousResponseID == "" {
+		return nil
+	}
+	previous, err := store.Response(ctx, request.PreviousResponseID)
+	if err != nil {
+		return nil
+	}
+	var input []json.RawMessage
+	_ = json.Unmarshal(responsesInputItems(request.Input, ""), &input)
+	items, _ := json.Marshal(slices.Concat(responseChainItems(ctx, store, previous), responseItems(previous), input))
+	rebuilt := request
+	rebuilt.PreviousResponseID, rebuilt.Input = "", items
+	return &rebuilt
+}
+
 // responseChainItems 返回生成该响应时的全部输入项：续接链上各前序响应的输入与输出，以及本次输入
 func responseChainItems(ctx context.Context, store *requestdb.Store, stored requestdb.StoredResponse) []json.RawMessage {
 	var items []json.RawMessage
@@ -488,7 +505,7 @@ func responseChainItems(ctx context.Context, store *requestdb.Store, stored requ
 	return items
 }
 
-// ResponseInputItemsHandler 按 after、before、limit 与 order 分页返回生成该响应时的输入项
+// ResponseInputItemsHandler 按 after、before、limit 与 order 分页返回生成该响应时的输入项，未知的游标返回空页
 func ResponseInputItemsHandler(store *requestdb.Store) gin.HandlerFunc {
 	useStore(store)
 	return func(c *gin.Context) {
@@ -522,8 +539,8 @@ func ResponseInputItemsHandler(store *requestdb.Store) gin.HandlerFunc {
 			}
 			index := slices.IndexFunc(items, func(item json.RawMessage) bool { return itemID(item) == value })
 			if index < 0 {
-				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("%s item %q is not an input item of this response", cursor, value))
-				return
+				start, end = 0, 0
+				break
 			}
 			if cursor == "after" {
 				start = index + 1
@@ -546,21 +563,6 @@ func ResponseInputItemsHandler(store *requestdb.Store) gin.HandlerFunc {
 	}
 }
 
-// countClient 返回可运行该模型的就绪账号客户端，用于计数时下载远程媒体；model 为空时取任一就绪账号
-func countClient(pool *balancer.AccountPool, model string) *gemini.Client {
-	model = config.MapModel(model)
-	for _, account := range pool.ReadyAccounts() {
-		client := account.Client
-		if model == "" {
-			return client
-		}
-		if _, err := client.ResolveModel(model); err == nil {
-			return client
-		}
-	}
-	return nil
-}
-
 // ResponsesInputTokensHandler 以与生成相同的提示词编码计算 Responses 请求的输入 token，续接时计入会话已有上下文
 func ResponsesInputTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -569,17 +571,16 @@ func ResponsesInputTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
+		if _, err := takeModelSuffix(&request.Model); err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
 		bindScope(c, pool, request.Model)
 		if request.Model != "" {
-			if known, _ := modelStatus(pool, request.Model); !known {
-				writeOpenAIError(c, http.StatusNotFound, "model_not_found", modelNotFoundMessage(pool, request.Model))
+			if err := modelKnown(pool, request.Model); err != nil {
+				writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 				return
 			}
-		}
-		client := countClient(pool, request.Model)
-		if client == nil {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready")
-			return
 		}
 		bridge, err := responsesToolBridge(request)
 		if err != nil {
@@ -603,7 +604,7 @@ func ResponsesInputTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		if len(request.Input) == 0 {
 			request.Input = json.RawMessage(`[]`)
 		}
-		prompt, files, err := buildResponsesPrompt(c, client, request, continuation, bridge)
+		prompt, files, err := buildResponsesPrompt(c, countClient(pool), request, continuation, bridge)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return

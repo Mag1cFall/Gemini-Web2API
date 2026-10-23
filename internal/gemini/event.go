@@ -65,6 +65,8 @@ type EventMetadataData struct {
 	ControlToken string
 	ModelHash    string
 	ModelName    string
+	// LimitNotice 是用量用满后上游随降级回答给出的额度提示
+	LimitNotice string
 }
 
 // CodeEventType 表示 Gemini Web 内置代码执行事件类型

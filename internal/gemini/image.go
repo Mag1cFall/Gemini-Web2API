@@ -25,7 +25,9 @@ type Media struct {
 	Width       int       `json:"width,omitempty"`
 	Height      int       `json:"height,omitempty"`
 	SizeBytes   int       `json:"size_bytes,omitempty"`
-	Offset      int       `json:"offset"`
+	// Thumbnail 是网页视频条目给出的缩略图地址
+	Thumbnail string `json:"thumbnail,omitempty"`
+	Offset    int    `json:"offset"`
 	// download 是下载生成图片原图所需的条目与会话标识
 	download *imageDownload
 }

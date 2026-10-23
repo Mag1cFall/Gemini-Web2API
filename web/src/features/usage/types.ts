@@ -95,6 +95,7 @@ export interface UsageRecord {
   path: string
   model: string
   provider_model: string
+  thinking: string
   account: string
   status: number
   state: FinishedState

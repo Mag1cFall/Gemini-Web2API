@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Info, Languages, LogOut, Menu, Minus, RefreshCw, Square, X } from 'lucide-react'
+import { Info, Languages, LogOut, Menu, Minus, Moon, RefreshCw, Square, Sun, X } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 
@@ -19,6 +19,7 @@ import { sessionKey, useSession, useStatus } from '@/features/service/queries'
 import { api } from '@/lib/api'
 import { isDesktop, maximisedEvent, windowControl } from '@/lib/desktop'
 import { fill, type Language, languages, useI18n, useMessages } from '@/lib/i18n'
+import { setTheme, useTheme } from '@/lib/theme'
 
 // BrandMark 是产品标志，Gemini Advanced 渐变四角星
 function BrandMark() {
@@ -38,6 +39,22 @@ function ServiceChip() {
       />
       <span>{status.isError ? m.offline : m.notReady}</span>
     </span>
+  )
+}
+
+// ThemeToggle 在深浅色之间切换并记住选择，提示与图标随当前配色更新
+function ThemeToggle() {
+  const m = useMessages(appMessages)
+  const dark = useTheme() === 'dark'
+  return (
+    <HeaderAction
+      label={dark ? m.lightTheme : m.darkTheme}
+      onClick={() => {
+        setTheme(dark ? 'light' : 'dark')
+      }}
+    >
+      {dark ? <Sun size={18} aria-hidden /> : <Moon size={18} aria-hidden />}
+    </HeaderAction>
   )
 }
 
@@ -174,6 +191,7 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
       <div className="flex-1" />
       {!minimal && <ServiceChip />}
       <div className="flex items-center gap-2">
+        <ThemeToggle />
         <DropdownMenu>
           <Tooltip label={m.language}>
             <DropdownMenuTrigger asChild>

@@ -286,13 +286,8 @@ func ResponsesCompactHandler(pool *balancer.AccountPool, store *requestdb.Store)
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "model is required")
 			return
 		}
-		knownModel, readyModel := modelStatus(pool, request.Model)
-		if !knownModel {
-			writeOpenAIError(c, http.StatusNotFound, "model_not_found", modelNotFoundMessage(pool, request.Model))
-			return
-		}
-		if !readyModel {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+		if err := awaitModel(c, pool, request.Model); err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		id := fmt.Sprintf("resp_%d", time.Now().UnixNano())
@@ -325,7 +320,7 @@ func ResponsesCompactHandler(pool *balancer.AccountPool, store *requestdb.Store)
 			history = append(slices.Clone(history), userTextMessage(prompt))
 			summaryRequest := ResponsesRequest{Model: request.Model, Instructions: request.Instructions}
 			summaryRequest.Input, _ = json.Marshal(history)
-			result, accountID, err := runGeneration(c.Request.Context(), pool, "", false, request.Model, id, generationMedia{}, gemini.ThinkingLow, ToolBridge{Choice: "auto"},
+			result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionContinue, request.Model, id, generationMedia{}, gemini.ThinkingLow, ToolBridge{Choice: "auto"},
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildResponsesPrompt(c, client, summaryRequest, false, ToolBridge{Choice: "auto"})
 				}, nil, nil)

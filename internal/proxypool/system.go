@@ -18,7 +18,7 @@ func System() string {
 	return windowsProxyURL(osProxyServer())
 }
 
-// windowsProxyURL 把 Windows ProxyServer 的 host:port 或按协议分列的写法转换为代理 URL，依次取 https、http 与 socks
+// windowsProxyURL 把 Windows ProxyServer 的 host:port 或按协议分列的写法转换为代理 URL，依次取 https、http 与 socks，socks 按 Chromium 规则为 SOCKS4
 func windowsProxyURL(server string) string {
 	server = strings.TrimSpace(server)
 	if server == "" {
@@ -42,7 +42,7 @@ func windowsProxyURL(server string) string {
 		}
 	}
 	if address := entries["socks"]; address != "" {
-		return "socks5://" + address
+		return "socks4://" + address
 	}
 	return ""
 }

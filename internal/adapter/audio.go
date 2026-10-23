@@ -60,20 +60,15 @@ func SpeechHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 		if _, ok := audioContentTypes[format]; !ok || format == "pcm16" {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf(
-				"response_format %q is not available: Gemini Web read-aloud returns MP3 and Ogg Opus audio, which this service returns as mp3, opus, wav, flac or pcm", format))
+				"response_format %q is not available: Gemini Web read-aloud returns MP3 and Ogg Opus audio, which this service returns as mp3, opus, aac, wav, flac or pcm", format))
 			return
 		}
 		if request.StreamFormat != "" && request.StreamFormat != "audio" && request.StreamFormat != "sse" {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("stream_format must be audio or sse, got %q", request.StreamFormat))
 			return
 		}
-		knownModel, readyModel := modelStatus(pool, request.Model)
-		if !knownModel {
-			writeOpenAIError(c, http.StatusNotFound, "model_not_found", modelNotFoundMessage(pool, request.Model))
-			return
-		}
-		if !readyModel {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+		if err := awaitModel(c, pool, request.Model); err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		var unsupported []string
@@ -89,35 +84,35 @@ func SpeechHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		setUnsupportedParameters(c, unsupported)
 
 		modelID := config.MapModel(request.Model)
-		client, accountID := pool.NextForModel("", modelID)
-		if client == nil {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
-			return
-		}
-		c.Set("account_id", accountID)
-		trace.SetStage("等待账号 " + accountID)
-		release, err := client.AcquireRequest(c.Request.Context())
+		trace.SetStage("等待账号")
+		client, accountID, release, err := pool.AcquireForModel(c.Request.Context(), "", modelID, nil)
 		if err != nil {
 			err = cancelledError(c.Request.Context(), err)
 			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
+		if client == nil {
+			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+			return
+		}
+		c.Set("account_id", accountID)
 		trace.AccountReady(accountID, modelID)
 		upstreamFormat := gemini.SpeechMP3
 		if format == "opus" {
 			upstreamFormat = gemini.SpeechOggOpus
 		}
 		audio, err := client.Speech(c.Request.Context(), request.Input, "", upstreamFormat)
-		release()
 		err = cancelledError(c.Request.Context(), err)
 		if err != nil {
 			if retryableAccountError(err) {
 				pool.ReportFailure(accountID, modelID, err)
 			}
+			release()
 			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		pool.ReportSuccess(accountID, modelID)
+		release()
 		contentType := audioContentTypes[format]
 		if upstreamFormat == gemini.SpeechMP3 {
 			if audio, contentType, err = transcodeMP3(audio, format); err != nil {
@@ -165,6 +160,7 @@ type transcriptionRequest struct {
 	words         bool
 	file          gemini.FileData
 	audioDuration float64
+	speakers      []knownSpeaker
 }
 
 // transcriptSegment 是带时间戳的一段转写
@@ -228,7 +224,9 @@ func transcriptionPrompt(task transcriptionTask, request transcriptionRequest) s
 	if request.prompt != "" {
 		fmt.Fprintf(&builder, "\nUse this text for context, spelling and style: %s", request.prompt)
 	}
-	if timedFormat(request.format) {
+	if request.format == "diarized_json" {
+		builder.WriteString(diarizationPrompt(request.speakers))
+	} else if timedFormat(request.format) {
 		builder.WriteString("\nReturn language as the lowercase English name of the spoken language, text as the full ")
 		if task == taskTranslate {
 			builder.WriteString("translation")
@@ -279,9 +277,9 @@ func parseTranscriptionRequest(c *gin.Context, task transcriptionTask) (transcri
 		}
 	}
 	switch request.format {
-	case "json", "text", "srt", "vtt", "verbose_json":
+	case "json", "text", "srt", "vtt", "verbose_json", "diarized_json":
 	default:
-		return request, fmt.Errorf("response_format must be one of json, text, srt, verbose_json or vtt, got %q", request.format)
+		return request, fmt.Errorf("response_format must be one of json, text, srt, verbose_json, vtt or diarized_json, got %q", request.format)
 	}
 	if request.format != "verbose_json" {
 		request.words = false
@@ -307,7 +305,10 @@ func parseTranscriptionRequest(c *gin.Context, task transcriptionTask) (transcri
 	}
 	request.file = gemini.FileData{Data: data, FileName: header.Filename, MimeType: fileUploadMIME(header.Header.Get("Content-Type"), header.Filename, data[:min(len(data), 512)])}
 	request.audioDuration = audioSeconds(data)
-	return request, nil
+	if request.format == "diarized_json" {
+		request.speakers, err = parseKnownSpeakers(c)
+	}
+	return request, err
 }
 
 // TranscriptionHandler 处理 OpenAI /v1/audio/transcriptions
@@ -342,18 +343,13 @@ func transcriptionHandler(pool *balancer.AccountPool, task transcriptionTask) gi
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "model is required")
 			return
 		}
-		knownModel, readyModel := modelStatus(pool, request.model)
-		if !knownModel {
-			writeOpenAIError(c, http.StatusNotFound, "model_not_found", modelNotFoundMessage(pool, request.model))
-			return
-		}
-		if !readyModel {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+		if err := awaitModel(c, pool, request.model); err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		var unsupported []string
 		for _, field := range []string{"temperature", "include[]", "chunking_strategy", "known_speaker_names[]", "known_speaker_references[]"} {
-			if c.PostForm(field) != "" {
+			if c.PostForm(field) != "" && (request.format != "diarized_json" || !strings.HasPrefix(field, "known_speaker_")) {
 				unsupported = append(unsupported, strings.TrimSuffix(field, "[]"))
 			}
 		}
@@ -364,22 +360,42 @@ func transcriptionHandler(pool *balancer.AccountPool, task transcriptionTask) gi
 		if timedFormat(request.format) {
 			bridge.JSONSchema = timedTranscriptSchema(request.words)
 		}
+		files := []gemini.FileData{request.file}
+		if request.format == "diarized_json" {
+			bridge.JSONSchema = diarizedTranscriptSchema()
+			for _, speaker := range request.speakers {
+				files = append(files, speaker.file)
+			}
+		}
 		prompt := transcriptionPrompt(task, request)
 		prepare := func(*gemini.Client, bool) (string, []gemini.FileData, error) {
-			return prompt, []gemini.FileData{request.file}, nil
+			return prompt, files, nil
 		}
 		id := randomID("transcript_", 24, true)
+		if request.stream && request.format == "diarized_json" {
+			streamDiarizedTranscription(c, pool, request, id, bridge, prepare)
+			return
+		}
 		if request.stream {
 			streamTranscription(c, pool, request, id, bridge, prepare)
 			return
 		}
-		result, accountID, err := runGeneration(c.Request.Context(), pool, "", true, request.model, id, generationMedia{}, gemini.ThinkingLow, bridge, prepare, nil, nil)
+		result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionCreate, request.model, id, generationMedia{}, gemini.ThinkingLow, bridge, prepare, nil, nil)
 		c.Set("account_id", accountID)
 		if err != nil {
 			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		text := strings.TrimSpace(result.Accumulator.Primary().Text)
+		if request.format == "diarized_json" {
+			transcript, err := parseDiarizedTranscript(bridge, text)
+			if err != nil {
+				writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
+				return
+			}
+			c.JSON(http.StatusOK, diarizedTranscription(request, transcript, transcriptionUsage(result.Accumulator.Usage, request.file)))
+			return
+		}
 		if !timedFormat(request.format) {
 			if request.format == "text" {
 				c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text+"\n"))
@@ -417,7 +433,7 @@ func streamTranscription(c *gin.Context, pool *balancer.AccountPool, request tra
 	setSSEHeaders(c)
 	defer startKeepalive(c, openAIKeepalive)()
 	projection := newStreamProjection(bridge, false)
-	result, accountID, err := runGeneration(c.Request.Context(), pool, "", true, request.model, id, generationMedia{}, gemini.ThinkingLow, bridge, prepare,
+	result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionCreate, request.model, id, generationMedia{}, gemini.ThinkingLow, bridge, prepare,
 		func(event gemini.Event) error {
 			return projection.project(event, func(event gemini.Event) error {
 				return writeSSEJSON(c.Writer, gin.H{"type": "transcript.text.delta", "delta": event.Delta})

@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/claude"
@@ -67,6 +68,10 @@ func openAIChatThinkingSettings(request ChatRequest) (gemini.ThinkingLevel, bool
 		return gemini.ThinkingLow, false, err
 	}
 	includeThoughts := !strings.EqualFold(strings.TrimSpace(effort), "none")
+	specified, requested := effort != "", false
+	if request.IncludeReasoning != nil {
+		includeThoughts, requested = *request.IncludeReasoning, *request.IncludeReasoning
+	}
 	switch strings.ToLower(strings.TrimSpace(options.Summary)) {
 	case "":
 	case "none":
@@ -75,7 +80,39 @@ func openAIChatThinkingSettings(request ChatRequest) (gemini.ThinkingLevel, bool
 	default:
 		return gemini.ThinkingLow, false, fmt.Errorf("不支持的 reasoning.summary %q", options.Summary)
 	}
+	if thinking := request.ExtraBody.Google.ThinkingConfig; thinking != nil {
+		if thinking.ThinkingLevel != "" && thinking.ThinkingBudget != nil {
+			return gemini.ThinkingLow, false, fmt.Errorf("thinking_level 与 thinking_budget 不能同时使用")
+		}
+		if thinking.ThinkingLevel != "" {
+			if mode, err = reasoningEffortLevel(thinking.ThinkingLevel); err != nil {
+				return gemini.ThinkingLow, false, err
+			}
+			specified = true
+		}
+		if thinking.IncludeThoughts != nil {
+			includeThoughts, requested = *thinking.IncludeThoughts, *thinking.IncludeThoughts
+		}
+		if budget := thinking.ThinkingBudget; budget != nil {
+			mode, includeThoughts, specified = thinkingBudgetLevel(*budget), includeThoughts && *budget != 0, true
+		}
+	}
+	if !specified {
+		mode = unspecifiedThinkingLevel(requested)
+	}
 	return mode, includeThoughts, nil
+}
+
+// thinkingBudgetLevel 把思考预算映射到网页思考强度：不超过 1024 为 Low，不超过 8192 为 Medium，更高为 High，0 与 -1 为 Low
+func thinkingBudgetLevel(budget int) gemini.ThinkingLevel {
+	switch {
+	case budget <= 1024:
+		return gemini.ThinkingLow
+	case budget <= 8192:
+		return gemini.ThinkingMedium
+	default:
+		return gemini.ThinkingHigh
+	}
 }
 
 // responsesThinkingSettings 读取 Responses API 思考强度和摘要策略
@@ -92,6 +129,9 @@ func responsesThinkingSettings(request ResponsesRequest) (gemini.ThinkingLevel, 
 	case "", "none":
 		return mode, false, nil
 	case "auto", "concise", "detailed":
+		if options.Effort == "" {
+			mode = unspecifiedThinkingLevel(true)
+		}
 		return mode, true, nil
 	default:
 		return gemini.ThinkingLow, false, fmt.Errorf("不支持的 reasoning.summary %q", options.Summary)
@@ -112,6 +152,9 @@ func claudeThinkingSettings(request claude.ClaudeRequest) (gemini.ThinkingLevel,
 		return gemini.ThinkingLow, false, nil
 	case "enabled", "adaptive":
 		if request.OutputConfig == nil || request.OutputConfig.Effort == "" {
+			if request.Thinking.BudgetTokens != nil {
+				return thinkingBudgetLevel(*request.Thinking.BudgetTokens), true, nil
+			}
 			return gemini.ThinkingHigh, true, nil
 		}
 		mode, err := reasoningEffortLevel(request.OutputConfig.Effort)
@@ -142,13 +185,48 @@ func geminiRequestThinkingSettings(request GeminiGenerateContentRequest) (gemini
 		mode, err := reasoningEffortLevel(config.ThinkingConfig.ThinkingLevel)
 		return mode, config.ThinkingConfig.IncludeThoughts && err == nil, err
 	}
-	if config.ThinkingConfig.ThinkingBudget != nil {
-		if *config.ThinkingConfig.ThinkingBudget == 0 {
-			return gemini.ThinkingLow, false, nil
-		}
-		if *config.ThinkingConfig.ThinkingBudget > 0 {
-			return gemini.ThinkingHigh, config.ThinkingConfig.IncludeThoughts, nil
-		}
+	if budget := config.ThinkingConfig.ThinkingBudget; budget != nil {
+		return thinkingBudgetLevel(*budget), config.ThinkingConfig.IncludeThoughts && *budget != 0, nil
 	}
-	return gemini.ThinkingLow, config.ThinkingConfig.IncludeThoughts, nil
+	return unspecifiedThinkingLevel(config.ThinkingConfig.IncludeThoughts), config.ThinkingConfig.IncludeThoughts, nil
+}
+
+// unspecifiedThinkingLevel 返回请求未指定思考强度时的网页强度，要求输出思考摘要时为 High，否则为官网默认的 Low
+func unspecifiedThinkingLevel(includeThoughts bool) gemini.ThinkingLevel {
+	if includeThoughts {
+		return gemini.ThinkingHigh
+	}
+	return gemini.ThinkingLow
+}
+
+// modelSuffix 是模型名末尾 (值) 给出的思考设置，level 为 0 表示没有后缀
+type modelSuffix struct {
+	level      gemini.ThinkingLevel
+	noThoughts bool
+}
+
+// takeModelSuffix 从模型名中去掉末尾的思考后缀并返回其思考设置
+func takeModelSuffix(model *string) (modelSuffix, error) {
+	open := strings.LastIndex(*model, "(")
+	if open < 0 || !strings.HasSuffix(*model, ")") {
+		return modelSuffix{}, nil
+	}
+	value := strings.ToLower(strings.TrimSpace((*model)[open+1 : len(*model)-1]))
+	*model = strings.TrimSpace((*model)[:open])
+	if budget, err := strconv.Atoi(value); err == nil && budget >= -1 {
+		return modelSuffix{level: thinkingBudgetLevel(budget), noThoughts: budget == 0}, nil
+	}
+	level, err := reasoningEffortLevel(value)
+	if err != nil || value == "" || value == "thinking_level_unspecified" {
+		return modelSuffix{}, fmt.Errorf("模型名后缀 (%s) 必须是 none、auto、minimal、low、medium、high、xhigh、max、-1 或非负整数思考预算", value)
+	}
+	return modelSuffix{level: level, noThoughts: value == "none"}, nil
+}
+
+// apply 用后缀覆盖请求体给出的思考强度与思考摘要设置
+func (s modelSuffix) apply(level gemini.ThinkingLevel, includeThoughts bool) (gemini.ThinkingLevel, bool) {
+	if s.level == 0 {
+		return level, includeThoughts
+	}
+	return s.level, includeThoughts && !s.noThoughts
 }

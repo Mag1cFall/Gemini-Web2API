@@ -253,6 +253,70 @@
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 }
 
+/* 浅色配色：原生控件与滚动条随选择的浅色绘制 */
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+/* 深色配色：与浅色同名的设计 token，由根元素 data-theme 切换 */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --color-background: #111316;
+  --color-surface: #1b1d21;
+  --color-panel: #16181b;
+  --color-panel-edge: #26292e;
+  --color-muted: #24272c;
+  --color-hover: #2b2f35;
+  --color-header-hover: #262a2f;
+  --color-nav-active: #2b2f35;
+  --color-nav-pressed: #23262b;
+  --color-border: #2c3036;
+  --color-border-strong: rgb(255 255 255 / 0.22);
+  --color-foreground: rgb(255 255 255 / 0.9);
+  --color-foreground-muted: rgb(255 255 255 / 0.62);
+  --color-foreground-subtle: rgb(255 255 255 / 0.4);
+  --color-overlay: rgb(0 0 0 / 0.6);
+  --color-primary: #4f8cff;
+  --color-primary-hover: #6d9fff;
+  --color-primary-active: #8fb5ff;
+  --color-primary-soft: rgb(79 140 255 / 0.16);
+  --color-primary-soft-strong: rgb(79 140 255 / 0.28);
+  --color-primary-border: rgb(79 140 255 / 0.55);
+  --color-destructive: #ff5d5d;
+  --color-destructive-hover: #ff7676;
+  --color-destructive-active: #ff8f8f;
+  --color-destructive-soft: rgb(255 93 93 / 0.14);
+  --color-destructive-border: rgb(255 93 93 / 0.45);
+  --color-success: #2bd48c;
+  --color-success-text: #5edba3;
+  --color-success-soft: rgb(43 212 140 / 0.16);
+  --color-warning: #ff9f33;
+  --color-warning-text: #ffb65c;
+  --color-warning-soft: rgb(255 159 51 / 0.15);
+  --color-error: #ff5d5d;
+  --color-error-text: #ff857c;
+  --color-error-soft: rgb(255 93 93 / 0.14);
+  --color-info: #4f8cff;
+  --color-info-soft: rgb(79 140 255 / 0.16);
+  --color-chip: #e8eaed;
+  --color-chip-foreground: #111316;
+  --color-selection: rgb(79 140 255 / 0.32);
+  --color-scrollbar: #464a51;
+  --color-control-edge: #33373d;
+  --color-control-underline: #5a5f66;
+  --color-input-edge: #33373d;
+  --color-input-underline: #80858c;
+  --color-placeholder: #7d828a;
+  --color-disabled: #565b62;
+  --color-switch-off: #24272c;
+  --color-switch-border: #80858c;
+  --color-switch-knob: #b4b8be;
+  --shadow-raised: 0 2px 8px 0 rgb(0 0 0 / 0.3);
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-popover: 0 6px 16px 0 rgb(0 0 0 / 0.5);
+  --shadow-modal: 0 9px 30px 0 rgb(0 0 0 / 0.6);
+}
+
 @layer base {
   html {
     background-color: var(--color-background);

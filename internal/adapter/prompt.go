@@ -8,9 +8,26 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 )
+
+// writeTextSegment 把同一消息的一个文本段写入提示词，与前文相接处两侧都不是空白时以换行分隔
+func writeTextSegment(builder *strings.Builder, text string) {
+	if text == "" {
+		return
+	}
+	if current := builder.String(); current != "" {
+		last, _ := utf8.DecodeLastRuneInString(current)
+		first, _ := utf8.DecodeRuneInString(text)
+		if !unicode.IsSpace(last) && !unicode.IsSpace(first) {
+			builder.WriteByte('\n')
+		}
+	}
+	builder.WriteString(text)
+}
 
 func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemini.Client) (string, []gemini.FileData, error) {
 	if len(raw) == 0 || string(raw) == "null" {
@@ -35,7 +52,7 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 		case "text", "input_text", "output_text":
 			var value string
 			_ = json.Unmarshal(part["text"], &value)
-			builder.WriteString(value)
+			writeTextSegment(&builder, value)
 		case "image_url", "input_image", "image":
 			label, file, err := decodeImagePart(ctx, part, client)
 			if err != nil {
@@ -46,6 +63,27 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 				files = append(files, *file)
 			}
 		case "document", "input_file", "input_audio", "audio", "input_video", "video", "file":
+			if partType == "document" {
+				var source struct {
+					Type    string          `json:"type"`
+					Data    string          `json:"data"`
+					Content json.RawMessage `json:"content"`
+				}
+				_ = json.Unmarshal(part["source"], &source)
+				if source.Type == "text" {
+					builder.WriteString(source.Data)
+					continue
+				}
+				if source.Type == "content" {
+					text, attachments, err := decodeMessageContent(ctx, source.Content, client)
+					if err != nil {
+						return "", nil, err
+					}
+					builder.WriteString(text)
+					files = append(files, attachments...)
+					continue
+				}
+			}
 			if partType == "file" && len(part["file"]) > 0 {
 				var nested map[string]json.RawMessage
 				if err := json.Unmarshal(part["file"], &nested); err != nil {
@@ -73,17 +111,35 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 		case "tool_result":
 			var id string
 			_ = json.Unmarshal(part["tool_use_id"], &id)
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_result", "tool_use_id": id, "content": part["content"]})
-		case "thinking":
-			var thinking, signature string
-			_ = json.Unmarshal(part["thinking"], &thinking)
-			_ = json.Unmarshal(part["signature"], &signature)
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "thinking", "thinking": thinking, "signature": signature})
+			content, attachments, err := toolResultContent(ctx, part["content"], client)
+			if err != nil {
+				return "", nil, err
+			}
+			files = append(files, attachments...)
+			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_result", "tool_use_id": id, "content": content})
+		case "thinking", "redacted_thinking":
 		default:
 			return "", nil, fmt.Errorf("不支持的消息内容段类型 %q", partType)
 		}
 	}
 	return builder.String(), files, nil
+}
+
+// toolResultContent 返回工具结果写入提示词的内容：内容段中有文字以外的段时解码为正文与附件，否则原样保留
+func toolResultContent(ctx context.Context, raw json.RawMessage, client *gemini.Client) (any, []gemini.FileData, error) {
+	var parts []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return raw, nil, nil
+	}
+	for _, part := range parts {
+		if part.Type != "text" {
+			text, files, err := decodeMessageContent(ctx, raw, client)
+			return text, files, err
+		}
+	}
+	return raw, nil, nil
 }
 
 var markdownImagePattern = regexp.MustCompile(`!\[[^\r\n]*\]\((data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/_=-]+)\)`)
@@ -135,7 +191,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 		return "\n" + imageURL + "\n", nil, nil
 	}
 	if imageURL != "" && !strings.HasPrefix(imageURL, "data:") {
-		data, err := client.FetchMedia(ctx, imageURL)
+		data, err := fetchRemoteMedia(ctx, client, imageURL)
 		if err != nil {
 			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
 		}
@@ -154,7 +210,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 		imageURL = source.URL
 	}
 	if imageURL != "" && !strings.HasPrefix(imageURL, "data:") {
-		data, err := client.FetchMedia(ctx, imageURL)
+		data, err := fetchRemoteMedia(ctx, client, imageURL)
 		if err != nil {
 			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
 		}
@@ -225,7 +281,7 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 		return "\n" + fileURL + "\n", nil, nil
 	}
 	if fileURL != "" && !strings.HasPrefix(fileURL, "data:") {
-		data, err := client.FetchMedia(ctx, fileURL)
+		data, err := fetchRemoteMedia(ctx, client, fileURL)
 		if err != nil {
 			return "", nil, fmt.Errorf("下载远程文件失败: %w", err)
 		}

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -44,24 +45,58 @@ const dataDir = "data"
 // envPath 是管理端写回配置的文件
 const envPath = ".env"
 
+// logFilePath 是开启日志文件时写入的轮转日志
+var logFilePath = filepath.Join(dataDir, "logs", "gemini-web2api.log")
+
+// dotenvKeys 是启动时从 .env 写入进程环境的变量名，启动前已有的环境变量不在其中
+var dotenvKeys []string
+
 // Main 分派首次配置、版本查询与默认服务
 func Main(args []string) error {
 	if err := enterDataDir(); err != nil {
 		return err
 	}
-	_ = godotenv.Load()
+	loadDotenv()
 	if len(args) != 0 {
 		switch args[0] {
 		case "setup":
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			attachConsole(cancel)
 			return chromeauth.RunSetup(ctx, args[1:], os.Stdin, os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdin.Fd())))
 		case "version", "--version", "-version":
+			attachConsole(nil)
 			fmt.Println("Gemini-Web2API " + Version())
 			return nil
 		}
 	}
+	if slices.ContainsFunc(args, func(arg string) bool { return arg == "-h" || arg == "-help" || arg == "--help" }) {
+		attachConsole(nil)
+	}
 	return runDefault(args)
+}
+
+// loadDotenv 把 .env 中进程环境没有的变量写入进程环境并记入 dotenvKeys
+func loadDotenv() {
+	values, err := godotenv.Read()
+	if err != nil {
+		return
+	}
+	for key, value := range values {
+		if _, ok := os.LookupEnv(key); !ok {
+			_ = os.Setenv(key, value)
+			dotenvKeys = append(dotenvKeys, key)
+		}
+	}
+}
+
+// unloadDotenv 移除启动时从 .env 写入的变量，重启后的新进程按当前 .env 读取配置
+func unloadDotenv() {
+	for _, key := range dotenvKeys {
+		_ = os.Unsetenv(key)
+	}
 }
 
 // version 是发行构建经 -ldflags -X 写入的版本号
@@ -126,13 +161,20 @@ type Instance struct {
 	desktop  bool
 	// openUI 表示服务开始接受请求后用系统浏览器打开管理页
 	openUI bool
+	// executable 是在线更新替换的可执行文件
+	executable string
+	// restart 在在线更新安装完成后重启到新版本
+	restart func()
 }
 
-// Start 配置日志，取得数据目录的实例锁并监听端口，logWriter 为 nil 时写标准错误
+// Start 配置日志与日志文件，取得数据目录的实例锁并监听端口，logWriter 为 nil 时写标准错误
 func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, error) {
 	started := time.Now()
 	if err := logging.Setup(logging.Options{Level: cfg.LogLevel, Format: cfg.LogFormat, Writer: logWriter}); err != nil {
 		return nil, err
+	}
+	if err := logging.SetFile(logFilePath, cfg.LogFile, cfg.LogMaxTotalMB); err != nil {
+		return nil, fmt.Errorf("打开日志文件: %w", err)
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据目录: %w", err)
@@ -197,6 +239,9 @@ func (instance *Instance) Serve(ctx context.Context) error {
 			logging.SetLevel(level)
 		}
 		store.SetBodyCapture(next.RequestBodyLog)
+		if err := logging.SetFile(logFilePath, next.LogFile, next.LogMaxTotalMB); err != nil {
+			logging.Error(logging.SourceService, "日志文件设置失败", "错误", err)
+		}
 		pool.SetStrategy(next.RoutingStrategy)
 		manager.SetSettings(accounts.Settings{
 			InitTimeout: next.InitTimeout, RetryInterval: next.AccountCooldown, Proxy: next.ProxyURL,
@@ -204,13 +249,16 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		})
 	})
 	workDir, _ := os.Getwd()
+	shuttingDown := make(chan struct{})
+	updater := newSelfUpdater(Version(), instance.executable, func() string { return updateProxy(settings.Snapshot().ProxyURL) }, instance.restart)
 	server := newHTTPServer(NewRouter(Deps{
 		Pool: pool, Store: store, Accounts: manager, APIKey: settings.APIKey,
 		Admin: &admin.Deps{
 			Pool: pool, Accounts: manager, Store: store, Settings: settings, Version: Version(), StartedAt: started,
-			ListenAddr: listener.Addr().String(), DataDir: workDir, Desktop: instance.desktop,
+			ListenAddr: listener.Addr().String(), DataDir: workDir, Desktop: instance.desktop, Updates: updater, Stopping: shuttingDown,
 		},
 	}))
+	server.RegisterOnShutdown(func() { close(shuttingDown) })
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
 	adminURL := AdminURL(listener.Addr().String())

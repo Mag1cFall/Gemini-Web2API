@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -277,7 +279,7 @@ func writeFileRequestError(c *gin.Context, anthropic bool, message string) {
 	writeOpenAIError(c, http.StatusBadRequest, "invalid_request", message)
 }
 
-// FileListHandler 列出文件：OpenAI 按 purpose、order、after、limit 分页，Anthropic 按 page、limit 分页
+// FileListHandler 列出文件：OpenAI 按 purpose、order、after、limit 分页，未知的 after 返回空页；Anthropic 见 listAnthropicFiles
 func FileListHandler(store *requestdb.Store) gin.HandlerFunc {
 	useStore(store)
 	return func(c *gin.Context) {
@@ -301,8 +303,7 @@ func FileListHandler(store *requestdb.Store) gin.HandlerFunc {
 		}
 		files, more, err := store.Files(c.Request.Context(), requestdb.FileQuery{Purpose: c.Query("purpose"), Ascending: order == "asc", After: c.Query("after"), Limit: limit})
 		if errors.Is(err, requestdb.ErrNotFound) {
-			writeFileNotFound(c, c.Query("after"))
-			return
+			files, more, err = nil, false, nil
 		}
 		if err != nil {
 			writeStoreError(c, err)
@@ -323,7 +324,7 @@ func FileListHandler(store *requestdb.Store) gin.HandlerFunc {
 // anthropicPagePrefix 是 Anthropic Files 列表 page 游标的前缀，其后为上一页最后一个文件的 ID
 const anthropicPagePrefix = "page_"
 
-// listAnthropicFiles 按 Anthropic Files API 的 page 游标分页列出文件，新文件在前，还有下一页时 next_page 为其游标
+// listAnthropicFiles 按 Anthropic Files API 的 ids、limit 与 page 游标列出文件，同时接受 after_id 与 before_id，新文件在前，响应带 next_page 与 first_id、last_id、has_more，未知游标返回空页
 func listAnthropicFiles(c *gin.Context, store *requestdb.Store) {
 	limit := 20
 	if raw := c.Query("limit"); raw != "" {
@@ -334,22 +335,37 @@ func listAnthropicFiles(c *gin.Context, store *requestdb.Store) {
 		}
 		limit = value
 	}
-	query := requestdb.FileQuery{After: strings.TrimPrefix(c.Query("page"), anthropicPagePrefix), Limit: limit}
+	query := requestdb.FileQuery{After: cmp.Or(strings.TrimPrefix(c.Query("page"), anthropicPagePrefix), c.Query("after_id")), Limit: limit}
+	before := c.Query("before_id")
+	if before != "" {
+		query.After, query.Ascending = before, true
+	}
+	for _, value := range append(c.QueryArray("ids"), c.QueryArray("ids[]")...) {
+		query.IDs = append(query.IDs, strings.Split(value, ",")...)
+	}
+	if len(query.IDs) > 0 {
+		query.After, query.Limit = "", len(query.IDs)
+	}
 	files, more, err := store.Files(c.Request.Context(), query)
 	if errors.Is(err, requestdb.ErrNotFound) {
-		writeFileNotFound(c, query.After)
-		return
+		files, more, err = nil, false, nil
 	}
 	if err != nil {
 		writeStoreError(c, err)
 		return
 	}
+	if before != "" {
+		slices.Reverse(files)
+	}
 	data := make([]gin.H, 0, len(files))
 	for _, file := range files {
 		data = append(data, anthropicFileObject(file))
 	}
-	list := gin.H{"data": data, "next_page": nil}
-	if more {
+	list := gin.H{"data": data, "next_page": nil, "first_id": nil, "last_id": nil, "has_more": more}
+	if len(files) > 0 {
+		list["first_id"], list["last_id"] = files[0].ID, files[len(files)-1].ID
+	}
+	if more && before == "" {
 		list["next_page"] = anthropicPagePrefix + files[len(files)-1].ID
 	}
 	c.JSON(http.StatusOK, list)

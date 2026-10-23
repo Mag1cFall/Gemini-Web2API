@@ -96,6 +96,56 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 	return nil, fmt.Errorf("media redirect limit exceeded")
 }
 
+// FetchRemoteMedia 以账号的浏览器身份与出口、不带账号 Cookie 下载客户端给出的媒体地址，每一跳先以 checkHost 检查目标主机，声明或读到的大小超过 limit 时返回错误
+func (c *Client) FetchRemoteMedia(ctx context.Context, mediaURL string, checkHost func(context.Context, string) error, limit int64) ([]byte, error) {
+	currentURL, err := url.Parse(mediaURL)
+	if err != nil {
+		return nil, err
+	}
+	for redirects := 0; redirects <= maxMediaRedirects; redirects++ {
+		if err := checkHost(ctx, currentURL.Hostname()); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, currentURL.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		applyChromeHeaders(req, c.language, false)
+		req.Header.Set("Referer", "https://gemini.google.com/")
+		req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+		req.Header[http.HeaderOrderKey] = xhrHeaderOrder
+		req.Header[http.PHeaderOrderKey] = pseudoHeaderOrder
+		resp, err := c.mediaClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			location := resp.Header.Get("Location")
+			resp.Body.Close()
+			if currentURL, err = currentURL.Parse(location); err != nil || location == "" {
+				return nil, fmt.Errorf("重定向没有有效的 Location: %q", location)
+			}
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("HTTP %s", resp.Status)
+		}
+		if resp.ContentLength > limit {
+			return nil, fmt.Errorf("文件超过 %d 字节", limit)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > limit {
+			return nil, fmt.Errorf("文件超过 %d 字节", limit)
+		}
+		return data, nil
+	}
+	return nil, fmt.Errorf("重定向超过 %d 次", maxMediaRedirects)
+}
+
 // generatedMediaHeaderOrder 是 Chrome 稳定版页面 fetch 生成图下载链各跳的请求头顺序
 var generatedMediaHeaderOrder = []string{
 	"sec-ch-ua-full-version-list", "sec-ch-ua-platform", "sec-ch-ua", "sec-ch-ua-bitness",

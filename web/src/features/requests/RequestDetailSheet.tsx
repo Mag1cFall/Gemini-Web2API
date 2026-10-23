@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
+import { useAccountLabel } from '@/features/accounts/queries'
 import { bodyMessages, finishMessages, requestsMessages } from '@/features/requests/messages'
 import {
   AttemptList,
@@ -32,6 +33,7 @@ export function RequestDetailSheet({
   const body = useMessages(bodyMessages)
   const finish: Record<string, string> = useMessages(finishMessages)
   const { locale } = useI18n()
+  const accountLabel = useAccountLabel()
   if (!request) return null
   const running = request.state === 'running'
   const duration = (value: number | undefined) => (value ? formatDuration(value, locale) : '—')
@@ -41,7 +43,7 @@ export function RequestDetailSheet({
       value: request.protocol ? (protocolLabels[request.protocol] ?? request.protocol) : '—',
     },
     { label: m.endpoint, value: `${request.method} ${request.path}` },
-    { label: m.account, value: request.account ?? m.unassigned },
+    { label: m.account, value: request.account ? accountLabel(request.account) : m.unassigned },
     ...(request.provider_model && request.provider_model !== request.model
       ? [{ label: m.providerModel, value: request.provider_model }]
       : []),

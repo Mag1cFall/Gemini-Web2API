@@ -14,12 +14,10 @@ import (
 
 // Model 表示账号启动时发现的网页模型
 type Model struct {
-	ID          string
-	DisplayName string
-	Description string
-	Hash        string
-	// Tier 为模型行第 4 槽的账号层级，生成请求模型头第 11 项回传该值
-	Tier         int
+	ID           string
+	DisplayName  string
+	Description  string
+	Hash         string
 	Capabilities []string
 	Mode         int
 	Default      bool
@@ -104,12 +102,13 @@ func parseToolOptions(payload []any) map[Feature][]toolOption {
 	return options
 }
 
-// toolChoice 是生成请求选中的工具选项：options 写入 55 槽，sources 为其中 Sources 组的选项，aspectRatio 为请求宽高比时选中的标签，aspectOrder 为选中的宽高比在官网菜单中的序号（从 1 起）
+// toolChoice 是生成请求选中的工具选项：options 写入 55 槽，sources 为其中 Sources 组的选项，aspectRatio 为请求宽高比时选中的标签，aspectOrder 与 durationOrder 为选中的宽高比与视频时长在官网菜单中的序号（从 1 起）
 type toolChoice struct {
-	options     []int
-	sources     []int
-	aspectRatio string
-	aspectOrder int
+	options       []int
+	sources       []int
+	aspectRatio   string
+	aspectOrder   int
+	durationOrder int
 }
 
 // toolSelection 返回工具选中的选项：各组默认项，请求宽高比时 Aspect ratio 组换成比例最接近的一项；工具没有选项组时为 nil
@@ -136,8 +135,11 @@ func (c ModelCatalog) toolSelection(feature Feature, aspectRatio string) *toolCh
 			if option.source {
 				choice.sources = append(choice.sources, option.id)
 			}
-			if option.group == "Aspect ratio" {
+			switch option.group {
+			case "Aspect ratio":
 				choice.aspectOrder = order[option.group]
+			case "Duration":
+				choice.durationOrder = order[option.group]
 			}
 		}
 	}
@@ -171,9 +173,9 @@ func (c ModelCatalog) List() []Model {
 	return models
 }
 
-// Resolve 根据公开 ID、官方名称或 hash 查找模型
+// Resolve 根据公开 ID、官方名称或 hash 查找模型，公开 ID 可带 Gemini API 的 models/ 前缀
 func (c ModelCatalog) Resolve(value string) (Model, error) {
-	index, ok := c.lookup[strings.ToLower(strings.TrimSpace(value))]
+	index, ok := c.lookup[strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "models/"))]
 	if !ok {
 		return Model{}, fmt.Errorf("model %q is unavailable for this account", value)
 	}
@@ -227,13 +229,11 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 			continue
 		}
 		description, _ := stringAt(row, 12)
-		tier, _ := intAt(row, 4)
 		models = append(models, Model{
 			ID:             modelID(displayName),
 			DisplayName:    displayName,
 			Description:    description,
 			Hash:           hash,
-			Tier:           tier,
 			Capabilities:   []string{"generateContent", "streamGenerateContent"},
 			Mode:           mode,
 			Default:        mode == defaultMode,
@@ -365,15 +365,15 @@ var clientFeatures = []int{4, 5, 6, 8, 16, 19, 20}
 // guestClientFeatures 是访客页面在模型扩展头第 8 槽声明的功能编号
 var guestClientFeatures = []int{4, 6, 16, 19, 20}
 
-// buildModelHeader 构造包含模型、会话类型、思考强度、构建标签与请求计时的生成请求头，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
-func buildModelHeader(features []int, model Model, chatMode any, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) (string, error) {
+// buildModelHeader 构造包含模型、会话类型、功能编号、账号层级编码、思考强度、构建标签与请求计时的生成请求头，功能编号与官网一样写两遍，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
+func buildModelHeader(features []int, model Model, chatMode any, tier int, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) (string, error) {
 	var levelSlot any
 	if thinkingLevel != 0 {
 		levelSlot = int(thinkingLevel)
 	}
 	header, err := json.Marshal([]any{
 		1, nil, nil, nil, model.Hash, nil, nil, chatMode,
-		slices.Concat(features, features), nil, nil, model.Tier, nil, nil, model.Mode, levelSlot, clientID,
+		slices.Concat(features, features), nil, nil, tier, nil, nil, model.Mode, levelSlot, clientID,
 		[]string{buildLabel}, nil, timing,
 	})
 	if err != nil {
@@ -408,16 +408,24 @@ func buildConversationHeader(features []int, clientID string, buildLabel string,
 	return string(header)
 }
 
-// requestTiming 返回网页客户端头末尾的耗时与发送时间，秒为零时写空值
-func requestTiming(elapsed time.Duration, now time.Time) []any {
-	var seconds any
-	if whole := int64(elapsed / time.Second); whole > 0 {
-		seconds = whole
+// requestTiming 返回网页客户端头末尾的耗时与发送时间，elapsed 为毫秒，发送时间取 now 的整毫秒
+func requestTiming(elapsed float64, now time.Time) []any {
+	return []any{pageDuration(elapsed), pageDuration(float64(now.UnixMilli()))}
+}
+
+// pageDuration 按官网页面脚本把毫秒数拆为 [秒,纳秒]，值为 0 的项写 null，末尾的 null 省略
+func pageDuration(milliseconds float64) []any {
+	seconds := math.Trunc(milliseconds / 1000)
+	value := []any{int64(seconds), int64(math.Trunc((milliseconds - seconds*1000) * 1e6))}
+	for index, item := range value {
+		if item == int64(0) {
+			value[index] = nil
+		}
 	}
-	return []any{
-		[]any{seconds, int64(elapsed % time.Second)},
-		[]any{now.Unix(), int64(now.Nanosecond()) / int64(time.Millisecond) * int64(time.Millisecond)},
+	for len(value) > 0 && value[len(value)-1] == nil {
+		value = value[:len(value)-1]
 	}
+	return value
 }
 
 func arrayAt(values []any, index int) ([]any, bool) {

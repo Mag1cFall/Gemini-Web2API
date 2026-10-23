@@ -60,7 +60,7 @@ interface NavItem {
 const navClass =
   'relative flex h-control items-center gap-3 rounded-sm pr-2 pl-[42px] text-base text-foreground hover:bg-nav-active active:bg-nav-pressed aria-[current=page]:bg-nav-active aria-[current=page]:before:absolute aria-[current=page]:before:top-1/2 aria-[current=page]:before:left-0 aria-[current=page]:before:h-4 aria-[current=page]:before:w-1 aria-[current=page]:before:-translate-y-1/2 aria-[current=page]:before:rounded-full aria-[current=page]:before:bg-primary'
 
-// NavRow 渲染一个导航项
+// NavRow 渲染一个导航项，文字截断时悬停显示全文
 function NavRow({ item, className = navClass }: { item: NavItem; className?: string }) {
   return (
     <NavLink to={item.to} end={item.end ?? false} className={className}>
@@ -70,7 +70,9 @@ function NavRow({ item, className = navClass }: { item: NavItem; className?: str
           <span className={'size-2 rounded-full ' + item.dot} />
         </span>
       )}
-      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      <span className="min-w-0 flex-1 truncate" title={item.label}>
+        {item.label}
+      </span>
       {item.badge && (
         <span className="shrink-0 rounded-sm bg-info-soft px-[6px] text-xs leading-[20px] text-primary">
           {item.badge}
@@ -228,7 +230,7 @@ export function Layout() {
       items: [
         ...(accounts.data?.accounts ?? []).map((account) => ({
           to: '/accounts/' + encodeURIComponent(account.account_id),
-          label: account.account_id,
+          label: account.email ?? account.account_id,
           dot: accountTone(account.state),
           ...(account.tier ? { badge: account.tier } : {}),
         })),

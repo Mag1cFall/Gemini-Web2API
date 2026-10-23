@@ -22,6 +22,8 @@ type StreamingState struct {
 	ConversationID   string
 	// WebSearchRequests 为 message_delta usage.server_tool_use 的搜索次数
 	WebSearchRequests int
+	// StopSequence 为 message_delta 中命中的停止序列
+	StopSequence *string
 }
 
 // NewStreamingState 创建 Claude SSE 状态
@@ -149,6 +151,12 @@ func (p *StreamProcessor) FinishThinking(signature string) error {
 	return p.closeBlock()
 }
 
+// FinishStopSequence 以命中的停止序列完成 Claude SSE 消息
+func (p *StreamProcessor) FinishStopSequence(sequence string) error {
+	p.state.StopSequence = &sequence
+	return p.Finish("stop_sequence")
+}
+
 // Finish 完成 Claude SSE 消息
 func (p *StreamProcessor) Finish(stopReason string) error {
 	if p.state.MessageStopSent {
@@ -163,7 +171,7 @@ func (p *StreamProcessor) Finish(stopReason string) error {
 
 	messageDelta := map[string]interface{}{
 		"type":  "message_delta",
-		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
+		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": p.state.StopSequence},
 	}
 	if p.state.ConversationID != "" {
 		messageDelta["conversation_id"] = p.state.ConversationID

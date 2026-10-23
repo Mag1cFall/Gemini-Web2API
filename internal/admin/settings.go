@@ -52,6 +52,8 @@ type ServiceConfig struct {
 	InitTimeout      string   `json:"init_timeout"`
 	LogLevel         string   `json:"log_level"`
 	RequestBodyLog   bool     `json:"request_body_log"`
+	LogFile          bool     `json:"log_file"`
+	LogMaxTotalMB    int      `json:"log_max_total_mb"`
 	Concurrency      int      `json:"per_account_concurrency"`
 	RoutingStrategy  string   `json:"routing_strategy"`
 	AdminAuthEnabled bool     `json:"admin_auth_enabled"`
@@ -76,6 +78,8 @@ type ConfigUpdate struct {
 	InitTimeout      *string `json:"init_timeout"`
 	LogLevel         *string `json:"log_level"`
 	RequestBodyLog   *bool   `json:"request_body_log"`
+	LogFile          *bool   `json:"log_file"`
+	LogMaxTotalMB    *int    `json:"log_max_total_mb"`
 	Concurrency      *int    `json:"per_account_concurrency"`
 	RoutingStrategy  *string `json:"routing_strategy"`
 	AdminAuthEnabled *bool   `json:"admin_auth_enabled"`
@@ -95,7 +99,7 @@ func (s *Settings) View() ServiceConfig {
 		ProxyAPIKey: cfg.ProxyAPIKey, Proxy: cfg.ProxyURL, SaveHistory: cfg.SaveHistory,
 		ModelMapping: config.FormatModelMapping(cfg.ModelMapping), AccountCooldown: shortDuration(cfg.AccountCooldown),
 		SessionTTL: shortDuration(cfg.SessionTTL), InitTimeout: shortDuration(cfg.InitTimeout), LogLevel: cfg.LogLevel,
-		RequestBodyLog: cfg.RequestBodyLog, Concurrency: cfg.PerAccountConcurrency, RoutingStrategy: cfg.RoutingStrategy,
+		RequestBodyLog: cfg.RequestBodyLog, LogFile: cfg.LogFile, LogMaxTotalMB: cfg.LogMaxTotalMB, Concurrency: cfg.PerAccountConcurrency, RoutingStrategy: cfg.RoutingStrategy,
 		AdminAuthEnabled: cfg.AdminAuthEnabled, AdminUsername: cfg.AdminUsername,
 		AdminPasswordSet: cfg.AdminPassword != "", ListenAddr: cfg.ListenAddress,
 		AuthStates: strings.Join(cfg.AuthStatePaths, ","), LogFormat: cfg.LogFormat,
@@ -181,6 +185,14 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		env["LOG_LEVEL"] = level
 	}
 	setBool(update.RequestBodyLog, "REQUEST_BODY_LOG", &next.RequestBodyLog)
+	setBool(update.LogFile, "LOG_FILE", &next.LogFile)
+	if update.LogMaxTotalMB != nil {
+		if *update.LogMaxTotalMB < config.MinLogTotalMB {
+			problems = append(problems, fmt.Errorf("LOG_MAX_TOTAL_MB 不能小于 %d", config.MinLogTotalMB))
+		}
+		next.LogMaxTotalMB = *update.LogMaxTotalMB
+		env["LOG_MAX_TOTAL_MB"] = strconv.Itoa(*update.LogMaxTotalMB)
+	}
 	if update.Concurrency != nil {
 		if *update.Concurrency < 1 {
 			problems = append(problems, errors.New("PER_ACCOUNT_CONCURRENCY 必须是正整数"))

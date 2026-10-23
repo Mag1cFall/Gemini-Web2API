@@ -32,6 +32,9 @@ type Deps struct {
 	ListenAddr string
 	Desktop    bool
 	DataDir    string
+	Updates    UpdateService
+	// Stopping 在服务开始停机时关闭，已打开的事件流随之结束
+	Stopping <-chan struct{}
 }
 
 type handler struct {
@@ -53,7 +56,7 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.POST("/auth/logout", h.logout)
 	api.GET("/status", func(c *gin.Context) { c.JSON(http.StatusOK, h.status()) })
 	api.GET("/events", h.events)
-	api.GET("/accounts", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"accounts": h.Pool.Status().Accounts}) })
+	api.GET("/accounts", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"accounts": h.accountViews()}) })
 	api.PUT("/accounts/:id", h.updateAccount)
 	api.DELETE("/accounts/:id", h.deleteAccount)
 	api.POST("/accounts/:id/verify", h.verifyAccount)
@@ -67,6 +70,7 @@ func Mount(router *gin.Engine, deps Deps) {
 	})
 	api.GET("/models", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"models": h.models()}) })
 	api.GET("/cooldowns", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"cooldowns": h.cooldowns()}) })
+	api.DELETE("/accounts/:id/cooldowns/:scope", h.clearCooldown)
 	api.GET("/requests", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"requests": logging.ActiveRequests(), "recent": logging.RecentRequests()})
 	})
@@ -86,6 +90,8 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.POST("/proxies/check", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"proxies": h.Accounts.CheckProxies(c.Request.Context())})
 	})
+	api.GET("/update", h.updateStatus)
+	api.POST("/update", h.applyUpdate)
 }
 
 // NotFound 以管理端错误体返回未知的 /api 路径
@@ -221,6 +227,20 @@ func (h *handler) cooldowns() []cooldown {
 	return result
 }
 
+// clearCooldown 清除账号的一项冷却，scope 为模型 ID，* 表示账号级冷却
+func (h *handler) clearCooldown(c *gin.Context) {
+	accountID, model := c.Param("id"), c.Param("scope")
+	if model == "*" {
+		model = ""
+	}
+	if err := h.Pool.ClearCooldown(accountID, model); err != nil {
+		writeError(c, http.StatusNotFound, "account_not_found", err.Error())
+		return
+	}
+	logging.Info(accountID, "冷却已手动清除", "范围", c.Param("scope"))
+	c.Status(http.StatusNoContent)
+}
+
 func (h *handler) cancelRequest(c *gin.Context) {
 	if !logging.CancelRequest(c.Param("id")) {
 		writeError(c, http.StatusNotFound, "request_not_found", "请求不存在或已结束")
@@ -232,7 +252,7 @@ func (h *handler) cancelRequest(c *gin.Context) {
 // eventPing 是事件流空闲时的保活间隔
 const eventPing = 15 * time.Second
 
-// events 以 SSE 先回放历史日志再推送状态快照，之后推送快照的变化与新日志
+// events 以 SSE 先用一条 logs 事件回放历史日志再推送状态快照，之后推送快照的变化与逐条的新日志
 func (h *handler) events(c *gin.Context) {
 	history, logs, cancel := logging.Subscribe(2000)
 	defer cancel()
@@ -262,7 +282,7 @@ func (h *handler) events(c *gin.Context) {
 			kind string
 			data any
 		}{
-			{"status", h.status()}, {"accounts", h.Pool.Status().Accounts}, {"models", h.models()},
+			{"status", h.status()}, {"accounts", h.accountViews()}, {"models", h.models()},
 			{"cooldowns", h.cooldowns()}, {"requests", logging.ActiveRequests()}, {"recent", logging.RecentRequests()},
 		} {
 			encoded, _ := json.Marshal(item.data)
@@ -276,10 +296,8 @@ func (h *handler) events(c *gin.Context) {
 		}
 		return true
 	}
-	for _, event := range history {
-		if !send("log", event) {
-			return
-		}
+	if !send("logs", nonNil(history)) {
+		return
 	}
 	if !push() {
 		return
@@ -291,6 +309,8 @@ func (h *handler) events(c *gin.Context) {
 	for {
 		select {
 		case <-c.Request.Context().Done():
+			return
+		case <-h.Stopping:
 			return
 		case event, ok := <-logs:
 			if !ok || !send("log", event) {
@@ -342,9 +362,9 @@ func bindJSON(c *gin.Context, target any) bool {
 	return true
 }
 
-func nonNil(values []string) []string {
+func nonNil[T any](values []T) []T {
 	if values == nil {
-		return []string{}
+		return []T{}
 	}
 	return values
 }

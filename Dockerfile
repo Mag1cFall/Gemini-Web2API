@@ -15,7 +15,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/internal/webui/dist internal/webui/dist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o /out/gemini-web2api ./cmd/gemini-web2api
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags nomsgpack -trimpath -ldflags="-s -w -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o /out/gemini-web2api ./cmd/gemini-web2api
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \

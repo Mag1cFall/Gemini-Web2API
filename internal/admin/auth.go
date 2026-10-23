@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -24,10 +25,17 @@ const sessionLifetime = 12 * time.Hour
 // loginLimit 是同一来源一分钟内允许的登录失败次数
 const loginLimit = 5
 
+// adminSession 是一个登录会话，ctx 在退出登录、会话撤销或到期时结束
+type adminSession struct {
+	expires time.Time
+	ctx     context.Context
+	cancel  context.CancelFunc
+}
+
 // sessionStore 保存已登录的管理端会话
 type sessionStore struct {
 	mu     sync.Mutex
-	tokens map[string]time.Time
+	tokens map[string]*adminSession
 }
 
 func (store *sessionStore) create() string {
@@ -37,33 +45,46 @@ func (store *sessionStore) create() string {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.tokens == nil {
-		store.tokens = make(map[string]time.Time)
+		store.tokens = make(map[string]*adminSession)
 	}
 	now := time.Now()
-	for key, expires := range store.tokens {
-		if now.After(expires) {
+	for key, session := range store.tokens {
+		if now.After(session.expires) {
+			session.cancel()
 			delete(store.tokens, key)
 		}
 	}
-	store.tokens[token] = now.Add(sessionLifetime)
+	expires := now.Add(sessionLifetime)
+	ctx, cancel := context.WithDeadline(context.Background(), expires)
+	store.tokens[token] = &adminSession{expires: expires, ctx: ctx, cancel: cancel}
 	return token
 }
 
-func (store *sessionStore) valid(token string) bool {
+// lookup 返回未到期的会话
+func (store *sessionStore) lookup(token string) *adminSession {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	expires, ok := store.tokens[token]
-	return ok && time.Now().Before(expires)
+	session := store.tokens[token]
+	if session == nil || !time.Now().Before(session.expires) {
+		return nil
+	}
+	return session
 }
 
 func (store *sessionStore) remove(token string) {
 	store.mu.Lock()
-	delete(store.tokens, token)
+	if session := store.tokens[token]; session != nil {
+		session.cancel()
+		delete(store.tokens, token)
+	}
 	store.mu.Unlock()
 }
 
 func (store *sessionStore) clear() {
 	store.mu.Lock()
+	for _, session := range store.tokens {
+		session.cancel()
+	}
 	store.tokens = nil
 	store.mu.Unlock()
 }
@@ -135,16 +156,34 @@ func (h *handler) guard(c *gin.Context) {
 		c.Next()
 		return
 	}
-	if strings.HasPrefix(c.Request.URL.Path, "/api/auth/") || h.authenticated(c) {
+	if strings.HasPrefix(c.Request.URL.Path, "/api/auth/") {
 		c.Next()
 		return
 	}
-	writeError(c, http.StatusUnauthorized, "admin_login_required", "需要登录管理端")
+	session := h.loginSession(c)
+	if session == nil {
+		writeError(c, http.StatusUnauthorized, "admin_login_required", "需要登录管理端")
+		return
+	}
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	stop := context.AfterFunc(session.ctx, cancel)
+	defer stop()
+	defer cancel()
+	c.Request = c.Request.WithContext(ctx)
+	c.Next()
+}
+
+// loginSession 返回请求 Cookie 对应的有效会话
+func (h *handler) loginSession(c *gin.Context) *adminSession {
+	token, err := c.Cookie(sessionCookie)
+	if err != nil {
+		return nil
+	}
+	return h.sessions.lookup(token)
 }
 
 func (h *handler) authenticated(c *gin.Context) bool {
-	token, err := c.Cookie(sessionCookie)
-	return err == nil && h.sessions.valid(token)
+	return h.loginSession(c) != nil
 }
 
 func (h *handler) session(c *gin.Context) {

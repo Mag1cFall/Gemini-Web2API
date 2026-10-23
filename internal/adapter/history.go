@@ -132,6 +132,49 @@ func claudeHistoryTurns(messages []claude.Message) []historyTurn {
 	return turns
 }
 
+// geminiHistoryTurns 把 Gemini contents 转为历史会话键的消息序列：思考与签名跳过，函数调用取名称与规范化参数，其余非文字部件取 JSON；连续的 model 内容直接拼接为一轮，与 google-genai SDK chats 把流式回答的每个分块记为一个内容一致
+func geminiHistoryTurns(contents []GeminiContent) []historyTurn {
+	turns := make([]historyTurn, 0, len(contents))
+	for _, content := range contents {
+		role := transcriptRole(content.Role)
+		if role != "assistant" || len(turns) == 0 || turns[len(turns)-1].Role != "assistant" {
+			turns = append(turns, historyTurn{Role: role})
+		}
+		turn := &turns[len(turns)-1]
+		for _, part := range content.Parts {
+			if part.Thought {
+				continue
+			}
+			turn.Text += part.Text
+			if part.FunctionCall != nil {
+				arguments, _ := json.Marshal(part.FunctionCall.Args)
+				turn.Calls = append(turn.Calls, historyCall{Name: part.FunctionCall.Name, Arguments: canonicalJSON(arguments)})
+			}
+			rest := part
+			rest.Text, rest.ThoughtSignature, rest.FunctionCall = "", "", nil
+			if encoded, _ := json.Marshal(rest); string(encoded) != "{}" {
+				turn.Text += string(encoded)
+			}
+		}
+	}
+	for index := range turns {
+		turns[index].Text = strings.TrimSpace(turns[index].Text)
+	}
+	return turns
+}
+
+// geminiSystemText 返回 systemInstruction 的文字
+func geminiSystemText(instruction *GeminiContent) string {
+	if instruction == nil {
+		return ""
+	}
+	var text strings.Builder
+	for _, part := range instruction.Parts {
+		text.WriteString(part.Text)
+	}
+	return text.String()
+}
+
 // appendHistoryTurn 追加一条消息，连续的 assistant 消息合并为一轮，与 Responses 把思考、正文与每个函数调用拆成多项的回传一致
 func appendHistoryTurn(turns []historyTurn, turn historyTurn) []historyTurn {
 	if len(turns) == 0 || turn.Role != "assistant" || turns[len(turns)-1].Role != "assistant" {

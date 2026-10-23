@@ -50,7 +50,7 @@ func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
 }
 
 func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, error) {
-	started := time.Now()
+	version := c.cookieVersion.Load()
 	bootstrap, err := c.bootstrapSnapshot()
 	if err != nil {
 		return UsageInfo{}, err
@@ -63,17 +63,9 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	if err != nil {
 		return UsageInfo{}, err
 	}
-	query := req.URL.Query()
-	query.Set("rpcids", usageRPC)
-	query.Set("source-path", c.pathPrefix+"/usage")
-	query.Set("bl", bootstrap.BL)
-	query.Set("f.sid", bootstrap.FSID)
-	query.Set("hl", bootstrap.Language)
-	query.Set("_reqid", fmt.Sprintf("%d", c.nextReqID()))
-	query.Set("rt", "c")
-	req.URL.RawQuery = query.Encode()
+	req.URL.RawQuery = c.batchQuery(bootstrap, usageRPC, "/usage", bootstrap.Language)
 	c.applyXHRHeaders(req)
-	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), c.clientID, bootstrap.BL, 0, 0, requestTiming(time.Since(started), time.Now())))
+	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), c.clientID, bootstrap.BL, 0, 0, c.pageTiming()))
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 
 	resp, err := c.httpClient.Do(req)
@@ -87,8 +79,8 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	if resp.StatusCode != http.StatusOK {
 		protocolErr := responseStatusError(resp, "usage")
 		resp.Body.Close()
-		if allowRefresh && isAuthenticationError(protocolErr) && c.refresh != nil {
-			if err := c.refreshCookies(ctx); err != nil {
+		if allowRefresh && renewable(protocolErr) && c.refresh != nil {
+			if err := c.refreshCookies(ctx, version); err != nil {
 				return UsageInfo{}, err
 			}
 			if err := c.init(ctx, false); err != nil {
@@ -105,7 +97,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	}
 	if bytes.Contains(body, []byte("accounts.google.com")) {
 		if allowRefresh && c.refresh != nil {
-			if err := c.refreshCookies(ctx); err != nil {
+			if err := c.refreshCookies(ctx, version); err != nil {
 				return UsageInfo{}, err
 			}
 			if err := c.init(ctx, false); err != nil {
@@ -117,7 +109,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	}
 	usage, err := decodeUsageResponse(bytes.NewReader(body))
 	if allowRefresh && errors.Is(err, errUsageNotSignedIn) && c.refresh != nil {
-		if err := c.refreshCookies(ctx); err != nil {
+		if err := c.refreshCookies(ctx, version); err != nil {
 			return UsageInfo{}, err
 		}
 		if err := c.init(ctx, false); err != nil {

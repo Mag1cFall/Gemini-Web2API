@@ -60,6 +60,10 @@ func openAIUpstreamCode(err error) string {
 	if isAccountContextError(err) {
 		return "context_length_exceeded"
 	}
+	var mismatch *outputMismatchError
+	if errors.As(err, &mismatch) && mismatch.validation {
+		return "output_validation_error"
+	}
 	switch upstreamStatus(err) {
 	case http.StatusNotFound:
 		return "model_not_found"
@@ -95,6 +99,8 @@ func claudeErrorType(status int) string {
 		return "rate_limit_error"
 	case http.StatusServiceUnavailable, 529:
 		return "overloaded_error"
+	case http.StatusGatewayTimeout:
+		return "timeout_error"
 	case logging.StatusClientClosed:
 		return "api_error"
 	default:
@@ -238,12 +244,25 @@ func replaceWord(text string, word string, replacement string) string {
 	}
 }
 
-// publicError 返回去掉上游 URL、查询串与账号 ID 的错误
+// serverErrorPrefix 返回 5xx 错误文字开头的官方 API 英文说明，其他状态返回空串
+func serverErrorPrefix(status int) string {
+	switch {
+	case status == http.StatusServiceUnavailable:
+		return "Service unavailable: "
+	case status == http.StatusGatewayTimeout:
+		return "Request timed out: "
+	case status >= 500:
+		return "Internal server error: "
+	}
+	return ""
+}
+
+// publicError 返回去掉上游 URL、查询串与账号 ID 的错误，5xx 错误以官方 API 的英文说明开头
 func publicError(c *gin.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(publicMessage(c, err.Error()))
+	return errors.New(serverErrorPrefix(upstreamStatus(err)) + publicMessage(c, err.Error()))
 }
 
 // streamFailure 记录流式响应头发出后的失败并返回去掉内部标识的错误

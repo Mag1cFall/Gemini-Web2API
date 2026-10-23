@@ -11,6 +11,8 @@ export interface ServiceConfig {
   routing_strategy: 'round-robin' | 'fill-first'
   log_level: 'debug' | 'info' | 'warn' | 'error'
   request_body_log: boolean
+  log_file: boolean
+  log_max_total_mb: number
   admin_auth_enabled: boolean
   admin_username: string
   admin_password_set: boolean
@@ -35,6 +37,8 @@ export type ConfigPatch = Partial<{
   routing_strategy: ServiceConfig['routing_strategy']
   log_level: ServiceConfig['log_level']
   request_body_log: boolean
+  log_file: boolean
+  log_max_total_mb: number
   admin_auth_enabled: boolean
   admin_username: string
   admin_password: string

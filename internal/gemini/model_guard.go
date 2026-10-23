@@ -66,7 +66,7 @@ func modelMismatchError(expected Model, actual EventMetadataData) *ProtocolError
 	if actualName == "" {
 		actualName = actual.ModelHash
 	}
-	return &ProtocolError{
+	err := &ProtocolError{
 		HTTPStatus: 502,
 		Code:       502,
 		Message: fmt.Sprintf(
@@ -76,4 +76,9 @@ func modelMismatchError(expected Model, actual EventMetadataData) *ProtocolError
 		Retryable: true,
 		Cause:     ErrModelMismatch,
 	}
+	if actual.LimitNotice != "" {
+		err.HTTPStatus, err.Code = 429, 429
+		err.Message += ": " + actual.LimitNotice
+	}
+	return err
 }

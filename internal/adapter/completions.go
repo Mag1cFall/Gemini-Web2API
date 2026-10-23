@@ -145,13 +145,13 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 		prompts = repeatEach(prompts, n)
-		knownModel, readyModel := modelStatus(pool, request.Model)
-		if !knownModel {
-			writeOpenAIError(c, http.StatusNotFound, "model_not_found", modelNotFoundMessage(pool, request.Model))
+		if err := awaitModel(c, pool, request.Model); err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
-		if !readyModel {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+		sequences, err := stopSequences(request.Stop)
+		if err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		setUnsupportedParameters(c, unsupportedCompletionParameters(request))
@@ -168,7 +168,7 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			if err != nil {
 				return generationResult{}, err
 			}
-			result, accountID, err := runGeneration(c.Request.Context(), pool, "", true, request.Model, fmt.Sprintf("%s-%d", id, index), generationMedia{}, gemini.ThinkingLow, ToolBridge{},
+			result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionCreate, request.Model, fmt.Sprintf("%s-%d", id, index), generationMedia{}, gemini.ThinkingLow, ToolBridge{Stop: sequences},
 				func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 					return transcript, nil, nil
 				}, onEvent, hasVisibleOutput)
@@ -208,7 +208,8 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		setSSEHeaders(c)
-		defer startKeepalive(c, openAIKeepalive)()
+		stream, stop := holdStream(c, openAIKeepalive)
+		defer stop()
 		for index := range prompts {
 			if request.Echo && prompts[index] != "" {
 				if err := writeSSEJSON(c.Writer, chunk([]gin.H{completionChoice(index, prompts[index], nil)})); err != nil {
@@ -217,6 +218,7 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			}
 			projection := newStreamProjection(ToolBridge{}, false)
 			result, err := generate(index, func(event gemini.Event) error {
+				stream.release()
 				return projection.project(event, func(event gemini.Event) error {
 					return writeSSEJSON(c.Writer, chunk([]gin.H{completionChoice(index, event.Delta, nil)}))
 				}, func(err error) error {
@@ -224,7 +226,9 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				})
 			}, projection.hasVisibleOutput)
 			if err != nil {
-				if !projection.errorSent {
+				if stream.reject() {
+					writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
+				} else if !projection.errorSent {
 					_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
 				}
 				return

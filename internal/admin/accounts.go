@@ -8,14 +8,34 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// accountView 是管理端返回的账号状态与首页读取的登录邮箱
+type accountView struct {
+	balancer.AccountStatus
+	// Email 是首页 oPEP7c 给出的登录邮箱，账号尚未初始化时为空
+	Email string `json:"email,omitempty"`
+}
+
+// accountViews 返回全部账号的管理端状态
+func (h *handler) accountViews() []accountView {
+	accounts := h.Pool.Status().Accounts
+	views := make([]accountView, len(accounts))
+	for index, account := range accounts {
+		views[index].AccountStatus = account
+		if client := h.Pool.Client(account.AccountID); client != nil {
+			views[index].Email = client.Email()
+		}
+	}
+	return views
+}
+
 // account 返回单个账号的状态
-func (h *handler) account(id string) (balancer.AccountStatus, bool) {
-	for _, account := range h.Pool.Status().Accounts {
+func (h *handler) account(id string) (accountView, bool) {
+	for _, account := range h.accountViews() {
 		if account.AccountID == id {
 			return account, true
 		}
 	}
-	return balancer.AccountStatus{}, false
+	return accountView{}, false
 }
 
 // respondAccount 返回账号最新状态，操作失败时返回 400 与原因
@@ -142,13 +162,13 @@ func (h *handler) importCookie(c *gin.Context) {
 	h.respondAccount(c, id, nil)
 }
 
-func (h *handler) accountsByID(ids []string) []balancer.AccountStatus {
+func (h *handler) accountsByID(ids []string) []accountView {
 	wanted := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		wanted[id] = true
 	}
-	result := []balancer.AccountStatus{}
-	for _, account := range h.Pool.Status().Accounts {
+	result := []accountView{}
+	for _, account := range h.accountViews() {
 		if wanted[account.AccountID] {
 			result = append(result, account)
 		}

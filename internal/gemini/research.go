@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 
 // turnPollInterval 是读取会话中后台生成回答的轮询间隔
 var turnPollInterval = 30 * time.Second
+
+// turnMissingPolls 是会话中连续读不到本轮回答时放弃等待的轮询次数
+const turnMissingPolls = 4
 
 // deepResearch 按官网流程发送研究计划轮，以计划卡片的确认按钮文字发送确认轮，再轮询会话直到报告完成；计划、确认回复与研究进度作为思考输出，完成后的回答与报告作为正文输出；计划轮没有计划卡片时该轮回答即为结果
 func (c *Client) deepResearch(ctx context.Context, request GenerateRequest, model Model, emit func(Event) error) error {
@@ -46,7 +50,7 @@ func (c *Client) deepResearch(ctx context.Context, request GenerateRequest, mode
 	if err := c.stream(ctx, confirm, thoughts.turn, true); err != nil {
 		return err
 	}
-	return c.awaitTurn(ctx, request.Conversation, model, model.thinkingLevel(request.ThinkingLevel), thoughts.progress, nil, emit)
+	return c.awaitTurn(ctx, request.Conversation, nil, model, model.thinkingLevel(request.ThinkingLevel), thoughts.progress, nil, emit)
 }
 
 // researchThoughts 把 Deep Research 计划轮与确认轮的正文、研究进度转成思考增量
@@ -106,12 +110,13 @@ func (r *researchThoughts) progress(candidate []any) error {
 	return nil
 }
 
-// awaitTurn 在调用方持有账号请求槽时调用，轮询期间让出请求槽，以 hNvQHb 轮询会话中本轮回答，完成后重新占用请求槽并按生成流解析该回答；progress 接收进行中的候选，researchConfirm 非空时写入该回答计划卡片的确认按钮文字
-func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model Model, level ThinkingLevel, progress func([]any) error, researchConfirm *string, emit func(Event) error) error {
+// awaitTurn 在调用方持有账号请求槽时调用，轮询期间让出请求槽，以 hNvQHb 轮询会话中本轮回答，完成后重新占用请求槽并按生成流解析该回答，连续 turnMissingPolls 次读不到本轮回答时返回可重试错误；decoder 为已输出部分回答的生成流解码器，为 nil 时从头输出；progress 接收进行中的候选，researchConfirm 非空时写入该回答计划卡片的确认按钮文字
+func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decoder *FrameDecoder, model Model, level ThinkingLevel, progress func([]any) error, researchConfirm *string, emit func(Event) error) error {
 	trace := logging.FromContext(ctx)
 	trace.Background(model.ID)
 	c.requestSlot.Release(1)
 	c.busy.Add(-1)
+	c.notifyRelease()
 	defer func() {
 		c.busy.Add(1)
 		c.requestSlot.Acquire(context.Background(), 1)
@@ -124,6 +129,7 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model 
 	ticker := time.NewTicker(turnPollInterval)
 	defer ticker.Stop()
 	started := time.Now()
+	missing := 0
 	for polls := 1; ; polls++ {
 		select {
 		case <-ctx.Done():
@@ -146,6 +152,13 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model 
 			return err
 		}
 		turns, _ := arrayAt(payload, 0)
+		if !slices.ContainsFunc(turns, func(turn any) bool { rid, _ := stringPath(turn, 0, 1); return rid == session.RID }) {
+			if missing++; missing >= turnMissingPolls {
+				return retryableProtocolError("gemini conversation has no turn for this request", nil)
+			}
+			continue
+		}
+		missing = 0
 		for _, turn := range turns {
 			if rid, _ := stringPath(turn, 0, 1); rid != session.RID {
 				continue
@@ -166,7 +179,10 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, model 
 			frame[1] = []any{session.CID, session.RID}
 			frame[4] = []any{values}
 			frame[39] = hash
-			decoder := NewFrameDecoder()
+			if decoder == nil {
+				decoder = NewFrameDecoder()
+				decoder.lastSession = state.Snapshot()
+			}
 			err := decoder.decodeTurn(frame, state, emit)
 			if researchConfirm != nil {
 				*researchConfirm = decoder.researchConfirm

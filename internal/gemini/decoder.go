@@ -3,6 +3,7 @@ package gemini
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -10,30 +11,41 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 const maxProtocolFrameSize = 64 * 1024 * 1024
 
+// errStreamEnded 表示生成流在结束帧前被服务端关闭
+var errStreamEnded = errors.New("gemini protocol stream ended without terminal frame")
+
+// ErrConversationLost 表示续接的网页会话在上游已不存在：上游在新会话中作答或返回 1097
+var ErrConversationLost = errors.New("Gemini Web 网页会话已失效")
+
 // FrameDecoder 将 Google 累计帧转换为唯一规范事件流
 type FrameDecoder struct {
-	texts         map[int]string
-	emittedText   map[int]string
-	thoughts      map[int]string
-	codes         map[codeEventKey]codeSnapshot
-	citations     map[int][]Citation
-	phases        map[int]Phase
-	imageProgress Phase
-	media         map[string]struct{}
-	lastSession   ConversationSnapshot
-	metadata      EventMetadataData
-	sawComplete   bool
-	sawError      bool
-	sawEnd        bool
-	// background 表示生成流以后台生成记录结束，成品由 hNvQHb 读取
+	texts       map[int]string
+	emittedText map[int]string
+	thoughts    map[int]string
+	codes       map[codeEventKey]codeSnapshot
+	citations   map[int][]Citation
+	// markerCitations 是各候选正文中引用标记指向的网页来源
+	markerCitations map[int][]Citation
+	phases          map[int]Phase
+	imageProgress   Phase
+	media           map[string]struct{}
+	lastSession     ConversationSnapshot
+	metadata        EventMetadataData
+	sawComplete     bool
+	sawError        bool
+	sawEnd          bool
+	// background 表示生成流以后台生成记录或运行中的 Task 状态结束，成品由 hNvQHb 读取
 	background bool
 	// awaitIncomplete 表示生成流没有完成的候选时按后台生成处理，用于 Deep Research 计划轮
 	awaitIncomplete bool
+	// continuedCID 是本轮续接的网页会话 ID，新会话为空
+	continuedCID string
 	// researchConfirm 为 Deep Research 计划卡片上确认按钮的文字
 	researchConfirm string
 	// heartbeat 在收到上游等待心跳帧 [{"37":[n]}] 时调用
@@ -62,14 +74,20 @@ func NewFrameDecoder() *FrameDecoder {
 	return decoder
 }
 
-// Decode 增量解析协议帧并原子更新会话状态
-func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit func(Event) error) error {
+// begin 为新一轮回答重置解码状态
+func (d *FrameDecoder) begin(state *ConversationState) {
 	d.reset()
+	d.lastSession = state.Snapshot()
+	d.continuedCID = d.lastSession.CID
+}
+
+// Decode 增量解析 StreamGenerate 协议帧并原子更新会话状态
+func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit func(Event) error) error {
 	activeState := state
 	if activeState == nil {
 		activeState = NewConversationState()
 	}
-	d.lastSession = activeState.Snapshot()
+	d.begin(activeState)
 
 	var protocolErr *ProtocolError
 	err := scanProtocolRecords(reader, func(record []any) error {
@@ -78,6 +96,9 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 		case "wrb.fr":
 			if code, ok := bardErrorCode(record); ok {
 				protocolErr = bardProtocolError(code)
+				if code == 1097 && d.continuedCID != "" {
+					protocolErr = conversationLostError(fmt.Sprintf("续接的网页会话 %s 已在 Gemini Web 中失效 (1097)", d.continuedCID))
+				}
 				d.sawError = true
 				return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
 			}
@@ -122,7 +143,7 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 		return protocolErr
 	}
 	if !d.sawEnd {
-		return retryableProtocolError("gemini protocol stream ended without terminal frame", nil)
+		return retryableProtocolError(errStreamEnded.Error(), errStreamEnded)
 	}
 	return nil
 }
@@ -140,10 +161,8 @@ func isHeartbeat(payload []any) bool {
 	return ok && len(fields) == 1
 }
 
-// decodeTurn 解析 hNvQHb 读取到的已完成回答
+// decodeTurn 解析 hNvQHb 读取到的已完成回答，只输出解码器此前未输出的正文
 func (d *FrameDecoder) decodeTurn(payload []any, state *ConversationState, emit func(Event) error) error {
-	d.reset()
-	d.lastSession = state.Snapshot()
 	if err := d.decodePayload(payload, state, emit); err != nil {
 		return err
 	}
@@ -196,6 +215,10 @@ func bardProtocolError(code int) *ProtocolError {
 	case 1060:
 		err.HTTPStatus = 403
 		err.Message = "Google 暂时限制了当前出口 IP (1060)"
+	case 1100:
+		err.HTTPStatus = 400
+		err.Retryable = false
+		err.Message = "Gemini Web 无法读取请求中的附件，例如附件为 0 字节 (1100)"
 	default:
 		err.Message = fmt.Sprintf("Gemini Web 返回错误码 %d", code)
 	}
@@ -208,6 +231,7 @@ func (d *FrameDecoder) reset() {
 	d.thoughts = make(map[int]string)
 	d.codes = make(map[codeEventKey]codeSnapshot)
 	d.citations = make(map[int][]Citation)
+	d.markerCitations = make(map[int][]Citation)
 	d.phases = make(map[int]Phase)
 	d.imageProgress = PhaseUnknown
 	d.media = make(map[string]struct{})
@@ -219,8 +243,16 @@ func (d *FrameDecoder) reset() {
 	d.background = false
 }
 
+// conversationLostError 返回续接的网页会话已失效的 409 错误
+func conversationLostError(message string) *ProtocolError {
+	return &ProtocolError{HTTPStatus: 409, Message: message, Cause: ErrConversationLost}
+}
+
 func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, emit func(Event) error) error {
 	session := d.sessionFromPayload(payload, state.Snapshot())
+	if d.continuedCID != "" && session.CID != d.continuedCID {
+		return conversationLostError(fmt.Sprintf("续接的网页会话 %s 已在 Gemini Web 中失效，上游在新会话 %s 中作答", d.continuedCID, session.CID))
+	}
 	if session != d.lastSession {
 		state.Update(session)
 		d.lastSession = state.Snapshot()
@@ -297,14 +329,8 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 }
 
 func (d *FrameDecoder) decodeImageProgress(payload []any, emit func(Event) error) error {
-	if len(payload) <= 2 {
-		return nil
-	}
-	root, ok := payload[2].(map[string]any)
-	if !ok {
-		return nil
-	}
-	raw, ok := root["7"].([]any)
+	value, _ := jspbField(payload, 6)
+	raw, ok := value.([]any)
 	if !ok {
 		return nil
 	}
@@ -313,6 +339,9 @@ func (d *FrameDecoder) decodeImageProgress(payload []any, emit func(Event) error
 	status, _ := intPath(raw, 1, 2)
 	if tool == "video_generation" {
 		d.background = true
+	}
+	if task, ok := intPath(raw, 12, 4, 0); ok {
+		d.background = task == 4
 	}
 	if tool != "data_analysis_tool" || category != 20 && category != 23 {
 		return nil
@@ -342,33 +371,30 @@ func (d *FrameDecoder) sessionFromPayload(payload []any, current ConversationSna
 	if rid, ok := stringAt(values, 1); ok && rid != "" {
 		current.RID = rid
 	}
-	if len(payload) > 2 {
-		if sparse, ok := payload[2].(map[string]any); ok {
-			if token, ok := sparse["26"].(string); ok && token != "" {
-				current.Token = token
-			}
-		}
+	if token, ok := jspbString(payload, 25); ok && token != "" {
+		current.Token = token
 	}
 	return current
 }
 
 func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) error {
 	next := d.metadata
-	if len(payload) > 2 {
-		if values, ok := payload[2].(map[string]any); ok {
-			if title, ok := firstString(values["11"]); ok {
-				next.Title = title
-			}
-			if token, ok := firstString(values["21"]); ok {
-				next.ControlToken = token
-			}
-		}
+	if title, ok := jspbField(payload, 10); ok {
+		next.Title, _ = firstString(title)
+	}
+	if token, ok := jspbField(payload, 20); ok {
+		next.ControlToken, _ = firstString(token)
 	}
 	if modelHash, ok := jspbString(payload, 39); ok {
 		next.ModelHash = modelHash
 	}
 	if modelName, ok := jspbString(payload, 42); ok {
 		next.ModelName = modelName
+	}
+	if notice, ok := jspbField(payload, 52); ok {
+		title, _ := stringPath(notice, 0, 0)
+		detail, _ := stringPath(notice, 1, 0)
+		next.LimitNotice = strings.TrimSpace(title + " " + detail)
 	}
 	if next == d.metadata {
 		return nil
@@ -380,7 +406,8 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 
 func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit func(Event) error) error {
 	raw, _ := stringPath(candidate, 1, 0)
-	text, codes := parseStructuredContent(expandDocuments(candidate, stripFileCitations(candidate, stripChameleon(raw))))
+	text, codes, citations := visibleContent(candidate, raw)
+	d.markerCitations[candidateIndex] = citations
 	seen := make(map[codeEventKey]struct{}, len(codes))
 	for _, code := range codes {
 		key := codeEventKey{Candidate: candidateIndex, Index: code.Index, Type: code.Type}
@@ -417,6 +444,7 @@ func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit f
 		}
 	}
 	d.texts[candidateIndex] = text
+	text = text[:pendingLinkStart(text)]
 	if event, changed := diffSnapshot(EventText, candidateIndex, d.emittedText[candidateIndex], text); changed {
 		d.emittedText[candidateIndex] = text
 		if err := emit(event); err != nil {
@@ -424,6 +452,19 @@ func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit f
 		}
 	}
 	return nil
+}
+
+// visibleContent 把候选正文原文 raw 转为输出的正文与代码块，返回正文、代码块与引用标记指向的网页来源，代码块偏移为它在正文中的 rune 位置
+func visibleContent(candidate []any, raw string) (string, []codeSnapshot, []Citation) {
+	raw = stripFollowUps(expandImageResults(candidate, stripContentCards(candidate, raw)))
+	tables := citationTables(candidate)
+	text, codes := parseStructuredContent(markCitations(restoreAutolinks(expandDocuments(candidate, stripChameleon(raw))), tables))
+	for index, code := range codes {
+		prefix, _ := takeCitations(string([]rune(text)[:code.Offset]), tables)
+		codes[index].Offset = utf8.RuneCountInString(prefix)
+	}
+	text, citations := takeCitations(text, tables)
+	return text, codes, citations
 }
 
 func (d *FrameDecoder) flushText(candidateIndex int, emit func(Event) error) error {
@@ -438,6 +479,10 @@ func (d *FrameDecoder) flushText(candidateIndex int, emit func(Event) error) err
 func (d *FrameDecoder) decodeCitations(candidate []any, candidateIndex int, emit func(Event) error) error {
 	raw, _ := valuePath(candidate, 2, 1)
 	next := parseCitations(raw)
+	for _, citation := range d.markerCitations[candidateIndex] {
+		citation.ID = len(next) + 1
+		next = append(next, citation)
+	}
 	if reflect.DeepEqual(next, d.citations[candidateIndex]) {
 		return nil
 	}
@@ -493,17 +538,21 @@ func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, session 
 	return nil
 }
 
-// emitGeneratedFile 发布视频与音乐条目中的成品文件，下载地址为条目链接列表的第 2 项
+// emitGeneratedFile 发布视频与音乐条目中的成品文件，下载地址为条目链接列表的第 2 项，视频的第 1 项为缩略图
 func (d *FrameDecoder) emitGeneratedFile(candidate []any, candidateIndex int, mediaType MediaType, file any, placeholder string, emit func(Event) error) error {
 	mediaURL, _ := stringPath(file, 7, 1)
 	fileName, _ := stringPath(file, 2)
 	mimeType, _ := stringPath(file, 11)
 	width, _ := intPath(file, 17, 1)
 	height, _ := intPath(file, 17, 2)
-	return d.emitMedia(candidateIndex, &Media{
+	media := &Media{
 		Type: mediaType, URL: mediaURL, Title: fileName, FileName: fileName, MIMEType: mimeType,
 		Placeholder: placeholder, Width: width, Height: height, Offset: mediaPlaceholderOffset(candidate, placeholder),
-	}, emit)
+	}
+	if mediaType == MediaGeneratedVideo {
+		media.Thumbnail, _ = stringPath(file, 7, 0)
+	}
+	return d.emitMedia(candidateIndex, media, emit)
 }
 
 func (d *FrameDecoder) emitMedia(candidateIndex int, media *Media, emit func(Event) error) error {
@@ -651,6 +700,91 @@ func hasJSPBValue(value any) bool {
 	}
 }
 
+// stripContentCards 去掉正文中富内容第 28 项列出数据的卡片占位链接及其后的换行，官网在该位置显示天气等卡片
+func stripContentCards(candidate []any, raw string) string {
+	cards, _ := richContentField(candidate, 27)
+	first, _ := valuePath(cards, 0)
+	list, _ := first.([]any)
+	var pairs []string
+	for _, card := range list {
+		if placeholder, _ := stringPath(card, 0, 0); placeholder != "" {
+			pairs = append(pairs, placeholder+"\n", "", placeholder, "")
+		}
+	}
+	if len(pairs) == 0 {
+		return raw
+	}
+	return strings.NewReplacer(pairs...).Replace(raw)
+}
+
+// imageTagPattern 匹配正文中网页图片检索结果的图片标记
+var imageTagPattern = regexp.MustCompile(`<Image\s[^>]*/>`)
+
+// imageAttributePattern 匹配图片标记中的一个属性
+var imageAttributePattern = regexp.MustCompile(`(\w+)="([^"]*)"`)
+
+// expandImageResults 把正文中的图片轮播标记换成富内容第 2 项列出的网页图片，每张图片写为链接到来源页的 Markdown 图片
+func expandImageResults(candidate []any, raw string) string {
+	list, _ := richContentField(candidate, 1)
+	items, _ := list.([]any)
+	images := make(map[string][2]string)
+	for _, item := range items {
+		tag, _ := stringPath(item, 7, 0)
+		image, _ := stringPath(item, 0, 0, 0)
+		page, _ := stringPath(item, 1, 0, 0)
+		if id, ok := strings.CutPrefix(tag, "http://googleusercontent.com/"); ok && image != "" {
+			images[id] = [2]string{image, page}
+		}
+	}
+	if len(images) == 0 {
+		return raw
+	}
+	raw = strings.NewReplacer("<Carousel>\n", "", "</Carousel>\n", "", "<Carousel>", "", "</Carousel>", "").Replace(raw)
+	return imageTagPattern.ReplaceAllStringFunc(raw, func(tag string) string {
+		attributes := make(map[string]string)
+		for _, match := range imageAttributePattern.FindAllStringSubmatch(tag, -1) {
+			attributes[match[1]] = match[2]
+		}
+		image, ok := images[attributes["src"]]
+		if !ok {
+			return ""
+		}
+		caption := attributes["caption"]
+		if caption == "" {
+			caption = attributes["alt"]
+		}
+		return fmt.Sprintf("[![%s](%s)](%s)", caption, image[0], image[1])
+	})
+}
+
+// followUpPattern 匹配官网渲染为追问按钮的 FollowUp、Elicitation 标记与 ElicitationsGroup 标记组
+var followUpPattern = regexp.MustCompile(`(?s)<(?:FollowUp|Elicitation)\s[^>]*/>\n?|<ElicitationsGroup[\s>].*?</ElicitationsGroup>\n?`)
+
+// followUpStartPattern 匹配追问标记的开头
+var followUpStartPattern = regexp.MustCompile(`<(?:FollowUp|Elicitation)\s|<ElicitationsGroup[\s>]`)
+
+// followUpTags 是追问标记的开头，正文末尾是其前缀的片段可能是标记的开始
+var followUpTags = []string{"<FollowUp ", "<Elicitation ", "<ElicitationsGroup "}
+
+// stripFollowUps 去掉代码以外官网渲染为追问按钮的标记，尚未写完的标记从开头起截去，正文末尾可能是标记开始的片段一并去掉
+func stripFollowUps(raw string) string {
+	raw = outsideCode(raw, func(prose string) string { return followUpPattern.ReplaceAllString(prose, "") })
+	for _, span := range proseRanges(raw) {
+		prose := raw[span[0]:span[1]]
+		if location := followUpStartPattern.FindStringIndex(prose); location != nil {
+			return raw[:span[0]+location[0]]
+		}
+		if start := strings.LastIndexByte(prose, '<'); start >= 0 && span[1] == len(raw) {
+			for _, tag := range followUpTags {
+				if strings.HasPrefix(tag, prose[start:]) {
+					return raw[:span[0]+start]
+				}
+			}
+		}
+	}
+	return raw
+}
+
 // documentChipPattern 匹配正文中 Canvas 文档的占位链接
 var documentChipPattern = regexp.MustCompile(`http://googleusercontent\.com/immersive_entry_chip/\d+`)
 
@@ -675,19 +809,94 @@ func stripChameleon(raw string) string {
 	return strings.TrimLeft(raw[len(chameleonMarker)+end+len("\n```"):], " \r\n")
 }
 
-// stripFileCitations 去掉正文中富内容第 44 项列出的上传文件引用标记，官网把它们渲染为来源标签
-func stripFileCitations(candidate []any, raw string) string {
-	field, ok := richContentField(candidate, 43)
-	if !ok {
-		return raw
+// citationMarkerBase 是正文中引用标记占位符的起始码位，位于补充私用区
+const citationMarkerBase = 0xF0000
+
+// citationTable 是正文中的一个引用标记与它指向的网页来源
+type citationTable struct {
+	marker  string
+	sources []Citation
+}
+
+// citationTables 返回富内容与 Deep Research 文档第 44 项列出的引用标记，官网把它们渲染为来源标签；指向上传文件的来源没有网页地址，只去掉标记
+func citationTables(candidate []any) []citationTable {
+	var fields []any
+	if field, ok := richContentField(candidate, 43); ok {
+		fields = append(fields, field)
 	}
-	entries, _ := field.([]any)
-	for _, entry := range entries {
-		if marker, _ := stringPath(entry, 0, 0); strings.HasPrefix(marker, "[cite") {
-			raw = strings.ReplaceAll(raw, marker, "")
+	documents, _ := arrayAt(candidate, 30)
+	for _, document := range documents {
+		if rich, ok := valuePath(document, 5); ok {
+			if field, ok := jspbField(rich, 43); ok {
+				fields = append(fields, field)
+			}
 		}
 	}
-	return raw
+	var tables []citationTable
+	for _, field := range fields {
+		entries, _ := field.([]any)
+		for _, entry := range entries {
+			marker, _ := stringPath(entry, 0, 0)
+			if marker == "" {
+				continue
+			}
+			table := citationTable{marker: marker}
+			sourcesValue, _ := valuePath(entry, 1)
+			sources, _ := sourcesValue.([]any)
+			for _, source := range sources {
+				citationURL, _ := stringPath(source, 3, 0, 1)
+				if citationURL == "" {
+					continue
+				}
+				favicon, _ := stringPath(source, 3, 0, 0)
+				title, _ := stringPath(source, 3, 0, 2)
+				table.sources = append(table.sources, Citation{Title: title, URL: citationURL, Favicon: favicon})
+			}
+			tables = append(tables, table)
+		}
+	}
+	return tables
+}
+
+// markCitations 把 tables 列出的引用标记换成占位符，占位符码位减去 citationMarkerBase 为标记在 tables 中的下标
+func markCitations(raw string, tables []citationTable) string {
+	if len(tables) == 0 {
+		return raw
+	}
+	pairs := make([]string, 0, len(tables)*2)
+	for index, table := range tables {
+		pairs = append(pairs, table.marker, string(rune(citationMarkerBase+index)))
+	}
+	return strings.NewReplacer(pairs...).Replace(raw)
+}
+
+// takeCitations 去掉 text 中的引用占位符，返回正文与各标记的网页来源；引用范围从标记所在段落开头或上一个标记之后的首个文字到标记位置
+func takeCitations(text string, tables []citationTable) (string, []Citation) {
+	if len(tables) == 0 {
+		return text, nil
+	}
+	runes := make([]rune, 0, len(text))
+	var citations []Citation
+	start := 0
+	for _, value := range text {
+		index := int(value) - citationMarkerBase
+		if index < 0 || index >= len(tables) {
+			runes = append(runes, value)
+			if value == '\n' {
+				start = len(runes)
+			}
+			continue
+		}
+		for start < len(runes) && (unicode.IsSpace(runes[start]) || unicode.IsPunct(runes[start])) {
+			start++
+		}
+		for _, source := range tables[index].sources {
+			source.Start, source.End = start, len(runes)
+			citations = append(citations, source)
+		}
+		start = len(runes)
+	}
+	return string(runes), citations
 }
 
 // expandDocuments 把 Deep Research 计划占位链接换成计划标题与步骤；回答完成后把文档占位链接换成 candidate[30] 的文档内容，完成前正文截止到第一个文档占位链接
@@ -734,6 +943,126 @@ func expandDocuments(candidate []any, raw string) string {
 	})
 }
 
+// autolinkPattern 匹配 Markdown 链接 [文字](地址)
+var autolinkPattern = regexp.MustCompile(`\[([^\[\]\s]+)\]\(([^()\s]+)\)`)
+
+// pendingLinkPattern 匹配正文末尾尚未写完的 Markdown 链接
+var pendingLinkPattern = regexp.MustCompile(`\[[^\[\]\s]*(?:\](?:\([^()\s]*)?)?$`)
+
+// restoreAutolinks 把代码以外官网自动改写的 [http 或 https 地址](地址)、[域名路径](https://域名路径) 与 [邮箱](mailto:邮箱) 还原为原文
+func restoreAutolinks(text string) string {
+	return outsideCode(text, func(prose string) string {
+		return autolinkPattern.ReplaceAllStringFunc(prose, func(link string) string {
+			match := autolinkPattern.FindStringSubmatch(link)
+			for _, scheme := range []string{"https://", "http://", "mailto:"} {
+				if address, ok := strings.CutPrefix(match[2], scheme); ok && (match[1] == match[2] || match[1] == address) {
+					return match[1]
+				}
+			}
+			return link
+		})
+	})
+}
+
+// pendingLinkStart 返回代码以外正文末尾尚未写完的 Markdown 链接的起点，写完后它可能还原为原文，没有时返回正文长度
+func pendingLinkStart(text string) int {
+	for _, span := range proseRanges(text) {
+		if span[1] != len(text) {
+			continue
+		}
+		if location := pendingLinkPattern.FindStringIndex(text[span[0]:]); location != nil {
+			return span[0] + location[0]
+		}
+	}
+	return len(text)
+}
+
+// outsideCode 对代码以外的各段正文调用 transform，代码原样保留
+func outsideCode(text string, transform func(string) string) string {
+	var result strings.Builder
+	cursor := 0
+	for _, span := range proseRanges(text) {
+		result.WriteString(text[cursor:span[0]])
+		result.WriteString(transform(text[span[0]:span[1]]))
+		cursor = span[1]
+	}
+	result.WriteString(text[cursor:])
+	return result.String()
+}
+
+// proseRanges 返回 Markdown 正文中围栏代码块与行内代码以外的字节区间，未闭合的围栏延伸到正文末尾，未闭合的行内代码延伸到段落末尾
+func proseRanges(text string) [][2]int {
+	var ranges [][2]int
+	prose, fence, ticks := 0, "", 0
+	for start := 0; start < len(text); {
+		end := strings.IndexByte(text[start:], '\n')
+		if end < 0 {
+			end = len(text)
+		} else {
+			end += start
+		}
+		line := text[start:end]
+		switch {
+		case fence != "":
+			if closesFence(line, fence) {
+				fence, prose = "", end
+			}
+		case fenceOpening(line) != "":
+			if ticks == 0 {
+				ranges = append(ranges, [2]int{prose, start})
+			}
+			fence, ticks = fenceOpening(line), 0
+		case strings.TrimSpace(line) == "":
+			if ticks > 0 {
+				ticks, prose = 0, start
+			}
+		default:
+			for index := 0; index < len(line); {
+				if line[index] != '`' {
+					index++
+					continue
+				}
+				run := index
+				for index < len(line) && line[index] == '`' {
+					index++
+				}
+				if ticks == 0 {
+					ranges = append(ranges, [2]int{prose, start + run})
+					ticks = index - run
+				} else if ticks == index-run {
+					ticks, prose = 0, start+index
+				}
+			}
+		}
+		start = end + 1
+	}
+	if fence == "" && ticks == 0 {
+		ranges = append(ranges, [2]int{prose, len(text)})
+	}
+	return ranges
+}
+
+// fenceOpening 返回作为围栏代码块开头的行的围栏标记，其他行返回空
+func fenceOpening(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" || trimmed[0] != '`' && trimmed[0] != '~' {
+		return ""
+	}
+	marker := trimmed[:len(trimmed)-len(strings.TrimLeft(trimmed, trimmed[:1]))]
+	if len(marker) < 3 || marker[0] == '`' && strings.Contains(trimmed[len(marker):], "`") {
+		return ""
+	}
+	return marker
+}
+
+// closesFence 判断行是否结束以 fence 开头的围栏代码块
+func closesFence(line string, fence string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	rest := strings.TrimLeft(trimmed, fence[:1])
+	return len(trimmed)-len(rest) >= len(fence) && strings.TrimSpace(rest) == ""
+}
+
+// mediaPlaceholderOffset 返回媒体占位链接在输出正文中的 rune 位置，没有占位链接时返回 -1
 func mediaPlaceholderOffset(candidate []any, placeholder string) int {
 	if placeholder == "" {
 		return -1
@@ -743,7 +1072,7 @@ func mediaPlaceholderOffset(candidate []any, placeholder string) int {
 	if index < 0 {
 		return -1
 	}
-	prefix := artifactPattern.ReplaceAllString(raw[:index], "")
+	prefix, _, _ := visibleContent(candidate, raw[:index])
 	return utf8.RuneCountInString(prefix)
 }
 

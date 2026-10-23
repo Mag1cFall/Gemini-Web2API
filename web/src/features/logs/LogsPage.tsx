@@ -131,6 +131,15 @@ export function LogsPage() {
     setPinned(on ? undefined : visible[0]?.key)
   }
 
+  // followScroll 在日志区离开末尾时停止跟随，回到末尾时恢复跟随
+  const followScroll = () => {
+    const node = output.current
+    if (!node) return
+    const distance = node.scrollHeight - node.scrollTop - node.clientHeight
+    if (autoScroll && distance > 40) toggleAutoScroll(false)
+    else if (!autoScroll && distance <= 10) toggleAutoScroll(true)
+  }
+
   // loadOlder 在窗口上方多显示一页更早的日志
   const loadOlder = () => {
     const size = visible.length + pageRows
@@ -155,7 +164,7 @@ export function LogsPage() {
           </Button>
         }
       />
-      <Card className="flex grow basis-0 flex-col">
+      <Card className="flex grow basis-0 flex-col max-lg:grow-0 max-lg:basis-auto">
         <CardHeader
           title={m.live}
           actions={<CountBadge>{formatNumber(filtered.length, locale)}</CountBadge>}
@@ -205,7 +214,8 @@ export function LogsPage() {
           role="log"
           aria-label={m.title}
           tabIndex={0}
-          className="min-h-[320px] grow basis-0 [scrollbar-gutter:stable] overflow-y-auto"
+          onScroll={followScroll}
+          className="min-h-[320px] grow basis-0 [scrollbar-gutter:stable] overflow-y-auto max-lg:h-[70dvh] max-lg:grow-0 max-lg:basis-auto"
         >
           {filtered.length === 0 ? (
             <CardEmpty>{logs.length === 0 ? m.waiting : m.empty}</CardEmpty>

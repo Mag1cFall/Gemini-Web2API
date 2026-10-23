@@ -2,7 +2,6 @@ package app
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/accounts"
@@ -26,16 +25,13 @@ type Deps struct {
 	Admin *admin.Deps
 }
 
-// NewRouter 注册健康检查与全部兼容 API
+// NewRouter 注册就绪检查与全部兼容 API
 func NewRouter(deps Deps) *gin.Engine {
 	pool := deps.Pool
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery(), securityHeaders)
 
-	router.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
 	router.GET("/readyz", func(c *gin.Context) {
 		status := pool.Status()
 		body := gin.H{"status": "ready", "accounts": status.Total, "available": status.Available, "version": Version()}
@@ -51,13 +47,6 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.Use(adapter.CORSMiddleware())
 	api.Use(adapter.RequestMiddleware(deps.Store))
 	api.Use(adapter.AuthMiddleware(deps.APIKey))
-	api.GET("/v1/accounts/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, pool.Status())
-	})
-	api.GET("/v1/accounts/usage", func(c *gin.Context) {
-		refresh, _ := strconv.ParseBool(c.Query("refresh"))
-		c.JSON(http.StatusOK, pool.Usage(c.Request.Context(), refresh))
-	})
 	api.POST("/v1/chat/completions", adapter.ChatCompletionHandler(pool))
 	api.POST("/v1/responses", adapter.ResponsesHandler(pool, deps.Store))
 	api.POST("/v1/images/generations", adapter.ImageGenerationHandler(pool))

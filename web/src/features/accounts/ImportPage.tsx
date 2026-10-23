@@ -76,10 +76,16 @@ function ChromeImport() {
                   }}
                 />
                 <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate text-base font-medium">
+                  <span
+                    className="truncate text-base font-medium"
+                    title={profile.email || profile.display_name || profile.profile}
+                  >
                     {profile.email || profile.display_name || profile.profile}
                   </span>
-                  <span className="truncate text-xs text-foreground-muted">
+                  <span
+                    className="truncate text-xs text-foreground-muted"
+                    title={[profile.display_name, profile.profile].filter(Boolean).join(' · ')}
+                  >
                     {[profile.display_name, profile.profile].filter(Boolean).join(' · ')}
                   </span>
                 </span>

@@ -158,6 +158,7 @@ type UsageRecord struct {
 	Path            string            `json:"path"`
 	Model           string            `json:"model"`
 	ProviderModel   string            `json:"provider_model"`
+	Thinking        string            `json:"thinking"`
 	Account         string            `json:"account"`
 	Status          int               `json:"status"`
 	State           string            `json:"state"`

@@ -167,7 +167,6 @@ func (c *Client) doUpload(req *http.Request) (*http.Response, error) {
 
 // processFile 按官网 ProcessFile 登记已上传的附件，返回生成请求引用的文件 ID
 func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Model, level ThinkingLevel, file FileData) (string, error) {
-	started := time.Now()
 	inner, err := pageJSON([]any{
 		[]any{[]any{file.URL, nil, 1, file.MimeType}, file.FileName, nil, nil, nil, nil, nil, nil, []any{0}},
 		nil, 1, []any{bootstrap.Language},
@@ -183,18 +182,12 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	if err != nil {
 		return "", err
 	}
-	query := req.URL.Query()
-	query.Set("bl", bootstrap.BL)
-	query.Set("f.sid", bootstrap.FSID)
-	query.Set("hl", bootstrap.Language)
-	query.Set("_reqid", fmt.Sprintf("%d", c.nextReqID()))
-	query.Set("rt", "c")
-	req.URL.RawQuery = query.Encode()
+	req.URL.RawQuery = c.frontendQuery(bootstrap, bootstrap.Language)
 	c.applyXHRHeaders(req)
 	req.Header[http.HeaderOrderKey] = processFileHeaderOrder
 	header, err := json.Marshal([]any{
 		1, nil, nil, nil, model.Hash, nil, nil, nil, c.features(), nil, nil, nil, nil, nil, model.Mode, int(level), c.clientID,
-		[]string{bootstrap.BL}, nil, requestTiming(time.Since(started), time.Now()),
+		[]string{bootstrap.BL}, nil, c.pageTiming(),
 	})
 	if err != nil {
 		return "", err

@@ -5,7 +5,12 @@ import { Button } from '@/components/ui/button'
 import { Card, CardEmpty, CardHeader, CountBadge, PageHeader } from '@/components/ui/page'
 import { Table, Td, Th } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
-import { cooldownReason, cooldownReasonMessages } from '@/features/accounts/messages'
+import {
+  accountsMessages,
+  cooldownReason,
+  cooldownReasonMessages,
+} from '@/features/accounts/messages'
+import { useAccountLabel, useClearCooldown } from '@/features/accounts/queries'
 import { useCooldowns } from '@/features/models/queries'
 import { requestsMessages } from '@/features/requests/messages'
 import { useCancelRequest, useFinished, useRunning } from '@/features/requests/queries'
@@ -27,12 +32,15 @@ import { useNow } from '@/lib/time'
 // recentLimit 是最近结束列表显示的请求数
 const recentLimit = 20
 
-// RequestsPage 显示进行中的请求与取消、最近结束的请求与账号冷却，数据来自事件流
+// RequestsPage 显示进行中的请求与取消、最近结束的请求与账号冷却及其清除，数据来自事件流
 export function RequestsPage() {
   const m = useMessages(requestsMessages)
   const rm = useMessages(cooldownReasonMessages)
+  const am = useMessages(accountsMessages)
   const { locale } = useI18n()
   const now = useNow(1000)
+  const clearCooldown = useClearCooldown()
+  const accountLabel = useAccountLabel()
   const running = useRunning()
   const finished = useFinished(recentLimit)
   const cooldowns = useCooldowns().data?.cooldowns ?? []
@@ -69,18 +77,25 @@ export function RequestsPage() {
   }
 
   // openButton 是打开请求详情的模型名按钮
-  const openButton = (request: RequestInfo) => (
-    <button
-      type="button"
-      aria-label={fill(m.openDetail, { id: request.id })}
-      onClick={() => {
-        setSelected(request)
-      }}
-      className="max-w-full truncate text-left font-mono text-primary hover:text-primary-hover hover:underline"
-    >
-      {request.model ?? `${request.method} ${request.path}`}
-    </button>
-  )
+  const openButton = (request: RequestInfo) => {
+    const label = request.model ?? `${request.method} ${request.path}`
+    return (
+      <button
+        type="button"
+        aria-label={fill(m.openDetail, { id: request.id })}
+        title={label}
+        onClick={() => {
+          setSelected(request)
+        }}
+        className="max-w-full truncate text-left font-mono text-primary hover:text-primary-hover hover:underline"
+      >
+        {label}
+      </button>
+    )
+  }
+
+  // accountText 是账号列的文字：首页登录邮箱，未分配账号时为提示
+  const accountText = (id: string | undefined) => (id ? accountLabel(id) : m.unassigned)
 
   return (
     <>
@@ -115,11 +130,17 @@ export function RequestsPage() {
               {running.map((request) => (
                 <tr key={request.id} className="hover:bg-hover">
                   <Td className="max-w-cell">{openButton(request)}</Td>
-                  <Td className="max-w-cell truncate @max-[480px]:hidden">
-                    {request.account ?? m.unassigned}
+                  <Td
+                    className="max-w-cell truncate @max-[480px]:hidden"
+                    title={accountText(request.account)}
+                  >
+                    {accountText(request.account)}
                   </Td>
                   <Td className="whitespace-nowrap @max-[480px]:hidden">{protocol(request)}</Td>
-                  <Td className="max-w-cell truncate text-foreground-muted @max-[760px]:hidden">
+                  <Td
+                    className="max-w-cell truncate text-foreground-muted @max-[760px]:hidden"
+                    title={request.stage}
+                  >
                     {request.stage ?? '—'}
                   </Td>
                   <Td className="whitespace-nowrap text-foreground-muted @max-[480px]:hidden">
@@ -200,7 +221,9 @@ export function RequestsPage() {
                     </span>
                   </Td>
                   <Td className="max-w-cell">{openButton(request)}</Td>
-                  <Td className="max-w-cell truncate">{request.account ?? m.unassigned}</Td>
+                  <Td className="max-w-cell truncate" title={accountText(request.account)}>
+                    {accountText(request.account)}
+                  </Td>
                   <Td className="whitespace-nowrap">{protocol(request)}</Td>
                   <Td className="text-right whitespace-nowrap">
                     {formatDuration(request.duration_ms, locale)}
@@ -230,12 +253,17 @@ export function RequestsPage() {
                 <Th>{m.model}</Th>
                 <Th>{m.reason}</Th>
                 <Th>{m.until}</Th>
+                <Th>
+                  <span className="sr-only">{am.clearCooldown}</span>
+                </Th>
               </tr>
             </thead>
             <tbody>
               {cooldowns.map((cooldown) => (
                 <tr key={cooldown.account_id + '\n' + cooldown.model}>
-                  <Td className="max-w-cell truncate">{cooldown.account_id}</Td>
+                  <Td className="max-w-cell truncate" title={accountLabel(cooldown.account_id)}>
+                    {accountLabel(cooldown.account_id)}
+                  </Td>
                   <Td className="font-mono whitespace-nowrap">
                     {cooldown.model || m.wholeAccount}
                   </Td>
@@ -247,6 +275,24 @@ export function RequestsPage() {
                     <span className="ml-2 text-foreground-muted">
                       {formatRelative(new Date(cooldown.until), now, locale)}
                     </span>
+                  </Td>
+                  <Td className="text-right whitespace-nowrap">
+                    <Button
+                      size="sm"
+                      loading={
+                        clearCooldown.isPending &&
+                        clearCooldown.variables.account === cooldown.account_id &&
+                        clearCooldown.variables.scope === (cooldown.model || '*')
+                      }
+                      onClick={() => {
+                        clearCooldown.mutate({
+                          account: cooldown.account_id,
+                          scope: cooldown.model || '*',
+                        })
+                      }}
+                    >
+                      {am.clearCooldown}
+                    </Button>
                   </Td>
                 </tr>
               ))}

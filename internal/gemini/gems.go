@@ -21,13 +21,13 @@ type Gem struct {
 	Predefined  bool
 }
 
-// fetchGems 按官网页面加载的顺序读取 Gem 列表，列表类型 2 为账号自建，1 为账号可用的其他 Gem
+// fetchGems 按官网页面加载的顺序读取 Gem 列表，列表类型 2 为账号自建，1 为账号可用的其他 Gem，3 为 Gems 管理页的 Google 预置 Gem
 func (c *Client) fetchGems(ctx context.Context, bootstrap Bootstrap) ([]Gem, error) {
 	var gems []Gem
 	for _, kind := range []struct {
 		value      int
 		predefined bool
-	}{{2, false}, {1, true}} {
+	}{{2, false}, {1, true}, {3, true}} {
 		request, err := json.Marshal([]any{kind.value, []any{bootstrap.Language}, 0})
 		if err != nil {
 			return nil, err

@@ -15,7 +15,7 @@ import (
 // recordColumns 是请求记录查询读取的列，最后一列表示是否保存了正文
 const recordColumns = `r.id, r.response_id, r.time, r.protocol, r.path, r.model, r.provider_model, r.account, r.status, r.state,
  r.duration_ms, r.first_event_ms, r.queue_ms, r.input_tokens, r.reasoning_tokens, r.reply_tokens, r.total_tokens,
- r.tool_calls, r.error, r.attempts, EXISTS(SELECT 1 FROM bodies b WHERE b.id = r.id)`
+ r.tool_calls, r.error, r.attempts, r.thinking, EXISTS(SELECT 1 FROM bodies b WHERE b.id = r.id)`
 
 // searchColumns 是关键字匹配的请求记录列
 var searchColumns = []string{"id", "response_id", "model", "provider_model", "account", "error"}
@@ -48,7 +48,7 @@ func scanRecord(rows *sql.Rows) (UsageRecord, error) {
 	var attempts string
 	err := rows.Scan(&record.ID, &record.ResponseID, &at, &record.Protocol, &record.Path, &record.Model, &record.ProviderModel,
 		&record.Account, &record.Status, &record.State, &record.DurationMS, &record.FirstEventMS, &record.QueueMS, &record.InputTokens,
-		&record.ReasoningTokens, &record.ReplyTokens, &record.TotalTokens, &record.ToolCalls, &record.Error, &attempts, &record.HasBody)
+		&record.ReasoningTokens, &record.ReplyTokens, &record.TotalTokens, &record.ToolCalls, &record.Error, &attempts, &record.Thinking, &record.HasBody)
 	if err != nil {
 		return record, err
 	}
@@ -92,7 +92,7 @@ func (store *Store) Records(ctx context.Context, query UsageRecordQuery) (UsageR
 
 // csvHeader 是导出文件的列名
 var csvHeader = []string{
-	"time", "id", "response_id", "protocol", "path", "model", "provider_model", "account", "status", "state", "duration_ms",
+	"time", "id", "response_id", "protocol", "path", "model", "provider_model", "thinking", "account", "status", "state", "duration_ms",
 	"first_event_ms", "queue_ms", "input_tokens", "reasoning_tokens", "reply_tokens", "total_tokens", "tool_calls", "error", "attempts",
 }
 
@@ -130,7 +130,7 @@ func (store *Store) ExportRecords(ctx context.Context, query UsageRecordQuery, o
 		integer := func(value int64) string { return strconv.FormatInt(value, 10) }
 		if err := writer.Write([]string{
 			record.Time.Format(time.RFC3339Nano), record.ID, record.ResponseID, record.Protocol, csvText(record.Path),
-			csvText(record.Model), csvText(record.ProviderModel), csvText(record.Account), strconv.Itoa(record.Status), record.State,
+			csvText(record.Model), csvText(record.ProviderModel), record.Thinking, csvText(record.Account), strconv.Itoa(record.Status), record.State,
 			integer(record.DurationMS), integer(record.FirstEventMS), integer(record.QueueMS), integer(record.InputTokens),
 			integer(record.ReasoningTokens), integer(record.ReplyTokens), integer(record.TotalTokens), strconv.Itoa(record.ToolCalls),
 			csvText(record.Error), string(attempts),

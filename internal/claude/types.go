@@ -18,6 +18,7 @@ type ClaudeRequest struct {
 	TopK               *int            `json:"top_k,omitempty"`
 	Thinking           *ThinkingConfig `json:"thinking,omitempty"`
 	OutputConfig       *OutputConfig   `json:"output_config,omitempty"`
+	OutputFormat       *OutputFormat   `json:"output_format,omitempty"`
 	Metadata           *Metadata       `json:"metadata,omitempty"`
 	ConversationID     string          `json:"conversation_id,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
@@ -28,9 +29,16 @@ type ThinkingConfig struct {
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
 }
 
-// OutputConfig 表示 Claude 输出强度配置
+// OutputConfig 表示 Claude 输出强度与结构化输出配置
 type OutputConfig struct {
-	Effort string `json:"effort,omitempty"`
+	Effort string        `json:"effort,omitempty"`
+	Format *OutputFormat `json:"format,omitempty"`
+}
+
+// OutputFormat 表示 output_config.format 与 beta output_format 的结构化输出格式
+type OutputFormat struct {
+	Type   string          `json:"type"`
+	Schema json.RawMessage `json:"schema"`
 }
 
 type Metadata struct {

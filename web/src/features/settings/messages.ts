@@ -67,6 +67,10 @@ export const settingsMessages = defineMessages({
     logFormatHint: '控制台日志为彩色文本或 JSON 行',
     requestBodyLog: '记录请求正文',
     requestBodyLogHint: '保留最近 1000 条请求与响应的正文',
+    logFile: '写入日志文件',
+    logFileHint: '把服务日志同时写入数据目录的 data/logs/gemini-web2api.log，单文件 10 MB 轮转',
+    logMaxTotal: '日志总量上限（MB）',
+    logMaxTotalHint: '日志目录超过上限时删除最旧的文件，不小于 20',
     pendingRestart: '以下改动在重启服务后生效：{fields}',
     immediate: '保存后生效',
     restart: '重启后生效',
@@ -146,6 +150,10 @@ export const settingsMessages = defineMessages({
     logFormatHint: '主控台日誌為彩色文字或 JSON 行',
     requestBodyLog: '記錄請求內文',
     requestBodyLogHint: '保留最近 1000 筆請求與回應的內文',
+    logFile: '寫入日誌檔案',
+    logFileHint: '將服務日誌同時寫入資料目錄的 data/logs/gemini-web2api.log，單一檔案 10 MB 輪替',
+    logMaxTotal: '日誌總量上限（MB）',
+    logMaxTotalHint: '日誌目錄超過上限時刪除最舊的檔案，不小於 20',
     pendingRestart: '以下變更在重新啟動服務後生效：{fields}',
     immediate: '儲存後生效',
     restart: '重新啟動後生效',
@@ -230,6 +238,12 @@ export const settingsMessages = defineMessages({
     requestBodyLog: 'Record request bodies',
     requestBodyLogHint:
       'Keep request and response bodies of the latest 1000 requests in the ledger',
+    logFile: 'Write log file',
+    logFileHint:
+      'Also write service logs to data/logs/gemini-web2api.log in the data directory, rotating every 10 MB',
+    logMaxTotal: 'Log size limit (MB)',
+    logMaxTotalHint:
+      'Delete the oldest files when the log directory exceeds this size, at least 20',
     pendingRestart: 'These changes apply after a restart: {fields}',
     immediate: 'Applies on save',
     restart: 'Applies after restart',
@@ -313,6 +327,11 @@ export const settingsMessages = defineMessages({
     logFormatHint: 'コンソールのログを色付きテキストか JSON 行で出力',
     requestBodyLog: 'リクエスト本文を記録',
     requestBodyLogHint: '直近 1000 件のリクエストとレスポンスの本文を保存します',
+    logFile: 'ログファイルに書き込む',
+    logFileHint:
+      'サービスログをデータディレクトリの data/logs/gemini-web2api.log にも書き込み、10 MB ごとにローテーションします',
+    logMaxTotal: 'ログ合計上限（MB）',
+    logMaxTotalHint: 'ログディレクトリが上限を超えると最も古いファイルを削除します。20 以上',
     pendingRestart: '次の変更は再起動後に反映されます：{fields}',
     immediate: '保存後に反映',
     restart: '再起動後に反映',
@@ -394,6 +413,11 @@ export const settingsMessages = defineMessages({
     logFormatHint: '콘솔 로그를 색상 텍스트 또는 JSON 줄로 출력',
     requestBodyLog: '요청 본문 기록',
     requestBodyLogHint: '최근 1000건의 요청과 응답 본문을 원장에 보관합니다',
+    logFile: '로그 파일에 기록',
+    logFileHint:
+      '서비스 로그를 데이터 디렉터리의 data/logs/gemini-web2api.log에도 기록하고 10 MB마다 교체합니다',
+    logMaxTotal: '로그 총량 상한(MB)',
+    logMaxTotalHint: '로그 디렉터리가 상한을 넘으면 가장 오래된 파일을 삭제합니다. 20 이상',
     pendingRestart: '다음 변경은 재시작 후 적용됩니다: {fields}',
     immediate: '저장 후 적용',
     restart: '재시작 후 적용',
@@ -482,6 +506,12 @@ export const settingsMessages = defineMessages({
     requestBodyLog: 'Enregistrer les corps de requête',
     requestBodyLogHint:
       'Conserve dans le registre les corps de requête et de réponse des 1000 dernières requêtes',
+    logFile: 'Écrire le fichier journal',
+    logFileHint:
+      'Écrit aussi les journaux du service dans data/logs/gemini-web2api.log du répertoire de données, avec rotation tous les 10 Mo',
+    logMaxTotal: 'Taille maximale des journaux (Mo)',
+    logMaxTotalHint:
+      'Supprime les fichiers les plus anciens quand le répertoire des journaux dépasse cette taille, au moins 20',
     pendingRestart: 'Ces modifications s’appliquent après redémarrage : {fields}',
     immediate: 'Appliqué à l’enregistrement',
     restart: 'Appliqué après redémarrage',
@@ -568,6 +598,12 @@ export const settingsMessages = defineMessages({
     requestBodyLog: 'Anfrageinhalte aufzeichnen',
     requestBodyLogHint:
       'Bewahrt Anfrage- und Antwortinhalte der letzten 1000 Anfragen im Journal auf',
+    logFile: 'Logdatei schreiben',
+    logFileHint:
+      'Schreibt Dienstprotokolle zusätzlich nach data/logs/gemini-web2api.log im Datenverzeichnis, Rotation alle 10 MB',
+    logMaxTotal: 'Protokoll-Obergrenze (MB)',
+    logMaxTotalHint:
+      'Löscht die ältesten Dateien, wenn das Protokollverzeichnis diese Größe überschreitet, mindestens 20',
     pendingRestart: 'Diese Änderungen gelten nach einem Neustart: {fields}',
     immediate: 'Gilt nach dem Speichern',
     restart: 'Gilt nach Neustart',

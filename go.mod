@@ -1,8 +1,9 @@
 module github.com/Mag1cFall/Gemini-Web2API
 
-go 1.25.0
+go 1.26.0
 
 require (
+	github.com/bdandy/go-socks4 v1.2.3
 	github.com/bogdanfinn/fhttp v0.6.9
 	github.com/bogdanfinn/tls-client v1.16.0
 	github.com/eliben/go-sentencepiece v0.7.0
@@ -11,9 +12,12 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/joho/godotenv v1.5.1
 	github.com/mewkiz/flac v1.0.14
+	github.com/minio/selfupdate v0.6.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/thesyncim/gopus v0.1.2
+	github.com/tphakala/go-aac v0.7.0
 	github.com/wailsapp/wails/v3 v3.0.0-beta.29
+	golang.org/x/mod v0.38.0
 	golang.org/x/net v0.56.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
@@ -24,10 +28,10 @@ require (
 )
 
 require (
+	aead.dev/minisign v0.2.0 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/bdandy/go-errors v1.2.2 // indirect
-	github.com/bdandy/go-socks4 v1.2.3 // indirect
 	github.com/bogdanfinn/quic-go-utls v1.0.10-utls // indirect
 	github.com/bogdanfinn/utls v1.7.8-barnius // indirect
 	github.com/bogdanfinn/websocket v1.5.6-barnius // indirect
@@ -64,9 +68,10 @@ require (
 	github.com/quic-go/quic-go v0.61.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
+	github.com/tphakala/simd v1.9.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.0 // indirect
-	golang.org/x/arch v0.20.0 // indirect
+	golang.org/x/arch v0.30.0 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	modernc.org/libc v1.74.4 // indirect

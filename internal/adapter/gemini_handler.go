@@ -39,11 +39,12 @@ type GeminiFunctionCall struct {
 	Args map[string]interface{} `json:"args"`
 }
 
-// GeminiFunctionResponse 表示 Gemini 函数结果
+// GeminiFunctionResponse 表示 Gemini 函数结果，parts 为结果中的图片与文件
 type GeminiFunctionResponse struct {
 	ID       string                 `json:"id,omitempty"`
 	Name     string                 `json:"name"`
 	Response map[string]interface{} `json:"response"`
+	Parts    []GeminiPart           `json:"parts,omitempty"`
 }
 
 // GeminiExecutableCode 表示 Gemini 已执行代码
@@ -86,8 +87,8 @@ type GeminiGenerateContentRequest struct {
 	GenerationConfig   json.RawMessage `json:"generationConfig,omitempty"`
 	Tools              json.RawMessage `json:"tools,omitempty"`
 	ToolConfig         json.RawMessage `json:"toolConfig,omitempty"`
-	ConversationID     string          `json:"conversation_id,omitempty"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	ConversationID     string          `json:"conversationId,omitempty"`
+	PreviousResponseID string          `json:"previousResponseId,omitempty"`
 	// GenerateContentRequest 为 countTokens 请求包装的完整生成请求
 	GenerateContentRequest *GeminiGenerateContentRequest `json:"generateContentRequest,omitempty"`
 }
@@ -103,6 +104,11 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			return
 		}
 		model, method := strings.TrimPrefix(action[:separator], "models/"), action[separator+1:]
+		suffix, err := takeModelSuffix(&model)
+		if err != nil {
+			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+			return
+		}
 		bindScope(c, pool, model)
 		switch method {
 		case "generateContent", "streamGenerateContent", "countTokens":
@@ -119,7 +125,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 		}
 
 		var request GeminiGenerateContentRequest
-		err := decodeRequest(c, &request)
+		err = decodeGeminiRequest(c, &request)
 		if err != nil {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 			return
@@ -131,20 +137,23 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			logging.FromContext(c.Request.Context()).Begin("gemini", model, method == "streamGenerateContent", len(request.Contents), geminiToolCount(request.Tools))
 		}
 		if len(request.Contents) == 0 {
-			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "contents is required")
-			return
+			if request.SystemInstruction == nil || len(request.SystemInstruction.Parts) == 0 {
+				writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "contents or systemInstruction is required")
+				return
+			}
+			request.Contents = []GeminiContent{{Role: "user", Parts: request.SystemInstruction.Parts}}
+			request.SystemInstruction = nil
 		}
-		knownModel, readyModel := modelStatus(pool, model)
-		if !knownModel {
-			writeGeminiError(c, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("model %q is unavailable", model))
+		if err := modelKnown(pool, model); err != nil {
+			writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
 			return
 		}
 		if method == "countTokens" {
 			countGeminiTokens(c, pool, model, request)
 			return
 		}
-		if !readyModel {
-			writeGeminiError(c, http.StatusServiceUnavailable, "UNAVAILABLE", "No account is ready for the requested model")
+		if err := awaitModel(c, pool, model); err != nil {
+			writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
 			return
 		}
 		thinkingLevel, includeThoughts, err := geminiRequestThinkingSettings(request)
@@ -152,6 +161,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 			return
 		}
+		thinkingLevel, includeThoughts = suffix.apply(thinkingLevel, includeThoughts)
 
 		bridge, unsupported, err := geminiToolBridge(request)
 		if err != nil {
@@ -160,72 +170,122 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 		}
 		setUnsupportedParameters(c, unsupported)
 		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, c.GetHeader("X-Conversation-ID"))
+		var system string
+		var turns []historyTurn
+		if sessionKey == "" {
+			system = geminiSystemText(request.SystemInstruction)
+			turns = geminiHistoryTurns(request.Contents)
+			sessionKey = continuedHistoryKey(system, bridge, turns)
+		}
 		responseID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
 		streaming := method == "streamGenerateContent"
+		count := geminiCandidateCount(request)
+		generate := func(index int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
+			key, policy := sessionKey, previousResponsePolicy(request.PreviousResponseID)
+			if index > 0 {
+				key, policy = "", sessionCreate
+			}
+			result, accountID, err := runGeneration(
+				c.Request.Context(), pool, key, policy, model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel, bridge,
+				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
+					return buildGeminiPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(key)))
+				}, onEvent, hasVisibleOutput,
+			)
+			c.Set("account_id", accountID)
+			if err == nil && index == 0 {
+				rememberHistory(pool, result, system, bridge, turns)
+			}
+			return result, err
+		}
+		var usage *gemini.Usage
 
 		if streaming {
 			writer := newGeminiStreamWriter(c, c.Query("alt") == "sse")
 			defer writer.close()
-			defer startKeepalive(c, geminiKeepalive)()
+			stream, stop := holdStream(c, geminiKeepalive)
+			defer stop()
 			writer.w = c.Writer
-			projection := newStreamProjection(bridge, includeThoughts)
 			streamModel := config.MapModel(model)
-			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel, bridge,
-				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-					return buildGeminiPrompt(c, client, request, continuation, bridge)
-				}, func(event gemini.Event) error {
+			for index := range count {
+				projection := newStreamProjection(bridge, includeThoughts)
+				result, err := generate(index, func(event gemini.Event) error {
+					stream.release()
 					return projection.project(event, func(event gemini.Event) error {
-						return writer.delta(responseID, streamModel, event)
+						return writer.delta(responseID, streamModel, index, event)
 					}, func(err error) error {
 						return writer.fail(http.StatusBadGateway, "INTERNAL", err)
 					})
-				},
-				projection.hasVisibleOutput,
-			)
-			c.Set("account_id", accountID)
-			if err != nil {
-				if !projection.errorSent {
-					_ = writer.fail(upstreamStatus(err), geminiUpstreamStatus(err), streamFailure(c, err))
+				}, projection.hasVisibleOutput)
+				if err != nil {
+					if stream.reject() {
+						writer.closed = true
+						writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
+					} else if !projection.errorSent {
+						_ = writer.fail(upstreamStatus(err), geminiUpstreamStatus(err), streamFailure(c, err))
+					}
+					return
 				}
+				if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
+					_ = writer.fail(http.StatusBadGateway, "INTERNAL", streamFailure(c, err))
+					return
+				}
+				response, err := buildGeminiResponse(result, bridge, includeThoughts)
+				if err != nil {
+					_ = writer.fail(http.StatusBadGateway, "INTERNAL", streamFailure(c, err))
+					return
+				}
+				response["candidates"].([]gin.H)[0]["index"] = index
+				usage = addUsage(usage, result.Accumulator.Usage)
+				delete(response, "usageMetadata")
+				if index == count-1 && usage != nil {
+					response["usageMetadata"] = geminiUsage(usage)
+				}
+				_ = writer.write(projectGeminiStreamTail(response, projection))
+			}
+			recordChoiceUsage(c, count, usage)
+			return
+		}
+
+		var response gin.H
+		for index := range count {
+			result, err := generate(index, nil, nil)
+			if err != nil {
+				writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
 				return
 			}
 			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-				_ = writer.fail(http.StatusBadGateway, "INTERNAL", streamFailure(c, err))
+				writeGeminiError(c, http.StatusBadGateway, "INTERNAL", err.Error())
 				return
 			}
-			response, err := buildGeminiResponse(result, bridge, includeThoughts)
+			built, err := buildGeminiResponse(result, bridge, includeThoughts)
 			if err != nil {
-				_ = writer.fail(http.StatusBadGateway, "INTERNAL", streamFailure(c, err))
+				writeGeminiError(c, http.StatusBadGateway, "INTERNAL", err.Error())
 				return
 			}
-			_ = writer.write(projectGeminiStreamTail(response, projection))
-			return
+			usage = addUsage(usage, result.Accumulator.Usage)
+			if response == nil {
+				response = built
+				continue
+			}
+			next := built["candidates"].([]gin.H)[0]
+			next["index"] = index
+			response["candidates"] = append(response["candidates"].([]gin.H), next)
 		}
-
-		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, sessionKey, request.PreviousResponseID == "", model, responseID, generationMedia{aspectRatio: bridge.AspectRatio}, thinkingLevel, bridge,
-			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-				return buildGeminiPrompt(c, client, request, continuation, bridge)
-			}, nil, nil,
-		)
-		c.Set("account_id", accountID)
-		if err != nil {
-			writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
-			return
-		}
-
-		if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-			writeGeminiError(c, http.StatusBadGateway, "INTERNAL", err.Error())
-			return
-		}
-		response, err := buildGeminiResponse(result, bridge, includeThoughts)
-		if err != nil {
-			writeGeminiError(c, http.StatusBadGateway, "INTERNAL", err.Error())
-			return
+		recordChoiceUsage(c, count, usage)
+		if usage != nil {
+			response["usageMetadata"] = geminiUsage(usage)
 		}
 		c.JSON(http.StatusOK, response)
 	}
+}
+
+// geminiCandidateCount 返回 generationConfig.candidateCount 要求的候选数，缺省或小于 1 时为 1
+func geminiCandidateCount(request GeminiGenerateContentRequest) int {
+	var config struct {
+		CandidateCount int `json:"candidateCount"`
+	}
+	_ = json.Unmarshal(request.GenerationConfig, &config)
+	return max(config.CandidateCount, 1)
 }
 
 // geminiUnsupportedMethod 返回与官方相同的方法不可用说明，并写明 Gemini Web 不提供的能力
@@ -259,7 +319,7 @@ func countGeminiTokens(c *gin.Context, pool *balancer.AccountPool, model string,
 		return
 	}
 	setUnsupportedParameters(c, unsupported)
-	prompt, files, err := buildGeminiPrompt(c, countClient(pool, model), request, false, bridge)
+	prompt, files, err := buildGeminiPrompt(c, countClient(pool), request, false, bridge)
 	if err != nil {
 		status := http.StatusBadRequest
 		var protocolErr *gemini.ProtocolError
@@ -325,18 +385,25 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 	var builder strings.Builder
 	var files []gemini.FileData
 	for _, part := range parts {
-		if part.Thought {
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "thinking", "thinking": part.Text, "signature": part.ThoughtSignature})
-		} else {
-			builder.WriteString(part.Text)
+		if !part.Thought {
+			writeTextSegment(&builder, part.Text)
 		}
 		if part.FunctionCall != nil {
 			arguments, _ := json.Marshal(part.FunctionCall.Args)
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_use", "id": part.FunctionCall.ID, "name": part.FunctionCall.Name, "signature": part.ThoughtSignature, "arguments": json.RawMessage(arguments)})
+			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_use", "id": part.FunctionCall.ID, "name": part.FunctionCall.Name, "arguments": json.RawMessage(arguments)})
 		}
 		if part.FunctionResponse != nil {
 			response, _ := json.Marshal(part.FunctionResponse.Response)
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_result", "id": part.FunctionResponse.ID, "name": part.FunctionResponse.Name, "response": json.RawMessage(response)})
+			result := map[string]interface{}{"type": "tool_result", "id": part.FunctionResponse.ID, "name": part.FunctionResponse.Name, "response": json.RawMessage(response)}
+			if len(part.FunctionResponse.Parts) > 0 {
+				label, attachments, err := decodeGeminiParts(c, client, part.FunctionResponse.Parts)
+				if err != nil {
+					return "", nil, err
+				}
+				result["parts"] = label
+				files = append(files, attachments...)
+			}
+			appendTranscriptObject(&builder, result)
 		}
 		if part.ExecutableCode != nil {
 			appendTranscriptObject(&builder, map[string]interface{}{
@@ -382,9 +449,9 @@ func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart
 				builder.WriteString("[File]")
 				continue
 			}
-			data, err := client.FetchMedia(c.Request.Context(), uri)
+			data, err := fetchRemoteMedia(c.Request.Context(), client, uri)
 			if err != nil {
-				return "", nil, err
+				return "", nil, fmt.Errorf("下载远程文件失败: %w", err)
 			}
 			filename := fmt.Sprintf("file_%d%s", time.Now().UnixNano(), mimeTypeToExt(part.FileData.MimeType))
 			files = append(files, gemini.FileData{Data: data, FileName: filename, MimeType: part.FileData.MimeType})
@@ -403,7 +470,7 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 			return bridge, nil, err
 		}
 		for field := range config {
-			if field == "responseMimeType" || field == "responseJsonSchema" || field == "responseSchema" || field == "thinkingConfig" || field == "imageConfig" {
+			if field == "responseMimeType" || field == "responseJsonSchema" || field == "responseSchema" || field == "responseFormat" || field == "thinkingConfig" || field == "imageConfig" || field == "candidateCount" || field == "stopSequences" {
 				continue
 			}
 			unsupported = append(unsupported, "generationConfig."+field)
@@ -416,13 +483,59 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 			}
 		}
 		_ = json.Unmarshal(imageConfig["aspectRatio"], &bridge.AspectRatio)
+		if raw, ok := config["stopSequences"]; ok {
+			if err := json.Unmarshal(raw, &bridge.Stop); err != nil {
+				return bridge, nil, fmt.Errorf("generationConfig.stopSequences 必须是字符串数组")
+			}
+		}
 		var mime string
 		_ = json.Unmarshal(config["responseMimeType"], &mime)
-		bridge.JSONSchema = config["responseJsonSchema"]
-		if len(bridge.JSONSchema) == 0 {
-			bridge.JSONSchema = config["responseSchema"]
+		schema := config["responseJsonSchema"]
+		if len(schema) == 0 && len(config["responseSchema"]) > 0 {
+			converted, err := geminiSchema(config["responseSchema"])
+			if err != nil {
+				return bridge, nil, fmt.Errorf("responseSchema 无效: %w", err)
+			}
+			schema = converted
 		}
-		if mime == "application/json" || len(bridge.JSONSchema) > 0 {
+		formats, err := geminiResponseFormats(config["responseFormat"])
+		if err != nil {
+			return bridge, nil, fmt.Errorf("responseFormat 无效: %w", err)
+		}
+		for _, format := range formats {
+			if format.Text != nil {
+				if format.Text.MIMEType != "" {
+					mime = geminiResponseFormatValue(format.Text.MIMEType)
+				}
+				if len(format.Text.Schema) > 0 {
+					if schema, err = geminiSchema(format.Text.Schema); err != nil {
+						return bridge, nil, fmt.Errorf("responseFormat.text.schema 无效: %w", err)
+					}
+				}
+			}
+			if format.Image != nil {
+				if format.Image.AspectRatio != "" {
+					bridge.AspectRatio = geminiResponseFormatValue(format.Image.AspectRatio)
+				}
+				if format.Image.ImageSize != "" {
+					unsupported = append(unsupported, "generationConfig.responseFormat.image.imageSize")
+				}
+			}
+			if len(format.Video) > 0 {
+				unsupported = append(unsupported, "generationConfig.responseFormat.video")
+			}
+		}
+		switch {
+		case mime == "text/x.enum":
+			var enum struct {
+				Enum []string `json:"enum"`
+			}
+			if err := json.Unmarshal(schema, &enum); err != nil || len(enum.Enum) == 0 {
+				return bridge, nil, fmt.Errorf("text/x.enum 需要带 enum 的 responseSchema")
+			}
+			bridge.Enum = enum.Enum
+		case mime == "application/json" || len(schema) > 0:
+			bridge.JSONSchema = schema
 			if len(bridge.JSONSchema) == 0 {
 				bridge.JSONSchema = json.RawMessage(`{"type":"object"}`)
 			}
@@ -448,22 +561,21 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 				bridge.CodeExecution = true
 			}
 			var declarations []struct {
-				Name                       string          `json:"name"`
-				Description                string          `json:"description"`
-				Parameters                 json.RawMessage `json:"parameters"`
-				ParametersJSONSchema       json.RawMessage `json:"parametersJsonSchema"`
-				ParametersJSONSchemaPython json.RawMessage `json:"parameters_json_schema"`
+				Name                 string          `json:"name"`
+				Description          string          `json:"description"`
+				Parameters           json.RawMessage `json:"parameters"`
+				ParametersJSONSchema json.RawMessage `json:"parametersJsonSchema"`
 			}
 			if err := json.Unmarshal(group["functionDeclarations"], &declarations); err != nil && len(group["functionDeclarations"]) > 0 {
 				return bridge, nil, err
 			}
 			for _, function := range declarations {
-				parameters := function.Parameters
+				parameters, err := geminiSchema(function.Parameters)
+				if err != nil {
+					return bridge, nil, fmt.Errorf("函数 %q 的 parameters 无效: %w", function.Name, err)
+				}
 				if len(function.ParametersJSONSchema) > 0 {
 					parameters = function.ParametersJSONSchema
-				}
-				if len(function.ParametersJSONSchemaPython) > 0 {
-					parameters = function.ParametersJSONSchemaPython
 				}
 				bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: function.Name, Description: function.Description, Parameters: parameters})
 			}
@@ -500,7 +612,7 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 			if len(allowedNames) == 1 {
 				bridge.Choice = allowedNames[0]
 			}
-		case "", "AUTO":
+		case "", "AUTO", "VALIDATED", "MODE_UNSPECIFIED":
 		default:
 			return bridge, nil, fmt.Errorf("不支持的 functionCallingConfig.mode %q", mode)
 		}
@@ -686,14 +798,14 @@ func (w *geminiStreamWriter) close() {
 	}
 }
 
-// delta 输出一段正文或思考增量
-func (w *geminiStreamWriter) delta(responseID string, model string, event gemini.Event) error {
+// delta 输出第 index 个候选的一段正文或思考增量
+func (w *geminiStreamWriter) delta(responseID string, model string, index int, event gemini.Event) error {
 	part := gin.H{"text": event.Delta}
 	if event.Kind == gemini.EventThought {
 		part["thought"] = true
 	}
 	return w.write(gin.H{
-		"candidates": []gin.H{{"content": gin.H{"role": "model", "parts": []gin.H{part}}, "index": 0}},
+		"candidates": []gin.H{{"content": gin.H{"role": "model", "parts": []gin.H{part}}, "index": index}},
 		"responseId": responseID, "modelVersion": model,
 	})
 }
@@ -768,7 +880,7 @@ func mimeTypeToExt(mimeType string) string {
 		return ".gif"
 	case "application/pdf":
 		return ".pdf"
-	case "audio/wav", "audio/x-wav":
+	case "audio/wav", "audio/x-wav", "audio/wave":
 		return ".wav"
 	case "audio/mpeg", "audio/mp3":
 		return ".mp3"
@@ -776,9 +888,11 @@ func mimeTypeToExt(mimeType string) string {
 		return ".ogg"
 	case "audio/flac":
 		return ".flac"
+	case "audio/mp4", "audio/m4a", "audio/x-m4a":
+		return ".m4a"
 	case "video/mp4":
 		return ".mp4"
-	case "video/webm":
+	case "audio/webm", "video/webm":
 		return ".webm"
 	case "video/quicktime":
 		return ".mov"

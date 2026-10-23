@@ -42,6 +42,7 @@ type AdminEvent =
   | { type: 'cooldowns'; data: Cooldown[] }
   | { type: 'requests'; data: RequestInfo[] }
   | { type: 'recent'; data: RequestInfo[] }
+  | { type: 'logs'; data: LogEntry[] }
   | { type: 'log'; data: LogEntry }
 
 // upsertRunning 按请求状态把一条请求记录并入或移出进行中列表
@@ -71,6 +72,9 @@ function apply(client: QueryClient, event: AdminEvent) {
     case 'recent':
       client.setQueryData(recentKey, event.data)
       void client.invalidateQueries({ queryKey: ['usage'] })
+      break
+    case 'logs':
+      client.setQueryData(logsKey, event.data)
       break
     case 'log': {
       const entry = event.data

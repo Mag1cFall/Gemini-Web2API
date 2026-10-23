@@ -149,13 +149,8 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No image model is available")
 		return
 	}
-	knownModel, readyModel := modelStatus(pool, request.Model)
-	if !knownModel {
-		writeOpenAIError(c, http.StatusNotFound, "model_not_found", fmt.Sprintf("model %q is unavailable", request.Model))
-		return
-	}
-	if !readyModel {
-		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+	if err := awaitModel(c, pool, request.Model); err != nil {
+		writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 		return
 	}
 	if request.N == 0 {
@@ -179,7 +174,7 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 	for index := 0; index < request.N && len(images) < request.N; index++ {
 		responseID := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), index)
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, "", false, request.Model, responseID, generationMedia{requireImage: true, aspectRatio: request.Size}, gemini.ThinkingLow, ToolBridge{},
+			c.Request.Context(), pool, "", sessionContinue, request.Model, responseID, generationMedia{requireImage: true, aspectRatio: request.Size}, gemini.ThinkingLow, ToolBridge{},
 			func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 				files := make([]gemini.FileData, 0, len(inputs))
 				for _, input := range inputs {

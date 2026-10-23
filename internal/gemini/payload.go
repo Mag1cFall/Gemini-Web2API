@@ -12,18 +12,21 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 	if len(request.Files) > 0 {
 		values := make([]any, 0, len(request.Files))
 		for _, file := range request.Files {
-			values = append(values, []any{[]any{file.URL, 1, nil, file.MimeType, file.FileID}, file.FileName, nil, nil, nil, nil, nil, nil, []any{0}})
+			values = append(values, []any{[]any{file.URL, attachmentType(file.MimeType, file.FileName), nil, file.MimeType, file.FileID}, file.FileName, nil, nil, nil, nil, nil, nil, []any{0}})
 		}
 		attachments = values
 	}
 	message := []any{request.Prompt, 0, nil, attachments, nil, nil, 0}
 	switch {
 	case request.Feature == FeatureVideo:
-		orientation := 1
+		orientation, duration := 1, any(nil)
 		if request.tools != nil && request.tools.aspectOrder > 0 {
 			orientation = request.tools.aspectOrder
 		}
-		message = append(message, nil, nil, []any{nil, nil, nil, nil, nil, nil, []any{[]any{nil, nil, nil, orientation}}})
+		if request.tools != nil && request.tools.durationOrder > 0 {
+			duration = request.tools.durationOrder
+		}
+		message = append(message, nil, nil, []any{nil, nil, nil, nil, nil, nil, []any{[]any{nil, nil, duration, orientation}}})
 	case request.Feature == FeatureDeepResearch:
 		message = append(message, nil, nil, []any{nil, nil, nil, nil, nil, nil, []any{}})
 	case request.tools != nil && request.tools.aspectRatio != "":
@@ -64,10 +67,6 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 	}
 	inner[49] = int(request.Feature)
 	if request.tools != nil {
-		selected := make([]any, 0, len(request.tools.options))
-		for _, option := range request.tools.options {
-			selected = append(selected, []any{option})
-		}
 		inner[54] = []any{}
 		if len(request.tools.sources) > 0 {
 			sources := make([]any, 0, len(request.tools.sources))
@@ -76,7 +75,10 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 			}
 			inner[54] = []any{[]any{[]any{[]any{sources}}}}
 		}
-		inner[55] = selected
+		inner[55] = []any{}
+		if len(request.tools.options) > 0 {
+			inner[55] = []any{request.tools.options}
+		}
 	}
 	inner[53] = 0
 	inner[59] = requestID

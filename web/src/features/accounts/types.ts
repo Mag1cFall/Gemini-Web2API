@@ -32,6 +32,7 @@ export interface ModelCooldown {
 // Account 对应 GET /api/accounts 的 account，可选字段为空时后端省略
 export interface Account {
   account_id: string
+  email?: string
   state: AccountState
   enabled: boolean
   source: AccountSource

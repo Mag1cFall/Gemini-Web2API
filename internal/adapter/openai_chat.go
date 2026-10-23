@@ -17,24 +17,33 @@ import (
 
 // ChatMessage 表示 OpenAI Chat 消息
 type ChatMessage struct {
-	Role                string            `json:"role"`
-	Content             json.RawMessage   `json:"content"`
-	Name                string            `json:"name,omitempty"`
-	ToolCallID          string            `json:"tool_call_id,omitempty"`
-	ToolCalls           []OpenAIToolCall  `json:"tool_calls,omitempty"`
-	ReasoningContent    json.RawMessage   `json:"reasoning_content,omitempty"`
-	TranscriptReasoning json.RawMessage   `json:"-"`
-	TranscriptItems     []json.RawMessage `json:"-"`
+	Role            string            `json:"role"`
+	Content         json.RawMessage   `json:"content"`
+	Name            string            `json:"name,omitempty"`
+	ToolCallID      string            `json:"tool_call_id,omitempty"`
+	ToolCalls       []OpenAIToolCall  `json:"tool_calls,omitempty"`
+	FunctionCall    *OpenAIFunction   `json:"function_call,omitempty"`
+	TranscriptItems []json.RawMessage `json:"-"`
 }
 
 // OpenAIToolCall 表示 OpenAI 函数调用
 type OpenAIToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
+	ID       string            `json:"id"`
+	Type     string            `json:"type"`
+	Function OpenAIFunction    `json:"function"`
+	Custom   *OpenAICustomCall `json:"custom,omitempty"`
+}
+
+// OpenAICustomCall 表示 custom 工具调用的名称与原始输入
+type OpenAICustomCall struct {
+	Name  string `json:"name"`
+	Input string `json:"input"`
+}
+
+// OpenAIFunction 表示函数调用的名称与参数，也是旧式 function_call 的结构
+type OpenAIFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // OpenAITool 表示 OpenAI 函数定义
@@ -45,6 +54,11 @@ type OpenAITool struct {
 		Description string          `json:"description,omitempty"`
 		Parameters  json.RawMessage `json:"parameters"`
 	} `json:"function"`
+	Custom struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Format      json.RawMessage `json:"format,omitempty"`
+	} `json:"custom"`
 }
 
 // ChatRequest 表示 OpenAI Chat 请求
@@ -55,9 +69,12 @@ type ChatRequest struct {
 	Model               string             `json:"model"`
 	Tools               []OpenAITool       `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage    `json:"tool_choice,omitempty"`
+	Functions           json.RawMessage    `json:"functions,omitempty"`
+	FunctionCall        json.RawMessage    `json:"function_call,omitempty"`
 	ResponseFormat      json.RawMessage    `json:"response_format,omitempty"`
 	ReasoningEffort     string             `json:"reasoning_effort,omitempty"`
 	Reasoning           json.RawMessage    `json:"reasoning,omitempty"`
+	IncludeReasoning    *bool              `json:"include_reasoning,omitempty"`
 	ConversationID      string             `json:"conversation_id,omitempty"`
 	PreviousResponseID  string             `json:"previous_response_id,omitempty"`
 	MaxTokens           *int               `json:"max_tokens,omitempty"`
@@ -71,6 +88,22 @@ type ChatRequest struct {
 	N                   *int               `json:"n,omitempty"`
 	WebSearchOptions    json.RawMessage    `json:"web_search_options,omitempty"`
 	Audio               *ChatAudioOptions  `json:"audio,omitempty"`
+	ExtraBody           ChatExtraBody      `json:"extra_body,omitempty"`
+	legacyFunctions     bool
+}
+
+// ChatExtraBody 表示 Gemini OpenAI 兼容层的 extra_body 扩展
+type ChatExtraBody struct {
+	Google struct {
+		ThinkingConfig *ChatThinkingConfig `json:"thinking_config"`
+	} `json:"google"`
+}
+
+// ChatThinkingConfig 表示 extra_body.google.thinking_config
+type ChatThinkingConfig struct {
+	ThinkingLevel   string `json:"thinking_level"`
+	ThinkingBudget  *int   `json:"thinking_budget"`
+	IncludeThoughts *bool  `json:"include_thoughts"`
 }
 
 // ChatAudioOptions 表示 OpenAI Chat 的音频输出参数
@@ -93,6 +126,16 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
+		suffix, err := takeModelSuffix(&request.Model)
+		if err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if err := request.mergeLegacyFunctions(); err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		request.customCallsAsFunctions()
 		logging.FromContext(c.Request.Context()).Begin("chat", request.Model, request.Stream, len(request.Messages), len(request.Tools))
 		bindScope(c, pool, request.Model)
 		if request.Model == "" || len(request.Messages) == 0 {
@@ -103,13 +146,8 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		knownModel, readyModel := modelStatus(pool, request.Model)
-		if !knownModel {
-			writeOpenAIError(c, http.StatusNotFound, "model_not_found", fmt.Sprintf("model %q is unavailable", request.Model))
-			return
-		}
-		if !readyModel {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
+		if err := awaitModel(c, pool, request.Model); err != nil {
+			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
 		}
 		thinkingLevel, includeThoughts, err := openAIChatThinkingSettings(request)
@@ -117,6 +155,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
+		thinkingLevel, includeThoughts = suffix.apply(thinkingLevel, includeThoughts)
 
 		unsupported := unsupportedChatParameters(request)
 		setUnsupportedParameters(c, unsupported)
@@ -132,17 +171,17 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			turns = chatHistoryTurns(request.Messages)
 			sessionKey = continuedHistoryKey("", bridge, turns)
 		}
-		allowNewSession := request.PreviousResponseID == ""
+		policy := previousResponsePolicy(request.PreviousResponseID)
 		responseID := fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
 
 		generate := func(choice int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
-			key, allowNew := sessionKey, allowNewSession
+			key, keyPolicy := sessionKey, policy
 			if choice > 0 {
-				key, allowNew = "", true
+				key, keyPolicy = "", sessionCreate
 			}
 			result, accountID, err := runGeneration(
-				c.Request.Context(), pool, key, allowNew, request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
+				c.Request.Context(), pool, key, keyPolicy, request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildOpenAIChatPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(key)))
 				},
@@ -155,7 +194,8 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 
 		if request.Stream {
 			setSSEHeaders(c)
-			defer startKeepalive(c, openAIKeepalive)()
+			stream, stop := holdStream(c, openAIKeepalive)
+			defer stop()
 			streamModel := config.MapModel(request.Model)
 			for choice := range n {
 				roleSent := false
@@ -172,6 +212,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				projection := newStreamProjection(bridge, includeThoughts)
 				result, err := generate(choice,
 					func(event gemini.Event) error {
+						stream.release()
 						return projection.project(event, func(event gemini.Event) error {
 							if err := writeRole(); err != nil {
 								return err
@@ -188,7 +229,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					projection.hasVisibleOutput,
 				)
 				if err != nil {
-					if !projection.errorSent {
+					if stream.reject() {
+						writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
+					} else if !projection.errorSent {
 						_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
 					}
 					return
@@ -307,12 +350,6 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 		files = append(files, attachments...)
 		role := transcriptRole(message.Role)
 		record := map[string]interface{}{"role": role, "content": content}
-		if len(message.ReasoningContent) > 0 && string(message.ReasoningContent) != "null" {
-			record["reasoning_content"] = message.ReasoningContent
-		}
-		if len(message.TranscriptReasoning) > 0 {
-			record["reasoning"] = message.TranscriptReasoning
-		}
 		if len(message.TranscriptItems) > 0 {
 			record["events"] = message.TranscriptItems
 		}
@@ -321,6 +358,9 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 		}
 		if message.ToolCallID != "" {
 			record["tool_call_id"] = message.ToolCallID
+		}
+		if role == "tool" && message.Name != "" {
+			record["name"] = message.Name
 		}
 		records = append(records, record)
 	}
@@ -362,9 +402,16 @@ func buildOpenAIResponse(responseID string, created int64, result generationResu
 		message["annotations"] = annotations
 	}
 	if len(calls) > 0 {
-		message["content"] = nil
-		message["tool_calls"] = openAIToolCallResponses(calls)
+		if content == "" {
+			message["content"] = nil
+		}
+		message["tool_calls"] = openAIToolCallResponses(calls, bridge)
 		finishReason = "tool_calls"
+		if bridge.LegacyFunctions {
+			delete(message, "tool_calls")
+			message["function_call"] = gin.H{"name": calls[0].Name, "arguments": string(calls[0].Arguments)}
+			finishReason = "function_call"
+		}
 	}
 	response := gin.H{
 		"id": responseID, "object": "chat.completion", "created": created, "model": result.Model,
@@ -401,11 +448,19 @@ func writeProjectedOpenAI(w io.Writer, id string, created int64, model string, c
 				return err
 			}
 		}
+		if bridge.LegacyFunctions && len(calls) > 0 {
+			calls = calls[:1]
+		}
 		for index, call := range calls {
-			delta := gin.H{"tool_calls": []gin.H{{
-				"index": index, "id": call.ID, "type": "function",
-				"function": gin.H{"name": call.Name, "arguments": string(call.Arguments)},
-			}}}
+			if bridge.LegacyFunctions {
+				if err := writeOpenAIDelta(w, id, created, model, choice, gin.H{"function_call": gin.H{"name": call.Name, "arguments": string(call.Arguments)}}); err != nil {
+					return err
+				}
+				continue
+			}
+			item := openAIToolCallItem(call, bridge)
+			item["index"] = index
+			delta := gin.H{"tool_calls": []gin.H{item}}
 			if err := writeOpenAIDelta(w, id, created, model, choice, delta); err != nil {
 				return err
 			}
@@ -466,6 +521,9 @@ func writeOpenAIFinish(w io.Writer, id string, created int64, model string, choi
 	_, calls, _ := bridge.Parse(primary.Text)
 	if len(calls) > 0 {
 		finishReason = "tool_calls"
+		if bridge.LegacyFunctions {
+			finishReason = "function_call"
+		}
 	}
 	chunk := gin.H{
 		"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
@@ -512,14 +570,61 @@ func setSSEHeaders(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 }
 
+// mergeLegacyFunctions 把历史中的旧式 function_call 与 function 角色消息改写为工具调用与工具消息，再把本轮的 functions 与 function_call 并入 tools 与 tool_choice
+func (request *ChatRequest) mergeLegacyFunctions() error {
+	for index, message := range request.Messages {
+		if message.FunctionCall != nil {
+			request.Messages[index].ToolCalls = append(message.ToolCalls, OpenAIToolCall{Type: "function", Function: *message.FunctionCall})
+		}
+		if message.Role == "function" {
+			request.Messages[index].Role = "tool"
+		}
+	}
+	if len(request.Functions) == 0 || string(request.Functions) == "null" {
+		return nil
+	}
+	var functions []struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	}
+	if err := json.Unmarshal(request.Functions, &functions); err != nil {
+		return fmt.Errorf("functions 无效: %w", err)
+	}
+	for _, function := range functions {
+		tool := OpenAITool{Type: "function"}
+		tool.Function.Name, tool.Function.Description, tool.Function.Parameters = function.Name, function.Description, function.Parameters
+		request.Tools = append(request.Tools, tool)
+	}
+	if len(request.ToolChoice) == 0 && len(request.FunctionCall) > 0 {
+		request.ToolChoice = request.FunctionCall
+		var call struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(request.FunctionCall, &call) == nil && call.Name != "" {
+			request.ToolChoice, _ = json.Marshal(gin.H{"type": "function", "function": gin.H{"name": call.Name}})
+		}
+	}
+	request.legacyFunctions = true
+	return nil
+}
+
 func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
-	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice)}
+	stop, err := stopSequences(request.Stop)
+	if err != nil {
+		return ToolBridge{}, err
+	}
+	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), LegacyFunctions: request.legacyFunctions, Stop: stop}
 	if len(request.WebSearchOptions) > 0 && string(request.WebSearchOptions) != "null" {
 		bridge.WebSearch = true
 	}
 	for _, tool := range request.Tools {
+		if tool.Type == "custom" && tool.Custom.Name != "" {
+			bridge.Definitions = append(bridge.Definitions, customToolDefinition(ResponsesTool{Name: tool.Custom.Name, Description: tool.Custom.Description, Format: chatCustomFormat(tool.Custom.Format)}, ""))
+			continue
+		}
 		if tool.Type != "function" || tool.Function.Name == "" {
-			return ToolBridge{}, fmt.Errorf("仅支持 function 工具")
+			return ToolBridge{}, fmt.Errorf("仅支持 function 与 custom 工具")
 		}
 		parameters := tool.Function.Parameters
 		if len(parameters) == 0 {
@@ -529,11 +634,15 @@ func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 			Name: tool.Function.Name, Description: tool.Function.Description, Parameters: parameters,
 		})
 	}
+	if err := restrictAllowedTools(&bridge, request.ToolChoice); err != nil {
+		return ToolBridge{}, err
+	}
 	if len(request.ResponseFormat) > 0 && string(request.ResponseFormat) != "null" {
 		var responseFormat struct {
 			Type       string `json:"type"`
 			JSONSchema struct {
 				Schema json.RawMessage `json:"schema"`
+				Strict *bool           `json:"strict"`
 			} `json:"json_schema"`
 		}
 		if err := json.Unmarshal(request.ResponseFormat, &responseFormat); err != nil {
@@ -547,6 +656,7 @@ func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 			if len(bridge.JSONSchema) == 0 || string(bridge.JSONSchema) == "null" {
 				return ToolBridge{}, fmt.Errorf("response_format.json_schema.schema 不能为空")
 			}
+			bridge.SchemaUnchecked = responseFormat.JSONSchema.Strict == nil || !*responseFormat.JSONSchema.Strict
 		case "text", "":
 		default:
 			return ToolBridge{}, fmt.Errorf("不支持的 response_format.type %q", responseFormat.Type)
@@ -565,9 +675,15 @@ func openAIToolChoice(raw json.RawMessage) string {
 		Function struct {
 			Name string `json:"name"`
 		} `json:"function"`
+		Custom struct {
+			Name string `json:"name"`
+		} `json:"custom"`
 	}
 	if json.Unmarshal(raw, &object) == nil && object.Function.Name != "" {
 		return object.Function.Name
+	}
+	if object.Custom.Name != "" {
+		return object.Custom.Name
 	}
 	var flat struct {
 		Type string `json:"type"`
@@ -607,9 +723,6 @@ func unsupportedChatParameters(request ChatRequest) []string {
 	if request.TopP != nil {
 		fields = append(fields, "top_p")
 	}
-	if len(request.Stop) > 0 && string(request.Stop) != "null" {
-		fields = append(fields, "stop")
-	}
 	if request.PresencePenalty != nil {
 		fields = append(fields, "presence_penalty")
 	}
@@ -622,15 +735,48 @@ func unsupportedChatParameters(request ChatRequest) []string {
 	return fields
 }
 
-func openAIToolCallResponses(calls []ToolCall) []gin.H {
+func openAIToolCallResponses(calls []ToolCall, bridge ToolBridge) []gin.H {
 	result := make([]gin.H, 0, len(calls))
 	for _, call := range calls {
-		result = append(result, gin.H{
-			"id": call.ID, "type": "function",
-			"function": gin.H{"name": call.Name, "arguments": string(call.Arguments)},
-		})
+		result = append(result, openAIToolCallItem(call, bridge))
 	}
 	return result
+}
+
+// openAIToolCallItem 按声明的工具类型把工具调用投影为 Chat 的 tool_calls 项
+func openAIToolCallItem(call ToolCall, bridge ToolBridge) gin.H {
+	if bridge.tool(call.Name).Kind == "custom" {
+		return gin.H{"id": call.ID, "type": "custom", "custom": gin.H{"name": call.Name, "input": customToolInput(call.Arguments)}}
+	}
+	return gin.H{"id": call.ID, "type": "function", "function": gin.H{"name": call.Name, "arguments": string(call.Arguments)}}
+}
+
+// customCallsAsFunctions 把历史中的 custom 工具调用写成参数为 {"input"} 的函数调用，与 custom 工具的函数声明一致
+func (request *ChatRequest) customCallsAsFunctions() {
+	for _, message := range request.Messages {
+		for index, call := range message.ToolCalls {
+			if call.Custom != nil {
+				arguments, _ := json.Marshal(map[string]string{"input": call.Custom.Input})
+				message.ToolCalls[index] = OpenAIToolCall{ID: call.ID, Type: "function", Function: OpenAIFunction{Name: call.Custom.Name, Arguments: string(arguments)}}
+			}
+		}
+	}
+}
+
+// chatCustomFormat 把 Chat custom 工具 format 中嵌套的 grammar 展开为 Responses 的写法
+func chatCustomFormat(raw json.RawMessage) json.RawMessage {
+	var format struct {
+		Type    string `json:"type"`
+		Grammar struct {
+			Syntax     string `json:"syntax"`
+			Definition string `json:"definition"`
+		} `json:"grammar"`
+	}
+	if json.Unmarshal(raw, &format) != nil || format.Type != "grammar" {
+		return raw
+	}
+	flat, _ := json.Marshal(map[string]string{"type": "grammar", "syntax": format.Grammar.Syntax, "definition": format.Grammar.Definition})
+	return flat
 }
 
 func openAIUsage(usage *gemini.Usage) gin.H {

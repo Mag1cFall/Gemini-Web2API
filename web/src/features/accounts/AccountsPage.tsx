@@ -20,7 +20,7 @@ import type { Account } from '@/features/accounts/types'
 import { stateTone } from '@/features/accounts/usage'
 import { api } from '@/lib/api'
 import { formatDateTime, formatPercent } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
 
 // batchLimit 是批量操作同时进行的请求数
@@ -150,7 +150,9 @@ export function AccountsPage() {
               className="flex min-h-[60px] flex-wrap items-center gap-2 border-b border-border bg-primary-soft px-5 py-3"
             >
               <span className="mr-auto text-sm font-medium tabular-nums">
-                {fill(m.selectedCount, { count: selected.length })}
+                {fill(plural(locale, selected.length, m.selectedCountOne, m.selectedCount), {
+                  count: selected.length,
+                })}
               </span>
               <Button
                 size="sm"
@@ -253,7 +255,9 @@ export function AccountsPage() {
                     <input
                       type="checkbox"
                       className="size-4 align-middle accent-primary"
-                      aria-label={fill(m.selectAccount, { id: account.account_id })}
+                      aria-label={fill(m.selectAccount, {
+                        id: account.email ?? account.account_id,
+                      })}
                       checked={selection.has(account.account_id)}
                       onChange={() => {
                         toggle(account.account_id)
@@ -263,9 +267,10 @@ export function AccountsPage() {
                   <Td className="max-w-cell">
                     <Link
                       to={'/accounts/' + encodeURIComponent(account.account_id)}
-                      className="truncate font-medium text-primary"
+                      title={account.email ?? account.account_id}
+                      className="block truncate font-medium text-primary"
                     >
-                      {account.account_id}
+                      {account.email ?? account.account_id}
                     </Link>
                   </Td>
                   <Td>
@@ -298,7 +303,9 @@ export function AccountsPage() {
       )}
       {proxyOpen && (
         <ProxyDialog
-          title={fill(m.batchProxyTitle, { count: selected.length })}
+          title={fill(plural(locale, selected.length, m.batchProxyTitleOne, m.batchProxyTitle), {
+            count: selected.length,
+          })}
           initial=""
           pending={running === 'proxy'}
           onSave={(proxy) => {

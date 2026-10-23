@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { CopyButton } from '@/components/ui/copy-button'
+import { useAccountLabel } from '@/features/accounts/queries'
 import { bodyMessages } from '@/features/requests/messages'
 import { useRequestBody } from '@/features/requests/queries'
 import type { Attempt } from '@/features/requests/types'
@@ -46,6 +47,7 @@ export function DetailSection({ title, children }: { title: string; children: Re
 // AttemptList 是失败的上游尝试时间线，empty 为没有失败尝试时的说明
 export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: string }) {
   const { locale } = useI18n()
+  const accountLabel = useAccountLabel()
   if (attempts.length === 0) return <p className="text-sm text-foreground-muted">{empty}</p>
   return (
     <ol className="flex flex-col gap-2 border-l border-border pl-4">
@@ -56,7 +58,7 @@ export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: s
             className="absolute top-[7px] -left-[20px] size-2 rounded-full bg-error"
           />
           <div className="flex flex-wrap gap-x-3">
-            <span>{attempt.account || '—'}</span>
+            <span>{attempt.account ? accountLabel(attempt.account) : '—'}</span>
             <span className="text-foreground-muted tabular-nums">
               {attempt.status > 0 ? 'HTTP ' + String(attempt.status) : '—'}
             </span>
