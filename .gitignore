@@ -1,5 +1,6 @@
 # Binaries and executables
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib

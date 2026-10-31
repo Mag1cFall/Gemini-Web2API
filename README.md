@@ -59,7 +59,7 @@
 
 - 管理端在桌面窗口中打开，窗口使用系统的 WebView2 运行时；关闭窗口后留在托盘，托盘菜单可复制 API 地址、设置开机启动
 - 再次双击 `gemini-web2api.exe` 唤回已运行的窗口
-- 账号在管理端的“导入账号”页从本机 Chrome、Cookie 或远程配对导入
+- 账号在管理端的“导入账号”页从本机浏览器（Chrome、Brave、Edge、Firefox）、Cookie 或远程配对导入
 - `.env`、`auth/` 与 `data/` 都在 `gemini-web2api.exe` 所在目录
 
 在 cmd 或 PowerShell 中运行命令时写作 `cmd /c start /wait gemini-web2api.exe <参数>`，命令行等程序结束后返回：
@@ -80,7 +80,7 @@ cmd /c start /wait gemini-web2api.exe setup --email "name@example.com"
 
 - 桌面版都是便携包：macOS 解压后打开 `Gemini-Web2API.app`；Linux 解压后运行 `gemini-web2api`，需要系统的 GTK 4 与 WebKitGTK 6.0
 - 桌面版在窗口中打开管理端，关闭窗口后留在托盘；托盘菜单可复制 API 地址、设置开机启动
-- 账号在管理端的“导入账号”页从本机 Chrome、Cookie 或远程配对导入
+- 账号在管理端的“导入账号”页从本机浏览器（Chrome、Brave、Edge、Firefox）、Cookie 或远程配对导入
 - `.env`、`auth/` 与 `data/` 都在上表的数据目录中
 
 ### 手动启动
@@ -99,12 +99,12 @@ Windows 首次使用时，直接运行交互式配置：
 .\gemini-web2api.exe setup
 ```
 
-`setup` 会扫描本机 Chrome 账号，并短暂启动独立临时 Chrome 进程读取 App-Bound 主密钥。现有 Chrome 窗口与 Profile 保持原状。
+`setup` 会扫描本机浏览器账号（支持通过 `--browser` 指定 `chrome`、`brave`、`edge`、`firefox`，未指定且 Chrome 未安装时自动检测其他浏览器）。现有浏览器窗口与 Profile 保持原状。
 
-也可以直接指定 Chrome 中已登录的账号；同一 Profile 登录了多个 Google 账号时，每个账号单独列出、单独导入：
+也可以直接指定已登录的账号；同一 Profile 登录了多个 Google 账号时，每个账号单独列出、单独导入：
 
 ```powershell
-.\gemini-web2api.exe setup --email "name@example.com"
+.\gemini-web2api.exe setup --browser brave --email "name@example.com"
 ```
 
 也可以粘贴浏览器请求头中 `Cookie` 字段的一行值；这种状态在现有 Cookie 有效期内使用，不具备 OAuth 续签能力：

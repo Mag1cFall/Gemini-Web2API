@@ -80,6 +80,10 @@ func New(ctx context.Context, pool *balancer.AccountPool, settings Settings) *Ma
 		proxies: proxypool.New(config.SplitList(settings.Proxy)), proxyCheck: make(chan struct{}, 1),
 	}
 	pool.OnTransportError(manager.requestProxyCheck)
+	pool.OnProxyBlocked(manager.MarkProxyBlocked)
+	pool.SetReconnector(func(ctx context.Context, accountID string) error {
+		return manager.Verify(accountID)
+	})
 	return manager
 }
 
@@ -106,6 +110,7 @@ func (m *Manager) Start(accounts []auth.LoadedAccount) {
 	m.launchGuest(wait.Done)
 	wait.Wait()
 	go m.watchProxies()
+	go m.watchQuotas()
 }
 
 // guestReloadInterval 是访客会话重读首页与模型目录的间隔，与账号的默认轮换间隔相同
@@ -214,10 +219,13 @@ func (m *Manager) Add(account auth.LoadedAccount) error {
 func (m *Manager) launch(account auth.LoadedAccount, firstDone func()) {
 	proxy, source := m.accountProxy(account)
 	account.ProxyURL = proxy
-	info := balancer.AccountInfo{Source: "cookie", Profile: account.Profile, Proxy: proxy, ProxySource: source}
-	if account.OAuth != nil {
-		info.Source = "chrome"
+	accountSource := "cookie"
+	if account.Browser != "" {
+		accountSource = account.Browser
+	} else if account.OAuth != nil {
+		accountSource = "chrome"
 	}
+	info := balancer.AccountInfo{Source: accountSource, Profile: account.Profile, Proxy: proxy, ProxySource: source}
 	if account.File != nil {
 		info.Path = account.File.Path()
 	}
@@ -237,6 +245,8 @@ func (m *Manager) launch(account auth.LoadedAccount, firstDone func()) {
 
 	if account.OAuth != nil {
 		account.Source.Refresh = newChromeRenewal(account).refresh
+	} else if account.Browser != "" && account.Profile != "" {
+		account.Source.Refresh = newBrowserRenewal(account).refresh
 	}
 	account.Source.Concurrency = settings.Concurrency
 	client, err := gemini.NewClient(account.Source, account.ProxyURL, settings.SaveHistory)
@@ -368,6 +378,64 @@ func catalogOf(client *gemini.Client) accountCatalog {
 		catalog.models = append(catalog.models, model.ID)
 	}
 	return catalog
+}
+
+// watchQuotas 定时检查各账号的用量重置时间，到期时自动向 Google 刷新用量
+func (m *Manager) watchQuotas() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			m.refreshDueQuotas()
+		}
+	}
+}
+
+// refreshDueQuotas 为配额重置时间已过或用量已耗尽的账号自动向 Google 刷新最新用量
+func (m *Manager) refreshDueQuotas() {
+	m.mu.Lock()
+	entries := make([]*managed, 0, len(m.accounts))
+	for _, entry := range m.accounts {
+		if entry != nil && !entry.account.Disabled {
+			entries = append(entries, entry)
+		}
+	}
+	m.mu.Unlock()
+
+	now := time.Now()
+	for _, entry := range entries {
+		client := m.pool.Client(entry.account.ID)
+		if client == nil {
+			continue
+		}
+		usage := client.CachedUsage()
+		shouldRefresh := false
+		if usage != nil {
+			if usage.Current != nil && usage.Current.UsedRatio >= 1 && now.After(usage.Current.ResetAt) {
+				shouldRefresh = true
+			}
+			if usage.Weekly != nil && usage.Weekly.UsedRatio >= 1 && now.After(usage.Weekly.ResetAt) {
+				shouldRefresh = true
+			}
+		}
+		if shouldRefresh {
+			accountID := entry.account.ID
+			go func(id string, c *gemini.Client) {
+				ctx, cancel := context.WithTimeout(m.ctx, 20*time.Second)
+				defer cancel()
+				newUsage, err := c.FetchUsage(ctx)
+				if err == nil {
+					logging.Info(id, "账号配额已到期自动刷新", "层级", newUsage.Tier)
+					if newUsage.Current != nil && newUsage.Current.UsedRatio < 1 {
+						_ = m.pool.ClearCooldown(id, "")
+					}
+				}
+			}(accountID, client)
+		}
+	}
 }
 
 // logCatalogChange 在账号层级或模型目录变化时写一行日志，列出新旧层级与增减的模型
@@ -509,6 +577,19 @@ func (m *Manager) Verify(accountID string) error {
 		return fmt.Errorf("账号 %q 已停用", accountID)
 	}
 	logging.Info(accountID, "账号重新验证")
+	if entry.account.OAuth != nil {
+		if cookies, err := newChromeRenewal(entry.account).refresh(m.ctx); err == nil && len(cookies) > 0 {
+			entry.account.Source.Cookies = cookies
+		}
+	} else if entry.account.Browser != "" && entry.account.Profile != "" {
+		if cookies, err := newBrowserRenewal(entry.account).refresh(m.ctx); err == nil && len(cookies) > 0 {
+			entry.account.Source.Cookies = cookies
+		}
+	} else if entry.account.File != nil {
+		if cookies := entry.account.File.Cookies(); len(cookies) > 0 {
+			entry.account.Source.Cookies = cookies
+		}
+	}
 	if err := m.restart(entry.account); err != nil {
 		return err
 	}
@@ -587,54 +668,131 @@ func (m *Manager) IDs() []string {
 	return append([]string(nil), m.order...)
 }
 
-// ChromeAccounts 列出本机 Chrome 中可导入的账号，并标出已导入的账号
-func (m *Manager) ChromeAccounts() ([]ChromeAccount, error) {
-	root, err := chromeauth.DefaultChromeRoot()
+// BrowserAccounts 列出本机指定浏览器中可导入的账号，并标出已导入的账号
+func (m *Manager) BrowserAccounts(browser string) ([]BrowserAccount, error) {
+	if browser == "" {
+		browser = chromeauth.BrowserChrome
+	}
+	root, err := chromeauth.DefaultBrowserRoot(browser)
 	if err != nil {
 		return nil, err
 	}
-	discovered, err := chromeauth.Discover(root)
+	discovered, err := chromeauth.DiscoverBrowser(browser, root)
 	if err != nil {
 		return nil, err
 	}
-	imported := make(map[string]bool)
-	for _, id := range m.IDs() {
-		imported[id] = true
+	importedEmails := make(map[string]bool)
+	importedIDs := make(map[string]bool)
+	importedNoEmailProfiles := make(map[string]bool)
+	m.mu.Lock()
+	for id, entry := range m.accounts {
+		importedIDs[strings.ToLower(id)] = true
+		var email string
+		if client := m.pool.Client(id); client != nil && client.Email() != "" {
+			email = client.Email()
+		}
+		if email != "" {
+			importedEmails[strings.ToLower(strings.TrimSpace(email))] = true
+			importedIDs[chromeauth.AccountID(email)] = true
+		}
+		if entry != nil {
+			b := entry.account.Browser
+			if b == "" && entry.account.OAuth != nil {
+				b = chromeauth.BrowserChrome
+			}
+			prof := strings.ToLower(entry.account.Profile)
+			if email == "" && b != "" && prof != "" {
+				importedNoEmailProfiles[b+"/"+prof] = true
+			}
+		}
 	}
-	result := make([]ChromeAccount, 0, len(discovered))
+	m.mu.Unlock()
+
+	result := make([]BrowserAccount, 0, len(discovered))
 	for _, account := range discovered {
-		result = append(result, ChromeAccount{Account: account, Imported: imported[chromeauth.AccountID(account.Email)]})
+		isImported := false
+		email := strings.ToLower(strings.TrimSpace(account.Email))
+		targetID := chromeauth.AccountID(email)
+
+		if email != "" && strings.Contains(email, "@") {
+			if importedEmails[email] || (targetID != "" && importedIDs[targetID]) {
+				isImported = true
+			}
+		} else {
+			profID := chromeauth.AccountID(account.Profile)
+			b := strings.ToLower(account.Browser)
+			if b == "" {
+				b = browser
+			}
+			profKey := b + "/" + strings.ToLower(account.Profile)
+			if (profID != "" && importedIDs[profID]) || importedNoEmailProfiles[profKey] {
+				isImported = true
+			}
+		}
+		result = append(result, BrowserAccount{Account: account, Imported: isImported})
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].Profile < result[j].Profile })
 	return result, nil
 }
 
-// ChromeAccount 是本机 Chrome 中的一个 Google 账号及其导入状态
-type ChromeAccount struct {
+// ChromeAccounts 列出本机 Chrome 中可导入的账号，并标出已导入的账号
+func (m *Manager) ChromeAccounts() ([]ChromeAccount, error) {
+	return m.BrowserAccounts(chromeauth.BrowserChrome)
+}
+
+// BrowserAccount 是本机浏览器中的一个 Google 账号及其导入状态
+type BrowserAccount struct {
 	chromeauth.Account
 	Imported bool `json:"imported"`
 }
 
-// ImportChrome 按邮箱从本机 Chrome 导入账号并启动
-func (m *Manager) ImportChrome(ctx context.Context, emails []string, proxy string) ([]string, error) {
-	root, err := chromeauth.DefaultChromeRoot()
+// ChromeAccount 是本机 Chrome 中的一个 Google 账号及其导入状态
+type ChromeAccount = BrowserAccount
+
+// ImportBrowser 按邮箱或 Profile 从本机指定浏览器导入账号并启动
+func (m *Manager) ImportBrowser(ctx context.Context, browser string, targets []string, proxy string) ([]string, []chromeauth.ImportFailure, error) {
+	if browser == "" {
+		browser = chromeauth.BrowserChrome
+	}
+	root, err := chromeauth.DefaultBrowserRoot(browser)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	settings := m.Settings()
-	results, _, err := chromeauth.Import(ctx, chromeauth.ImportOptions{ChromeRoot: root, Output: settings.AuthDir, Proxy: proxy, RequestProxy: m.importProxy(), Emails: emails})
-	if err != nil {
-		return nil, err
+	res, err := chromeauth.ImportBrowserWithDetails(ctx, chromeauth.BrowserImportOptions{
+		Browser:      browser,
+		BrowserRoot:  root,
+		Output:       settings.AuthDir,
+		Proxy:        proxy,
+		RequestProxy: m.importProxy(),
+		Targets:      targets,
+	})
+	if err != nil && len(res.Results) == 0 {
+		return nil, res.Failures, err
 	}
-	ids := make([]string, 0, len(results))
-	for _, result := range results {
-		id, err := m.addFile(result.Path)
-		if err != nil {
-			return ids, err
+	ids := make([]string, 0, len(res.Results))
+	for _, result := range res.Results {
+		id, addErr := m.addFile(result.Path)
+		if addErr != nil {
+			target := result.Email
+			if target == "" {
+				target = result.Profile
+			}
+			res.Failures = append(res.Failures, chromeauth.ImportFailure{Target: target, Error: addErr.Error()})
+			continue
 		}
 		ids = append(ids, id)
 	}
-	return ids, nil
+	if len(ids) == 0 && len(res.Failures) > 0 {
+		return nil, res.Failures, fmt.Errorf("所有所选账号均导入失败: %s", res.Failures[0].Error)
+	}
+	return ids, res.Failures, nil
+}
+
+// ImportChrome 按邮箱从本机 Chrome 导入账号并启动
+func (m *Manager) ImportChrome(ctx context.Context, emails []string, proxy string) ([]string, error) {
+	ids, _, err := m.ImportBrowser(ctx, chromeauth.BrowserChrome, emails, proxy)
+	return ids, err
 }
 
 // ImportCookie 从 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt 导入账号并启动

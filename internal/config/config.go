@@ -41,6 +41,8 @@ type Config struct {
 	PerAccountConcurrency int
 	// RoutingStrategy 为 round-robin 或 fill-first
 	RoutingStrategy string
+	// AccountFallback 为 true 时遇到模型用量上限或错误自动换号重试
+	AccountFallback bool
 	// AdminAuthEnabled 为 true 时管理端要求登录并接受远程访问
 	AdminAuthEnabled bool
 	AdminUsername    string
@@ -90,9 +92,15 @@ func Load() (Config, error) {
 	if cfg.PerAccountConcurrency, err = parsePositiveInt("PER_ACCOUNT_CONCURRENCY", 1); err != nil {
 		return Config{}, err
 	}
-	cfg.RoutingStrategy = strings.ToLower(envOrDefault("ROUTING_STRATEGY", "round-robin"))
+	cfg.RoutingStrategy = strings.ToLower(envOrDefault("ROUTING_STRATEGY", "fill-first"))
 	if cfg.RoutingStrategy != "round-robin" && cfg.RoutingStrategy != "fill-first" {
 		return Config{}, fmt.Errorf("ROUTING_STRATEGY 取 round-robin 或 fill-first")
+	}
+	cfg.AccountFallback = true
+	if strings.TrimSpace(os.Getenv("ACCOUNT_FALLBACK")) != "" {
+		if cfg.AccountFallback, err = parseBool("ACCOUNT_FALLBACK"); err != nil {
+			return Config{}, err
+		}
 	}
 	cfg.AdminUsername = envOrDefault("ADMIN_USERNAME", "admin")
 	cfg.AdminPassword = os.Getenv("ADMIN_PASSWORD")

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
@@ -97,15 +98,43 @@ func (h *handler) verifyAccount(c *gin.Context) {
 	h.respondAccount(c, id, h.Accounts.Verify(id))
 }
 
-// chromeProfile 是本机 Chrome 中可导入的账号
-type chromeProfile struct {
+// browserProfile 是本机浏览器中可导入的账号
+type browserProfile struct {
 	ID          string `json:"id"`
+	Browser     string `json:"browser,omitempty"`
 	Profile     string `json:"profile"`
 	DisplayName string `json:"display_name"`
 	Email       string `json:"email"`
+	AuthUser    int    `json:"auth_user,omitempty"`
 	Importable  bool   `json:"importable"`
 	Imported    bool   `json:"imported"`
 	Reason      string `json:"reason,omitempty"`
+}
+
+type chromeProfile = browserProfile
+
+func (h *handler) browserProfiles(c *gin.Context) {
+	browser := strings.ToLower(strings.TrimSpace(c.DefaultQuery("browser", c.DefaultQuery("type", "chrome"))))
+	if browser == "" {
+		browser = "chrome"
+	}
+	discovered, err := h.Accounts.BrowserAccounts(browser)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "browser_unavailable", err.Error())
+		return
+	}
+	profiles := make([]browserProfile, 0, len(discovered))
+	for _, account := range discovered {
+		id := chromeauth.AccountID(account.Email)
+		if id == "" {
+			id = chromeauth.AccountID(account.Profile)
+		}
+		profiles = append(profiles, browserProfile{
+			ID: id, Browser: browser, Profile: account.Profile, DisplayName: account.DisplayName,
+			Email: account.Email, AuthUser: account.AuthUser, Importable: account.Importable, Imported: account.Imported, Reason: account.Reason,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"browser": browser, "profiles": profiles})
 }
 
 func (h *handler) chromeProfiles(c *gin.Context) {
@@ -114,14 +143,48 @@ func (h *handler) chromeProfiles(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "chrome_unavailable", err.Error())
 		return
 	}
-	profiles := make([]chromeProfile, 0, len(discovered))
+	profiles := make([]browserProfile, 0, len(discovered))
 	for _, account := range discovered {
-		profiles = append(profiles, chromeProfile{
-			ID: chromeauth.AccountID(account.Email), Profile: account.Profile, DisplayName: account.DisplayName,
-			Email: account.Email, Importable: account.Importable, Imported: account.Imported, Reason: account.Reason,
+		id := chromeauth.AccountID(account.Email)
+		if id == "" {
+			id = chromeauth.AccountID(account.Profile)
+		}
+		profiles = append(profiles, browserProfile{
+			ID: id, Browser: "chrome", Profile: account.Profile, DisplayName: account.DisplayName,
+			Email: account.Email, AuthUser: account.AuthUser, Importable: account.Importable, Imported: account.Imported, Reason: account.Reason,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"profiles": profiles})
+}
+
+func (h *handler) importBrowser(c *gin.Context) {
+	var input struct {
+		Browser string   `json:"browser"`
+		Emails  []string `json:"emails"`
+		Targets []string `json:"targets"`
+		Proxy   string   `json:"proxy"`
+	}
+	if !bindJSON(c, &input) {
+		return
+	}
+	targets := input.Targets
+	if len(targets) == 0 {
+		targets = input.Emails
+	}
+	if len(targets) == 0 {
+		writeError(c, http.StatusBadRequest, "invalid_request", "targets 不能为空")
+		return
+	}
+	browser := strings.ToLower(strings.TrimSpace(input.Browser))
+	if browser == "" {
+		browser = "chrome"
+	}
+	ids, failures, err := h.Accounts.ImportBrowser(c.Request.Context(), browser, targets, trimmed(input.Proxy))
+	if err != nil && len(ids) == 0 {
+		writeError(c, http.StatusBadRequest, "account_import_failed", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"accounts": h.accountsByID(ids), "failures": failures})
 }
 
 func (h *handler) importChrome(c *gin.Context) {

@@ -60,7 +60,9 @@ type LoadedAccount struct {
 	ProxyURL string
 	Source   gemini.AccountSource
 	OAuth    *OAuthMaterial
-	// Profile 为 Chrome 导入的 Profile 目录名，Cookie Header 导入时为空
+	// Browser 为导入该账号的浏览器名称，如 chrome、brave、edge、firefox，Cookie Header 导入时为空
+	Browser string
+	// Profile 为浏览器导入的 Profile 目录名，Cookie Header 导入时为空
 	Profile  string
 	Disabled bool
 	File     *File
@@ -211,7 +213,7 @@ func (f *File) Account() LoadedAccount {
 	source.Save = f.SaveCookies
 	return LoadedAccount{
 		ID: source.ID, ProxyURL: proxyURL, Source: source,
-		OAuth: f.state.Metadata.OAuth, Profile: f.state.Metadata.Source.Profile,
+		OAuth: f.state.Metadata.OAuth, Browser: f.state.Metadata.Source.Browser, Profile: f.state.Metadata.Source.Profile,
 		Disabled: f.state.Metadata.Disabled, File: f,
 	}
 }
@@ -251,6 +253,13 @@ func (f *File) SetOAuth(material OAuthMaterial, profile string) error {
 	f.state.Metadata.OAuth = &material
 	f.state.Metadata.Source.Profile = profile
 	return f.writeLocked()
+}
+
+// Cookies 返回当前保存的 Cookie 副本
+func (f *File) Cookies() []gemini.Cookie {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return toGeminiCookies(f.state.Cookies)
 }
 
 // SaveCookies 更新 Cookie 并原子写回认证状态
@@ -305,6 +314,11 @@ func validateOAuthMaterial(material *OAuthMaterial) error {
 		return fmt.Errorf("OAuth 续签材料不完整")
 	}
 	return nil
+}
+
+// ToGeminiCookies 将 StateCookie 转换为协议客户端 Cookie
+func ToGeminiCookies(cookies []StateCookie) []gemini.Cookie {
+	return toGeminiCookies(cookies)
 }
 
 func toGeminiCookies(cookies []StateCookie) []gemini.Cookie {

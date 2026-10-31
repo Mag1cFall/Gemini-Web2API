@@ -93,6 +93,18 @@ func (c *Client) CachedUsage() *UsageInfo {
 	return c.usage.Load()
 }
 
+// SetUsageForTest 供测试设置用量快照
+func (c *Client) SetUsageForTest(usage *UsageInfo) {
+	c.usage.Store(usage)
+}
+
+// SetBootstrapForTest 供测试设置运行参数
+func (c *Client) SetBootstrapForTest(bootstrap *Bootstrap) {
+	c.bootstrapMu.Lock()
+	defer c.bootstrapMu.Unlock()
+	c.bootstrap = bootstrap
+}
+
 // AcquireRequest 占用账号的一个请求槽直到完整上游请求链结束，后台生成的轮询阶段让出
 func (c *Client) AcquireRequest(ctx context.Context) (func(), error) {
 	c.busy.Add(1)
@@ -505,7 +517,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		}
 	}
 	if err != nil {
-		if allowRefresh && !guard.Emitted() && isAuthenticationError(err) && c.refresh != nil {
+		if allowRefresh && !guard.Emitted() && IsAuthenticationError(err) && c.refresh != nil {
 			return c.restream(ctx, version, request, emit)
 		}
 		return err
@@ -963,6 +975,136 @@ func (c *Client) CloseIdleConnections() {
 	c.mediaClient.CloseIdleConnections()
 }
 
+// ProxyDiagnostic 是代理检测或诊断的完整详细结果
+type ProxyDiagnostic struct {
+	OK        bool   `json:"ok"`
+	Status    string `json:"status"` // "ok", "captcha_blocked", "rate_limited", "network_error", "timeout", "http_error", "invalid_format"
+	LatencyMS int64  `json:"latency_ms"`
+	Message   string `json:"message"`
+	Error     string `json:"error,omitempty"`
+}
+
+// isGoogleCaptchaRedirect 判断响应是否为 Google 人机验证（/sorry）重定向
+func isGoogleCaptchaRedirect(resp *http.Response) (bool, *url.URL) {
+	if resp == nil {
+		return false, nil
+	}
+	location, err := resp.Location()
+	if err != nil || location == nil {
+		return false, nil
+	}
+	host := strings.ToLower(location.Hostname())
+	isGoogle := host == "google.com" || strings.HasSuffix(host, ".google.com")
+	if isGoogle && strings.HasPrefix(location.Path, "/sorry") {
+		return true, location
+	}
+	return false, nil
+}
+
+// isGoogleLoginRedirect 判断响应是否为 Google 登录页重定向（会话失效，需重新登录）
+func isGoogleLoginRedirect(resp *http.Response) (bool, *url.URL) {
+	if resp == nil {
+		return false, nil
+	}
+	location, err := resp.Location()
+	if err != nil || location == nil {
+		return false, nil
+	}
+	host := strings.ToLower(location.Hostname())
+	isAccounts := host == "accounts.google.com" || strings.HasSuffix(host, ".accounts.google.com")
+	if isAccounts || strings.Contains(location.Path, "ServiceLogin") || strings.Contains(location.Path, "InteractiveLogin") {
+		return true, location
+	}
+	return false, nil
+}
+
+// DiagnoseProxy 经代理以浏览器导航请求 Gemini 官网首页，返回详细的连通性、延迟与风控诊断信息
+func DiagnoseProxy(ctx context.Context, proxyURL string) ProxyDiagnostic {
+	timeout := 15 * time.Second
+	testCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	httpClient, err := NewHTTPClient(15, strings.TrimSpace(proxyURL))
+	if err != nil {
+		return ProxyDiagnostic{
+			OK:      false,
+			Status:  "network_error",
+			Message: fmt.Sprintf("初始化代理客戶端失敗: %v", err),
+			Error:   err.Error(),
+		}
+	}
+	defer httpClient.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(testCtx, http.MethodGet, geminiOrigin+pathInit, nil)
+	if err != nil {
+		return ProxyDiagnostic{
+			OK:      false,
+			Status:  "network_error",
+			Message: fmt.Sprintf("建立請求失敗: %v", err),
+			Error:   err.Error(),
+		}
+	}
+	(&Client{language: defaultLanguage}).applyNavigationHeaders(req)
+	started := time.Now()
+	resp, err := httpClient.Do(req)
+	latencyMS := time.Since(started).Milliseconds()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || (testCtx.Err() != nil && errors.Is(testCtx.Err(), context.DeadlineExceeded)) {
+			return ProxyDiagnostic{
+				OK:        false,
+				Status:    "timeout",
+				LatencyMS: latencyMS,
+				Message:   "代理連線逾時（15 秒內未回應）",
+				Error:     err.Error(),
+			}
+		}
+		errMsg := err.Error()
+		msg := fmt.Sprintf("連線失敗: %v", err)
+		if strings.Contains(errMsg, "lookup") {
+			msg = fmt.Sprintf("DNS 解析失敗（請檢查域名或改用直接 IP）: %v", err)
+		} else if strings.Contains(errMsg, "socks") && (strings.Contains(errMsg, "auth") || strings.Contains(errMsg, "user/password")) {
+			msg = "SOCKS5 帳號密碼認證失敗"
+		} else if strings.Contains(errMsg, "connection refused") {
+			msg = "連線被拒絕（代理伺服器未運行或連接埠錯誤）"
+		}
+		return ProxyDiagnostic{
+			OK:        false,
+			Status:    "network_error",
+			LatencyMS: latencyMS,
+			Message:   msg,
+			Error:     errMsg,
+		}
+	}
+	defer resp.Body.Close()
+
+	if isCaptcha, _ := isGoogleCaptchaRedirect(resp); isCaptcha || resp.StatusCode == http.StatusTooManyRequests {
+		return ProxyDiagnostic{
+			OK:        false,
+			Status:    "captcha_blocked",
+			LatencyMS: latencyMS,
+			Message:   "被 Google 人機驗證攔截（HTTP 302 重定向到 sorry/index），該出口 IP 受限",
+			Error:     "Google 人機驗證頁攔截 (302 sorry/index)",
+		}
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		return ProxyDiagnostic{
+			OK:        true,
+			Status:    "ok",
+			LatencyMS: latencyMS,
+			Message:   fmt.Sprintf("連線正常！延遲 %d ms，Google Gemini 存取許可", latencyMS),
+		}
+	}
+
+	return ProxyDiagnostic{
+		OK:        false,
+		Status:    "http_error",
+		LatencyMS: latencyMS,
+		Message:   fmt.Sprintf("Google 首頁返回狀態碼 HTTP %d", resp.StatusCode),
+		Error:     resp.Status,
+	}
+}
+
 // ProbeProxy 经代理以浏览器导航请求官网首页，首页返回 200 时报告耗时
 func ProbeProxy(ctx context.Context, proxyURL string) (time.Duration, error) {
 	httpClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL)
@@ -987,9 +1129,9 @@ func ProbeProxy(ctx context.Context, proxyURL string) (time.Duration, error) {
 	return time.Since(started), nil
 }
 
-// renewable 判断错误是否续签后重试：会话失效的 401、403 与人机验证页拦截
+// renewable 判断错误是否续签后重试：会话失效（401、403、ErrSignedOut）与人机验证页拦截
 func renewable(err error) bool {
-	return isAuthenticationError(err) || errors.Is(err, ErrCaptcha)
+	return IsAuthenticationError(err) || errors.Is(err, ErrCaptcha)
 }
 
 // freeTier 报告账号是否为免费账号，免费账号的回答与未登录会话来自同一模型
@@ -1034,13 +1176,19 @@ var ErrCaptcha = errors.New("请求被 Google 人机验证页拦截")
 
 // responseStatusError 把非 200 响应转为协议错误，重定向到 google.com/sorry 时为人机验证拦截，按 429 处理；/u/N 页面重定向到 Gemini 其他页面时表示 Cookie 会话中没有第 N 个账号，按会话失效处理
 func responseStatusError(resp *http.Response, operation string) *ProtocolError {
-	location, err := resp.Location()
-	if err == nil && strings.HasSuffix(location.Hostname(), "google.com") && strings.HasPrefix(location.Path, "/sorry") {
+	if isCaptcha, location := isGoogleCaptchaRedirect(resp); isCaptcha {
 		return &ProtocolError{
 			HTTPStatus: http.StatusTooManyRequests, Code: http.StatusTooManyRequests, Retryable: true, Cause: ErrCaptcha,
 			Message: fmt.Sprintf("gemini %s 被 Google 人机验证页拦截（HTTP %d 重定向到 %s%s）", operation, resp.StatusCode, location.Host, location.Path),
 		}
 	}
+	if isLogin, location := isGoogleLoginRedirect(resp); isLogin {
+		return &ProtocolError{
+			HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,
+			Message: fmt.Sprintf("gemini %s 重定向到登录页（HTTP %d 重定向到 %s%s），账号需要重新登录", operation, resp.StatusCode, location.Host, location.Path),
+		}
+	}
+	location, err := resp.Location()
 	if err == nil && location.Hostname() == resp.Request.URL.Hostname() && strings.HasPrefix(resp.Request.URL.Path, "/u/") {
 		return &ProtocolError{
 			HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,

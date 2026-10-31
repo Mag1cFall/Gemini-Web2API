@@ -59,7 +59,7 @@ Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1
 
 - The console opens in a desktop window that uses the system WebView2 runtime; the app stays in the tray after the window closes, and the tray menu copies the API address and toggles launch at login
 - Double-clicking `gemini-web2api.exe` again brings back the running window
-- Import accounts from local Chrome, cookies, or remote pairing on the console's Import account page
+- Import accounts from local browsers (Chrome, Brave, Edge, Firefox), cookies, or remote pairing on the console's Import account page
 - `.env`, `auth/`, and `data/` all live in the folder containing `gemini-web2api.exe`
 
 To run commands from cmd or PowerShell, write them as `cmd /c start /wait gemini-web2api.exe <arguments>` so the prompt returns after the program exits:
@@ -80,7 +80,7 @@ Download the desktop build for your system from [Releases](https://github.com/Ma
 
 - Every desktop build is portable: on macOS, extract it and open `Gemini-Web2API.app`; on Linux, extract it and run `gemini-web2api`, which needs the system GTK 4 and WebKitGTK 6.0
 - The desktop app opens the console in a window and stays in the tray after the window closes; the tray menu copies the API address and toggles launch at login
-- Import accounts from local Chrome, cookies, or remote pairing on the console's Import account page
+- Import accounts from local browsers (Chrome, Brave, Edge, Firefox), cookies, or remote pairing on the console's Import account page
 - `.env`, `auth/`, and `data/` live in the data directory listed above
 
 ### Manual start
@@ -93,18 +93,18 @@ pnpm -C web build
 go build -tags nomsgpack -o gemini-web2api.exe ./cmd/gemini-web2api
 ```
 
-On Windows, import accounts already signed into the local Chrome installation:
+On Windows, import accounts already signed into a local browser:
 
 ```powershell
 .\gemini-web2api.exe setup
 ```
 
-`setup` scans local Chrome accounts and briefly starts an isolated temporary Chrome process to read the App-Bound master key. Existing Chrome windows and profiles remain untouched.
+`setup` scans local browser accounts (specify `--browser` with `chrome`, `brave`, `edge`, or `firefox`; automatically checks other browsers if Chrome is not installed). Existing browser windows and profiles remain untouched.
 
 An account can also be selected directly. When a profile is signed in to several Google accounts, each account is listed and imported separately:
 
 ```powershell
-.\gemini-web2api.exe setup --email "name@example.com"
+.\gemini-web2api.exe setup --browser brave --email "name@example.com"
 ```
 
 You can also paste the one-line value of a request's `Cookie` header. This state works while those cookies remain valid and cannot perform OAuth renewal:

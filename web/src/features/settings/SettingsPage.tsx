@@ -3,6 +3,7 @@ import { type ReactNode, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Callout } from '@/components/ui/callout'
 import { Input, Textarea } from '@/components/ui/input'
 import { NumberInput } from '@/components/ui/number-input'
@@ -29,6 +30,7 @@ const editableKeys = [
   'proxy_api_key',
   'proxy',
   'save_history',
+  'account_fallback',
   'model_mapping',
   'account_cooldown',
   'session_ttl',
@@ -268,6 +270,15 @@ export function SettingsPage() {
               }}
             />
           </SettingRow>
+          <SettingRow id="account_fallback" label={m.accountFallback} hint={m.accountFallbackHint}>
+            <SwitchControl
+              id="account_fallback"
+              checked={value.account_fallback}
+              onCheckedChange={(next) => {
+                set('account_fallback', next)
+              }}
+            />
+          </SettingRow>
           <SettingRow
             id="model_mapping"
             label={m.modelMapping}
@@ -311,19 +322,7 @@ export function SettingsPage() {
             />
           </SettingRow>
           <SettingRow id="routing_strategy" label={m.routingStrategy} hint={m.routingStrategyHint}>
-            <Select
-              id="routing_strategy"
-              label={m.routingStrategy}
-              value={value.routing_strategy}
-              className="w-[160px]"
-              onValueChange={(next) => {
-                set('routing_strategy', next)
-              }}
-              options={[
-                { value: 'round-robin', label: m.routingRoundRobin },
-                { value: 'fill-first', label: m.routingFillFirst },
-              ]}
-            />
+            <Badge tone="info">{m.routingFillFirst}</Badge>
           </SettingRow>
           <SettingRow id="account_cooldown" label={m.accountCooldown} hint={m.accountCooldownHint}>
             {duration('account_cooldown', '2m')}

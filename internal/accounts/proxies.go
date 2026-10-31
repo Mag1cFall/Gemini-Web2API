@@ -3,11 +3,13 @@ package accounts
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
@@ -140,4 +142,69 @@ func (m *Manager) relaunchGuest() {
 	case <-done:
 	case <-m.ctx.Done():
 	}
+}
+
+// MarkProxyBlocked 将遭 Google 人机验证拦截的代理移入冷却隔离，并将绑定在此代理上的账号与访客会话改绑
+func (m *Manager) MarkProxyBlocked(proxyURL string, err error) {
+	if m.proxies.Empty() || proxyURL == "" {
+		return
+	}
+	moved := m.proxies.MarkCooldown(proxyURL, 30*time.Minute, "遭遇 Google 人机验证拦截 (302)")
+	if len(moved) == 0 {
+		return
+	}
+	logging.Warn(logging.SourceService, "代理遭 Google 人机验证拦截，已自动隔离冷却并重新分配账号", "代理", maskProxy(proxyURL), "重分配账号数", len(moved))
+	go func() {
+		sem := make(chan struct{}, 3)
+		var wg sync.WaitGroup
+		for _, id := range moved {
+			accountID := id
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				if accountID == gemini.GuestID {
+					m.relaunchGuest()
+					return
+				}
+				m.rebind(accountID)
+			}()
+		}
+		wg.Wait()
+	}()
+}
+
+// TestProxy 测试指定代理的连通性、延迟以及是否被 Google 风控拦截
+func (m *Manager) TestProxy(ctx context.Context, proxy string) gemini.ProxyDiagnostic {
+	proxy = strings.TrimSpace(proxy)
+	targetProxy := proxy
+	if proxy == "" {
+		targetProxy = m.importProxy()
+	} else if proxy == proxypool.Direct {
+		targetProxy = ""
+	} else {
+		fixed, err := chromeauth.ValidateProxy(proxy)
+		if err != nil {
+			return gemini.ProxyDiagnostic{
+				OK:      false,
+				Status:  "invalid_format",
+				Message: err.Error(),
+				Error:   err.Error(),
+			}
+		}
+		targetProxy = fixed
+	}
+
+	diag := gemini.DiagnoseProxy(ctx, targetProxy)
+	if proxy == "" {
+		if targetProxy != "" {
+			diag.Message = fmt.Sprintf("（代理池分配 %s）%s", maskProxy(targetProxy), diag.Message)
+		} else {
+			diag.Message = fmt.Sprintf("（代理池為空，測試本機直連）%s", diag.Message)
+		}
+	}
+	return diag
 }

@@ -52,6 +52,15 @@ var featureTools = []featureTool{
 	{"gemini-guided-learning", "Guided Learning", "Gemini Web Guided Learning", FeatureLearning, []int{117}},
 }
 
+// NewModelCatalogForTest 供测试构造模型目录
+func NewModelCatalogForTest(models []Model) ModelCatalog {
+	catalog := ModelCatalog{models: models, lookup: make(map[string]int), defaultIndex: 0}
+	for i, m := range models {
+		catalog.lookup[strings.ToLower(m.ID)] = i
+	}
+	return catalog
+}
+
 // ModelCatalog 表示单个账号当前可用的模型目录
 type ModelCatalog struct {
 	models       []Model

@@ -6,9 +6,10 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
 )
 
-// ChromeMaterial 是本机 Chrome 中一个 Google 账号当前的续签材料
+// ChromeMaterial 是本机浏览器中一个 Google 账号当前的续签材料
 type ChromeMaterial struct {
-	Profile string
+	Browser    string
+	Profile    string
 	// Encrypted 是 token_service 中的 refresh token 密文
 	Encrypted  []byte
 	chromeRoot string
@@ -18,11 +19,19 @@ type ChromeMaterial struct {
 
 // FindChromeMaterial 在本机 Chrome 中查找 Gaia ID 对应的可导入账号，同一账号登录多个 Profile 时优先 profile
 func FindChromeMaterial(gaiaID string, profile string) (ChromeMaterial, error) {
-	root, err := DefaultChromeRoot()
+	return FindBrowserMaterial(BrowserChrome, gaiaID, profile)
+}
+
+// FindBrowserMaterial 在本机指定浏览器中查找 Gaia ID 对应的可导入账号，同一账号登录多个 Profile 时优先 profile
+func FindBrowserMaterial(browser string, gaiaID string, profile string) (ChromeMaterial, error) {
+	if browser == "" {
+		browser = BrowserChrome
+	}
+	root, err := DefaultBrowserRoot(browser)
 	if err != nil {
 		return ChromeMaterial{}, err
 	}
-	accounts, err := Discover(root)
+	accounts, err := DiscoverBrowser(browser, root)
 	if err != nil {
 		return ChromeMaterial{}, err
 	}
@@ -33,23 +42,23 @@ func FindChromeMaterial(gaiaID string, profile string) (ChromeMaterial, error) {
 		}
 	}
 	if selected == "" {
-		return ChromeMaterial{}, fmt.Errorf("Chrome 中没有可导入的同一账号")
+		return ChromeMaterial{}, fmt.Errorf("%s 中没有可导入的同一账号", browser)
 	}
 	_, encrypted, wrappedKey, err := readTokenService(root, selected, gaiaID)
 	if err != nil {
 		return ChromeMaterial{}, err
 	}
-	return ChromeMaterial{Profile: selected, Encrypted: encrypted, chromeRoot: root, gaiaID: gaiaID, wrappedKey: wrappedKey}, nil
+	return ChromeMaterial{Browser: browser, Profile: selected, Encrypted: encrypted, chromeRoot: root, gaiaID: gaiaID, wrappedKey: wrappedKey}, nil
 }
 
-// Decrypt 以 Chrome App-Bound 主密钥解密 refresh token，返回可保存的续签材料
+// Decrypt 以浏览器主密钥解密 refresh token，返回可保存的续签材料
 func (m ChromeMaterial) Decrypt() (auth.OAuthMaterial, error) {
-	masterKey, err := retrieveV20Key(m.chromeRoot)
+	masterKey, err := retrieveMasterKey(m.Browser, m.chromeRoot)
 	if err != nil {
 		return auth.OAuthMaterial{}, err
 	}
 	if len(masterKey) != 32 {
-		return auth.OAuthMaterial{}, fmt.Errorf("Chrome v20 主密钥长度异常")
+		return auth.OAuthMaterial{}, fmt.Errorf("%s 主密钥长度异常", m.Browser)
 	}
 	token, err := decryptV20Token(masterKey, m.Encrypted)
 	if err != nil {

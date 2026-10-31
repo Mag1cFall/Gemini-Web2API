@@ -3,6 +3,7 @@ export interface ServiceConfig {
   proxy_api_key: string
   proxy: string
   save_history: boolean
+  account_fallback: boolean
   model_mapping: string
   account_cooldown: string
   session_ttl: string
@@ -29,6 +30,7 @@ export type ConfigPatch = Partial<{
   proxy_api_key: string
   proxy: string
   save_history: boolean
+  account_fallback: boolean
   model_mapping: string
   account_cooldown: string
   session_ttl: string
@@ -55,4 +57,14 @@ export interface ProxyStatus {
   latency_ms: number
   error?: string
   accounts: string[]
+  cooldown_until?: string
+}
+
+// ProxyDiagnostic 对应 POST /api/proxies/test 的测试诊断响应
+export interface ProxyDiagnostic {
+  ok: boolean
+  status: 'ok' | 'captcha_blocked' | 'rate_limited' | 'network_error' | 'timeout' | 'http_error' | 'invalid_format'
+  latency_ms: number
+  message: string
+  error?: string
 }

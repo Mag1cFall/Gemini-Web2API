@@ -88,7 +88,7 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 			rule, otherwise = fmt.Sprintf("必须调用工具 %s", choice), ""
 		}
 
-		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行，结果会在下一条消息中返回。%s，输出一个 ```json 代码块，内容为 {\"tool_calls\":[{\"name\":\"工具名称\",\"arguments\":{}}]}，代码块之后不再输出内容；对话要求在调用工具前说明时，把说明写在代码块之前。参数中的字符串按 JSON 转义原样写出%s", available, choice, rule, otherwise))
+		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行，结果会在下一条消息中返回。%s，输出一个 ```json 代码块，内容为 {\"tool_calls\":[{\"name\":\"工具名称\",\"arguments\":{}}]}，代码块之后不再输出内容；对话要求在调用工具前说明时，把说明写在代码块之前，代码块必须另起一行输出。参数中的字符串按 JSON 转义原样写出%s", available, choice, rule, otherwise))
 	}
 
 	if len(b.Enum) > 0 {
@@ -180,26 +180,64 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 // toolEnvelopeStart 匹配工具调用信封的开头
 var toolEnvelopeStart = regexp.MustCompile(`\{\s*"tool_calls"\s*:`)
 
+// openingFenceRe 匹配信封前的代码块开头（支持紧贴文字、空格或换行）
+var openingFenceRe = regexp.MustCompile("```+[ \t]*[a-zA-Z0-9_-]*\\s*$")
+
+// trailingFenceRe 匹配末尾残留的多余代码块标记
+var trailingFenceRe = regexp.MustCompile("\\s*`{3,}[a-zA-Z0-9_-]*\\s*$")
+
+// leadingFenceRe 匹配开头残留的多余代码块标记
+var leadingFenceRe = regexp.MustCompile("^\\s*`{3,}[a-zA-Z0-9_-]*\\s*")
+
 // splitToolEnvelope 把回答分为信封前的文字、信封与信封后的文字，代码块标记不计入文字
 func splitToolEnvelope(text string) (string, string, string, bool) {
 	location := toolEnvelopeStart.FindStringIndex(text)
 	if location == nil {
 		return "", "", "", false
 	}
-	before, rest := strings.TrimSpace(text[:location[0]]), text[location[0]:]
-	if line := strings.LastIndex(before, "\n") + 1; strings.HasPrefix(before[line:], "```") {
+	rawBefore, rest := text[:location[0]], text[location[0]:]
+	before := strings.TrimSpace(rawBefore)
+
+	if match := openingFenceRe.FindStringIndex(rawBefore); match != nil {
+		before = strings.TrimSpace(rawBefore[:match[0]])
+	} else if line := strings.LastIndex(before, "\n") + 1; strings.HasPrefix(strings.TrimSpace(before[line:]), "```") {
 		before = strings.TrimSpace(before[:line])
-		if end := closingFence(rest); end >= 0 {
-			return before, rest[:end], strings.TrimSpace(rest[end+3:]), true
-		}
-		return before, rest, "", true
 	}
+	before = trailingFenceRe.ReplaceAllString(before, "")
+	before = strings.TrimSpace(before)
+
 	decoder := json.NewDecoder(strings.NewReader(rest))
 	var value json.RawMessage
-	if decoder.Decode(&value) != nil {
-		return before, rest, "", true
+	if decoder.Decode(&value) == nil {
+		offset := int(decoder.InputOffset())
+		envelope := strings.TrimSpace(rest[:offset])
+		after := rest[offset:]
+		if fenceLoc := strings.Index(after, "```"); fenceLoc >= 0 {
+			fenceEnd := fenceLoc + 3
+			for fenceEnd < len(after) && after[fenceEnd] == '`' {
+				fenceEnd++
+			}
+			after = strings.TrimSpace(after[fenceEnd:])
+		} else {
+			after = strings.TrimSpace(after)
+		}
+		after = leadingFenceRe.ReplaceAllString(after, "")
+		after = trailingFenceRe.ReplaceAllString(after, "")
+		return before, envelope, strings.TrimSpace(after), true
 	}
-	return before, rest[:decoder.InputOffset()], strings.TrimSpace(rest[decoder.InputOffset():]), true
+
+	if end := closingFence(rest); end >= 0 {
+		fenceEnd := end + 3
+		for fenceEnd < len(rest) && rest[fenceEnd] == '`' {
+			fenceEnd++
+		}
+		after := strings.TrimSpace(rest[fenceEnd:])
+		after = leadingFenceRe.ReplaceAllString(after, "")
+		after = trailingFenceRe.ReplaceAllString(after, "")
+		return before, strings.TrimSpace(rest[:end]), strings.TrimSpace(after), true
+	}
+
+	return before, strings.TrimSpace(rest), "", true
 }
 
 // closingFence 返回代码块中信封之后的结束标记位置：信封是有效 JSON 时取 JSON 之后的第一个标记，否则取第一个位于行首的标记

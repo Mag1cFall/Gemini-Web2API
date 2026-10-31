@@ -63,7 +63,9 @@ export function ProxyPoolCard() {
                 )}
               </Td>
               <Td>
-                {!proxy.checked_at ? (
+                {proxy.cooldown_until && new Date(proxy.cooldown_until) > new Date() ? (
+                  <Badge tone="warning">{m.poolCooldown}</Badge>
+                ) : !proxy.checked_at ? (
                   <Badge tone="neutral">{m.poolUnchecked}</Badge>
                 ) : proxy.healthy ? (
                   <Badge tone="success">{m.poolHealthy}</Badge>

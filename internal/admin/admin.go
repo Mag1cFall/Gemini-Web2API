@@ -62,6 +62,8 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.POST("/accounts/:id/verify", h.verifyAccount)
 	api.GET("/accounts/import/chrome", h.chromeProfiles)
 	api.POST("/accounts/import/chrome", h.importChrome)
+	api.GET("/accounts/import/browser", h.browserProfiles)
+	api.POST("/accounts/import/browser", h.importBrowser)
 	api.POST("/accounts/import/cookie", h.importCookie)
 	api.POST("/pairing", h.createPairing)
 	api.GET("/accounts/usage", func(c *gin.Context) {
@@ -90,6 +92,7 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.POST("/proxies/check", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"proxies": h.Accounts.CheckProxies(c.Request.Context())})
 	})
+	api.POST("/proxies/test", h.testProxy)
 	api.GET("/update", h.updateStatus)
 	api.POST("/update", h.applyUpdate)
 }
@@ -346,6 +349,17 @@ func (h *handler) updateConfig(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, h.settings.View())
+}
+
+func (h *handler) testProxy(c *gin.Context) {
+	var input struct {
+		Proxy string `json:"proxy"`
+	}
+	if !bindJSON(c, &input) {
+		return
+	}
+	res := h.Accounts.TestProxy(c.Request.Context(), input.Proxy)
+	c.JSON(http.StatusOK, res)
 }
 
 // writeError 以管理端错误体结束请求

@@ -29,8 +29,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: '可用',
     poolUnhealthy: '不可用',
     poolUnchecked: '未检测',
+    poolCooldown: '隔离冷却中',
     saveHistory: '保存官网历史',
     saveHistoryHint: '对话写入 Gemini 官网的历史记录；修改后账号重新初始化',
+    accountFallback: '遇到错误自动换号',
+    accountFallbackHint:
+      '当账号遇到用量上限 (1173/1037)、频率限制 (429) 或上游错误且尚未输出内容时，自动切换至账号池中其他可用账号无缝重试',
     modelMapping: '模型映射',
     modelMappingHint: '每行一条 别名:模型 ID，客户端可用别名请求对应模型',
     accountCooldown: '账号冷却',
@@ -42,9 +46,9 @@ export const settingsMessages = defineMessages({
     perAccountConcurrency: '单账号并发',
     perAccountConcurrencyHint: '每个账号同时进行的上游请求数；修改后账号重新初始化',
     routingStrategy: '调度策略',
-    routingStrategyHint: '轮询在账号间轮流分配；填满优先使用排在前面的空闲账号',
+    routingStrategyHint: '单账号耗尽优先将单个账号额度完全用尽再切下一个，最节省上下文 Token；轮流分配在账号间依次轮替',
     routingRoundRobin: '轮询',
-    routingFillFirst: '填满优先',
+    routingFillFirst: '单账号耗尽优先（推荐）',
     apiKey: 'API Key',
     apiKeyHint:
       '可设置多个，客户端以 Bearer、x-api-key、x-goog-api-key 或 key 参数携带其中任一个；全部留空时拒绝来自其他网站的网页请求',
@@ -112,8 +116,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: '可用',
     poolUnhealthy: '無法使用',
     poolUnchecked: '未檢測',
+    poolCooldown: '隔離冷卻中',
     saveHistory: '儲存官網紀錄',
     saveHistoryHint: '對話寫入 Gemini 官網的歷史紀錄；修改後帳號重新初始化',
+    accountFallback: '遇到錯誤自動換號',
+    accountFallbackHint:
+      '當帳號遇到用量上限 (1173/1037)、頻率限制 (429) 或上游錯誤且尚未輸出內容時，自動切換至帳號池中其他可用帳號無感重試',
     modelMapping: '模型對應',
     modelMappingHint: '每行一組 別名:模型 ID，用戶端可用別名呼叫對應模型',
     accountCooldown: '帳號冷卻',
@@ -125,9 +133,9 @@ export const settingsMessages = defineMessages({
     perAccountConcurrency: '每個帳號的並行數',
     perAccountConcurrencyHint: '每個帳號同時進行的上游請求數；修改後帳號重新初始化',
     routingStrategy: '分配方式',
-    routingStrategyHint: '輪流分配會在帳號間依序輪替；前面優先會先使用排在前面的空閒帳號',
+    routingStrategyHint: '單帳號耗盡優先將單個帳號額度完全用盡再切換下一個，最節省上下文 Token；輪流分配在帳號間依序輪替',
     routingRoundRobin: '輪流分配',
-    routingFillFirst: '前面優先',
+    routingFillFirst: '單帳號耗盡優先（推薦）',
     apiKey: 'API Key',
     apiKeyHint:
       '可設定多組，用戶端以 Bearer、x-api-key、x-goog-api-key 或 key 參數攜帶其中任一組；全部留空時拒絕來自其他網站的網頁請求',
@@ -195,9 +203,13 @@ export const settingsMessages = defineMessages({
     poolHealthy: 'Available',
     poolUnhealthy: 'Unavailable',
     poolUnchecked: 'Not checked',
+    poolCooldown: 'Isolated (Cooldown)',
     saveHistory: 'Save official history',
     saveHistoryHint:
       'Conversations are written to Gemini history; accounts re-initialize on change',
+    accountFallback: 'Account fallback on error',
+    accountFallbackHint:
+      'When an account hits usage limits (1173/1037), rate limits (429), or upstream errors before any output, seamlessly retry using another available account in the pool',
     modelMapping: 'Model mapping',
     modelMappingHint: 'One alias:model-id per line; clients can request a model by its alias',
     accountCooldown: 'Account cooldown',
@@ -212,9 +224,9 @@ export const settingsMessages = defineMessages({
       'Upstream requests each account handles at once; accounts re-initialize on change',
     routingStrategy: 'Routing strategy',
     routingStrategyHint:
-      'Round robin rotates accounts; fill first prefers the earliest idle account',
+      'Fill-first exhausts single account quota first to maximize context token reuse; round-robin alternates across accounts',
     routingRoundRobin: 'Round robin',
-    routingFillFirst: 'Fill first',
+    routingFillFirst: 'Exhaust single account first (Recommended)',
     apiKey: 'API key',
     apiKeyHint:
       'Add one or more keys; clients send any one of them as Bearer, x-api-key, x-goog-api-key or the key parameter. When all are empty, web pages from other sites are rejected',
@@ -285,8 +297,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: '利用可能',
     poolUnhealthy: '利用不可',
     poolUnchecked: '未確認',
+    poolCooldown: '隔離中（クールダウン）',
     saveHistory: '公式の履歴に保存',
     saveHistoryHint: '会話を Gemini の履歴に書き込みます。変更するとアカウントは再初期化されます',
+    accountFallback: 'エラー時に別アカウントで再試行',
+    accountFallbackHint:
+      'アカウントが利用上限（1173/1037）、レート制限（429）、または出力前のエラーに遭遇した場合、プール内の他の利用可能アカウントで自動的に再試行します',
     modelMapping: 'モデルの対応付け',
     modelMappingHint: '1 行に 別名:モデル ID を 1 つ。クライアントは別名でモデルを指定できます',
     accountCooldown: 'アカウントのクールダウン',
@@ -301,9 +317,9 @@ export const settingsMessages = defineMessages({
       '各アカウントが同時に処理するアップストリームリクエスト数。変更するとアカウントは再初期化されます',
     routingStrategy: '振り分け方式',
     routingStrategyHint:
-      'ラウンドロビンは順番に割り当て、先頭優先は前にある空きアカウントを優先します',
+      '単一アカウントのクォータを使い切るまで優先して消費し、コンテキストトークンを節約します。ラウンドロビンは順番に分散します',
     routingRoundRobin: 'ラウンドロビン',
-    routingFillFirst: '先頭優先',
+    routingFillFirst: '単一アカウント使い切り優先（推奨）',
     apiKey: 'API キー',
     apiKeyHint:
       '複数設定でき、いずれか 1 つを Bearer、x-api-key、x-goog-api-key または key パラメーターで送ります。すべて空欄の場合は他サイトの Web ページからの要求を拒否します',
@@ -373,8 +389,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: '사용 가능',
     poolUnhealthy: '사용 불가',
     poolUnchecked: '확인 전',
+    poolCooldown: '격리 쿨다운 중',
     saveHistory: '공식 기록에 저장',
     saveHistoryHint: '대화를 Gemini 기록에 남깁니다. 변경하면 계정이 다시 초기화됩니다',
+    accountFallback: '오류 시 다른 계정으로 대체',
+    accountFallbackHint:
+      '계정이 사용량 한도(1173/1037), 속도 제한(429) 또는 출력 전 업스트림 오류를 만났을 때 풀의 다른 사용 가능한 계정으로 자동 재시도합니다',
     modelMapping: '모델 매핑',
     modelMappingHint: '한 줄에 별칭:모델 ID 하나, 클라이언트는 별칭으로 모델을 요청할 수 있습니다',
     accountCooldown: '계정 쿨다운',
@@ -388,9 +408,9 @@ export const settingsMessages = defineMessages({
       '각 계정이 동시에 처리하는 업스트림 요청 수. 변경하면 계정이 다시 초기화됩니다',
     routingStrategy: '배분 방식',
     routingStrategyHint:
-      '라운드 로빈은 계정을 번갈아 쓰고, 앞쪽 우선은 앞에 있는 유휴 계정을 먼저 씁니다',
+      '단일 계정의 할당량을 우선 소진하여 컨텍스트 토큰을 절약합니다. 라운드로빈은 계정을 번갈아 사용합니다',
     routingRoundRobin: '라운드 로빈',
-    routingFillFirst: '앞쪽 우선',
+    routingFillFirst: '단일 계정 우선 소진 (권장)',
     apiKey: 'API 키',
     apiKeyHint:
       '여러 개를 설정할 수 있으며, 그중 하나를 Bearer, x-api-key, x-goog-api-key 또는 key 매개변수로 보냅니다. 모두 비워 두면 다른 사이트의 웹 페이지 요청을 거부합니다',
@@ -460,9 +480,13 @@ export const settingsMessages = defineMessages({
     poolHealthy: 'Disponible',
     poolUnhealthy: 'Indisponible',
     poolUnchecked: 'Non vérifié',
+    poolCooldown: 'En quarantaine',
     saveHistory: 'Enregistrer l’historique officiel',
     saveHistoryHint:
       'Les conversations sont écrites dans l’historique Gemini ; les comptes se réinitialisent après modification',
+    accountFallback: 'Basculement de compte en cas d’erreur',
+    accountFallbackHint:
+      'Lorsqu’un compte atteint sa limite d’utilisation (1173/1037), un taux limite (429) ou une erreur avant toute sortie, réessaie de manière transparente avec un autre compte',
     modelMapping: 'Correspondance des modèles',
     modelMappingHint:
       'Un alias:id-modèle par ligne ; les clients peuvent demander un modèle par son alias',
@@ -479,9 +503,9 @@ export const settingsMessages = defineMessages({
       'Requêtes amont traitées en même temps par compte ; les comptes se réinitialisent après modification',
     routingStrategy: 'Stratégie de répartition',
     routingStrategyHint:
-      'Le round-robin alterne les comptes ; « Premier compte libre » utilise d’abord le premier compte disponible',
+      'Épuise d’abord le quota d’un compte pour économiser les tokens de contexte ; round-robin alterne entre les comptes',
     routingRoundRobin: 'Round-robin',
-    routingFillFirst: 'Premier compte libre',
+    routingFillFirst: 'Épuiser un compte en premier (Recommandé)',
     apiKey: 'Clé API',
     apiKeyHint:
       'Une ou plusieurs clés ; le client envoie l’une d’elles en Bearer, x-api-key, x-goog-api-key ou paramètre key. Si toutes sont vides, les pages web d’autres sites sont refusées',
@@ -553,9 +577,13 @@ export const settingsMessages = defineMessages({
     poolHealthy: 'Verfügbar',
     poolUnhealthy: 'Nicht verfügbar',
     poolUnchecked: 'Nicht geprüft',
+    poolCooldown: 'In Quarantäne',
     saveHistory: 'Offiziellen Verlauf speichern',
     saveHistoryHint:
       'Unterhaltungen werden im Gemini-Verlauf gespeichert; Konten werden nach einer Änderung neu initialisiert',
+    accountFallback: 'Konto-Fallback bei Fehlern',
+    accountFallbackHint:
+      'Wenn ein Konto vor der Ausgabe auf ein Nutzungslimit (1173/1037), Ratenlimit (429) oder Upstream-Fehler stößt, wird nahtlos ein anderes verfügbares Konto verwendet',
     modelMapping: 'Modellzuordnung',
     modelMappingHint:
       'Ein Alias:Modell-ID pro Zeile; Clients können ein Modell über seinen Alias anfordern',
@@ -572,9 +600,9 @@ export const settingsMessages = defineMessages({
       'Gleichzeitige Upstream-Anfragen je Konto; Konten werden nach einer Änderung neu initialisiert',
     routingStrategy: 'Verteilungsstrategie',
     routingStrategyHint:
-      'Round Robin wechselt die Konten ab; „Erstes freies Konto“ nutzt zuerst das vorderste freie Konto',
+      'Erschöpft zuerst das Kontingent eines einzelnen Kontos, um Kontext-Tokens zu sparen; Round-Robin wechselt ab',
     routingRoundRobin: 'Round Robin',
-    routingFillFirst: 'Erstes freies Konto',
+    routingFillFirst: 'Einzelkonto zuerst aufbrauchen (Empfohlen)',
     apiKey: 'API-Schlüssel',
     apiKeyHint:
       'Ein oder mehrere Schlüssel; Clients senden einen davon als Bearer, x-api-key, x-goog-api-key oder Parameter key. Sind alle leer, werden Webseiten anderer Websites abgewiesen',

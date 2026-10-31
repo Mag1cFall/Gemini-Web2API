@@ -3,8 +3,8 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { accountsMessages } from '@/features/accounts/messages'
+import { ProxyInput } from '@/features/accounts/ProxyInput'
 import { useMessages } from '@/lib/i18n'
 
 // ProxyDialog 是填写账号固定代理的对话框，以 initial 为初值，留空表示从代理池分配，direct 表示直连
@@ -50,13 +50,12 @@ export function ProxyDialog({
         }
       >
         <Field id="proxy" label={m.proxy} description={m.proxyHint}>
-          <Input
+          <ProxyInput
             id="proxy"
             value={proxy}
+            testLabel={m.testProxy}
             placeholder="http://127.0.0.1:7890"
-            onChange={(event) => {
-              setProxy(event.target.value)
-            }}
+            onChange={setProxy}
           />
         </Field>
       </DialogContent>

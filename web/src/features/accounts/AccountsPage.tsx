@@ -1,10 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Globe, Power, PowerOff, ShieldCheck, Users } from 'lucide-react'
+import { Globe, Power, PowerOff, ShieldCheck, Trash2, Users } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog'
 import { Card, CountBadge, PageHeader } from '@/components/ui/page'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { Table, Td, Th } from '@/components/ui/table'
@@ -27,7 +28,7 @@ import { useNow } from '@/lib/time'
 const batchLimit = 3
 
 // BatchAction 是可对多个账号执行的操作
-type BatchAction = 'proxy' | 'enable' | 'disable' | 'verify'
+type BatchAction = 'proxy' | 'enable' | 'disable' | 'verify' | 'delete'
 
 // BatchRequest 是一次批量操作的目标账号与要设置的代理
 interface BatchRequest {
@@ -40,6 +41,8 @@ interface BatchRequest {
 function applyBatch({ action, proxy = '' }: BatchRequest, account: Account) {
   const path = '/api/accounts/' + encodeURIComponent(account.account_id)
   switch (action) {
+    case 'delete':
+      return api(path, { method: 'DELETE' })
     case 'verify':
       return api(path + '/verify', { method: 'POST' })
     case 'proxy':
@@ -61,6 +64,7 @@ export function AccountsPage() {
   const accounts = useAccounts()
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set())
   const [proxyOpen, setProxyOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const batch = useMutation({
     mutationFn: (request: BatchRequest) =>
       runBatch(
@@ -72,7 +76,13 @@ export function AccountsPage() {
         },
       ),
     onSuccess: (failures, request) => {
-      const labels = { proxy: m.setProxy, enable: m.enable, disable: m.disable, verify: m.verify }
+      const labels = {
+        proxy: m.setProxy,
+        enable: m.enable,
+        disable: m.disable,
+        verify: m.verify,
+        delete: m.batchDelete ?? m.deleteTitle,
+      }
       const result = fill(m.batchResult, {
         action: labels[request.action],
         succeeded: request.accounts.length - failures.length,
@@ -85,9 +95,14 @@ export function AccountsPage() {
         tone: failures.length === 0 ? 'success' : 'error',
         title: failures.length === 0 ? result : fill(m.batchFailures, { result, items }),
       })
+      if (request.action === 'delete') {
+        const failedIds = new Set(failures.map((f) => f.id))
+        setSelection((current) => new Set([...current].filter((id) => failedIds.has(id))))
+      }
     },
     onSettled: () => {
       setProxyOpen(false)
+      setDeleteOpen(false)
       void client.invalidateQueries({ queryKey: accountsKey })
     },
   })
@@ -202,6 +217,18 @@ export function AccountsPage() {
               </Tooltip>
               <Button
                 size="sm"
+                variant="destructive"
+                loading={running === 'delete'}
+                disabled={batch.isPending}
+                onClick={() => {
+                  setDeleteOpen(true)
+                }}
+              >
+                <Trash2 size={16} aria-hidden />
+                {m.batchDelete ?? m.deleteTitle}
+              </Button>
+              <Button
+                size="sm"
                 variant="ghost"
                 disabled={batch.isPending}
                 onClick={() => {
@@ -276,7 +303,17 @@ export function AccountsPage() {
                   <Td>
                     <Badge tone={stateTone(account.state)}>{sm[account.state]}</Badge>
                   </Td>
-                  <Td>{account.source === 'chrome' ? m.sourceChrome : m.sourceCookie}</Td>
+                  <Td>
+                    {account.source === 'chrome'
+                      ? m.sourceChrome
+                      : account.source === 'brave'
+                        ? m.sourceBrave
+                        : account.source === 'edge'
+                          ? m.sourceEdge
+                          : account.source === 'firefox'
+                            ? m.sourceFirefox
+                            : m.sourceCookie}
+                  </Td>
                   <Td>{account.tier ?? m.none}</Td>
                   <Td className="text-right">{account.models.length}</Td>
                   <Td className="text-right tabular-nums">
@@ -315,6 +352,42 @@ export function AccountsPage() {
             setProxyOpen(false)
           }}
         />
+      )}
+      {deleteOpen && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setDeleteOpen(false)
+          }}
+        >
+          <DialogContent
+            title={fill(plural(locale, selected.length, m.batchDeleteTitleOne, m.batchDeleteTitle), {
+              count: selected.length,
+            })}
+            description={fill(plural(locale, selected.length, m.batchDeleteHintOne, m.batchDeleteHint), {
+              count: selected.length,
+            })}
+            closeLabel={m.cancel}
+            footer={
+              <>
+                <DialogClose asChild>
+                  <Button variant="secondary">{m.cancel}</Button>
+                </DialogClose>
+                <Button
+                  variant="destructive"
+                  loading={running === 'delete'}
+                  onClick={() => {
+                    start('delete')
+                  }}
+                >
+                  {m.confirmDelete}
+                </Button>
+              </>
+            }
+          >
+            <span className="sr-only">{m.deleteTitle}</span>
+          </DialogContent>
+        </Dialog>
       )}
     </>
   )

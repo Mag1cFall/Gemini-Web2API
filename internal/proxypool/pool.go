@@ -3,6 +3,7 @@ package proxypool
 import (
 	"context"
 	"net/url"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -23,21 +24,23 @@ type Pool struct {
 
 // proxyState 是代理池中一个代理的检测结果
 type proxyState struct {
-	url     string
-	healthy bool
-	checked time.Time
-	latency time.Duration
-	err     string
+	url           string
+	healthy       bool
+	checked       time.Time
+	latency       time.Duration
+	err           string
+	cooldownUntil time.Time
 }
 
 // Status 是代理池中一个代理的当前状态与绑定的账号
 type Status struct {
-	URL       string    `json:"url"`
-	Healthy   bool      `json:"healthy"`
-	CheckedAt time.Time `json:"checked_at,omitzero"`
-	LatencyMS int64     `json:"latency_ms"`
-	Error     string    `json:"error,omitempty"`
-	Accounts  []string  `json:"accounts"`
+	URL           string    `json:"url"`
+	Healthy       bool      `json:"healthy"`
+	CheckedAt     time.Time `json:"checked_at,omitzero"`
+	LatencyMS     int64     `json:"latency_ms"`
+	Error         string    `json:"error,omitempty"`
+	Accounts      []string  `json:"accounts"`
+	CooldownUntil time.Time `json:"cooldown_until,omitzero"`
 }
 
 // New 创建代理池，代理在首次检测前视为可用
@@ -82,12 +85,24 @@ func (p *Pool) SetProxies(urls []string) {
 	p.rebalance()
 }
 
+// isAvailable 报告代理当前是否健康且未处于冷却隔离期
+func isAvailable(state *proxyState, now time.Time) bool {
+	if state == nil || !state.healthy {
+		return false
+	}
+	if !state.cooldownUntil.IsZero() && now.Before(state.cooldownUntil) {
+		return false
+	}
+	return true
+}
+
 // rebalance 每次把账号最多的可用代理上 ID 最大的账号改绑到账号最少的可用代理，直到两者相差不超过一个
 func (p *Pool) rebalance() {
 	anyHealthy := p.anyHealthy()
+	now := time.Now()
 	accounts := make(map[*proxyState][]string, len(p.proxies))
 	for _, state := range p.proxies {
-		if !anyHealthy || state.healthy {
+		if !anyHealthy || isAvailable(state, now) {
 			accounts[state] = []string{}
 		}
 	}
@@ -123,12 +138,7 @@ func (p *Pool) rebalance() {
 
 // contains 报告代理是否仍在列表中
 func (p *Pool) contains(target *proxyState) bool {
-	for _, state := range p.proxies {
-		if state == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(p.proxies, target)
 }
 
 // Assign 返回账号使用的代理：已绑定的代理可用时沿用，否则绑定可用代理中账号最少的一个；全部不可用时保持原绑定，代理池为空时返回系统代理
@@ -139,7 +149,8 @@ func (p *Pool) Assign(accountID string) string {
 		delete(p.bindings, accountID)
 		return System()
 	}
-	if current := p.bindings[accountID]; current != nil && (current.healthy || !p.anyHealthy()) {
+	now := time.Now()
+	if current := p.bindings[accountID]; current != nil && (isAvailable(current, now) || !p.anyHealthy()) {
 		return current.url
 	}
 	best := p.leastBound(accountID)
@@ -159,8 +170,9 @@ func (p *Pool) Pick() string {
 
 // anyHealthy 报告是否有可用代理
 func (p *Pool) anyHealthy() bool {
+	now := time.Now()
 	for _, state := range p.proxies {
-		if state.healthy {
+		if isAvailable(state, now) {
 			return true
 		}
 	}
@@ -176,9 +188,10 @@ func (p *Pool) leastBound(accountID string) *proxyState {
 		}
 	}
 	anyHealthy := p.anyHealthy()
+	now := time.Now()
 	var best *proxyState
 	for _, state := range p.proxies {
-		if anyHealthy && !state.healthy {
+		if anyHealthy && !isAvailable(state, now) {
 			continue
 		}
 		if best == nil || counts[state] < counts[best] {
@@ -230,23 +243,66 @@ func (p *Pool) Check(ctx context.Context, probe func(context.Context, string) (t
 	now := time.Now()
 	anyHealthy := false
 	for index, state := range targets {
-		state.checked, state.latency, state.err = now, results[index].latency, ""
+		state.checked = now
 		state.healthy = results[index].err == nil
 		if !state.healthy {
 			state.latency, state.err = 0, results[index].err.Error()
+		} else {
+			state.latency = results[index].latency
+			if now.After(state.cooldownUntil) {
+				state.cooldownUntil = time.Time{}
+				state.err = ""
+			}
 		}
-		anyHealthy = anyHealthy || state.healthy
+		anyHealthy = anyHealthy || isAvailable(state, now)
 	}
 	if !anyHealthy {
 		return nil
 	}
 	moved := []string{}
 	for id, state := range p.bindings {
-		if !state.healthy {
+		if !isAvailable(state, now) {
 			moved = append(moved, id)
 		}
 	}
 	sort.Strings(moved)
+	return moved
+}
+
+// MarkCooldown 将指定代理设为冷却隔离状态（如遭遇 Google 302 人机验证），并返回需要改绑的账号 ID
+func (p *Pool) MarkCooldown(proxyURL string, duration time.Duration, reason string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	var target *proxyState
+	for _, state := range p.proxies {
+		if state.url == proxyURL {
+			target = state
+			break
+		}
+	}
+	if target == nil {
+		return nil
+	}
+	if !target.cooldownUntil.IsZero() && now.Before(target.cooldownUntil) {
+		return nil
+	}
+	target.cooldownUntil = now.Add(duration)
+	target.err = reason
+
+	moved := []string{}
+	for id, state := range p.bindings {
+		if state == target {
+			moved = append(moved, id)
+		}
+	}
+	sort.Strings(moved)
+	if p.anyHealthy() {
+		for _, id := range moved {
+			p.bindings[id] = p.leastBound(id)
+		}
+		p.rebalance()
+	}
 	return moved
 }
 
@@ -258,13 +314,15 @@ func (p *Pool) Status() []Status {
 	for id, state := range p.bindings {
 		accounts[state] = append(accounts[state], id)
 	}
+	now := time.Now()
 	result := make([]Status, 0, len(p.proxies))
 	for _, state := range p.proxies {
 		ids := append([]string{}, accounts[state]...)
 		sort.Strings(ids)
 		result = append(result, Status{
-			URL: Redact(state.url), Healthy: state.healthy, CheckedAt: state.checked,
+			URL: Redact(state.url), Healthy: isAvailable(state, now), CheckedAt: state.checked,
 			LatencyMS: state.latency.Milliseconds(), Error: state.err, Accounts: ids,
+			CooldownUntil: state.cooldownUntil,
 		})
 	}
 	return result

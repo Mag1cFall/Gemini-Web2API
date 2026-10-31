@@ -3,7 +3,10 @@ export type AccountState =
   'initializing' | 'ready' | 'cooldown' | 'auth_required' | 'unavailable' | 'disabled'
 
 // AccountSource 是账户导入来源
-export type AccountSource = 'chrome' | 'cookie' | 'guest'
+export type AccountSource = 'chrome' | 'brave' | 'edge' | 'firefox' | 'cookie' | 'guest'
+
+// BrowserType 是支持导入的浏览器类型
+export type BrowserType = 'chrome' | 'brave' | 'edge' | 'firefox'
 
 // UsageWindow 是官网用量窗口，used_ratio 为已用比例
 export interface UsageWindow {
@@ -67,21 +70,40 @@ export interface AccountsUsage {
   accounts: AccountUsageStatus[]
 }
 
-// ChromeProfile 对应 GET /api/accounts/import/chrome 的 profiles 项
+// ChromeProfile 对应 GET /api/accounts/import/chrome 或 /api/accounts/import/browser 的 profiles 项
 export interface ChromeProfile {
   id: string
+  browser?: BrowserType
   profile: string
   display_name: string
   email: string
+  auth_user?: number
   importable: boolean
   imported: boolean
-  // reason 为账号不可导入的原因，不可导入且缺省时为未在 Chrome 登录
-  reason?: 'read_failed' | 'needs_reauth'
+  // reason 为账号不可导入的原因，不可导入且缺省时为未在浏览器登录
+  reason?: 'read_failed' | 'needs_reauth' | 'browser_running'
 }
 
-// ChromeProfiles 对应 GET /api/accounts/import/chrome 的响应
+export type BrowserProfile = ChromeProfile
+
+// ChromeProfiles 对应 GET /api/accounts/import/chrome 或 /api/accounts/import/browser 的响应
 export interface ChromeProfiles {
+  browser?: BrowserType
   profiles: ChromeProfile[]
+}
+
+export type BrowserProfiles = ChromeProfiles
+
+// ImportFailure 对应批量导入时单个账号的失败项
+export interface ImportFailure {
+  target: string
+  error: string
+}
+
+// ImportBrowserResponse 对应 POST /api/accounts/import/browser 的响应
+export interface ImportBrowserResponse {
+  accounts: Account[]
+  failures?: ImportFailure[]
 }
 
 // PairingToken 对应 POST /api/pairing 的响应

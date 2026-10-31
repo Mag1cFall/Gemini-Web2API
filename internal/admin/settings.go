@@ -56,6 +56,7 @@ type ServiceConfig struct {
 	LogMaxTotalMB    int      `json:"log_max_total_mb"`
 	Concurrency      int      `json:"per_account_concurrency"`
 	RoutingStrategy  string   `json:"routing_strategy"`
+	AccountFallback  bool     `json:"account_fallback"`
 	AdminAuthEnabled bool     `json:"admin_auth_enabled"`
 	AdminUsername    string   `json:"admin_username"`
 	AdminPasswordSet bool     `json:"admin_password_set"`
@@ -82,6 +83,7 @@ type ConfigUpdate struct {
 	LogMaxTotalMB    *int    `json:"log_max_total_mb"`
 	Concurrency      *int    `json:"per_account_concurrency"`
 	RoutingStrategy  *string `json:"routing_strategy"`
+	AccountFallback  *bool   `json:"account_fallback"`
 	AdminAuthEnabled *bool   `json:"admin_auth_enabled"`
 	AdminUsername    *string `json:"admin_username"`
 	AdminPassword    *string `json:"admin_password"`
@@ -100,7 +102,7 @@ func (s *Settings) View() ServiceConfig {
 		ModelMapping: config.FormatModelMapping(cfg.ModelMapping), AccountCooldown: shortDuration(cfg.AccountCooldown),
 		SessionTTL: shortDuration(cfg.SessionTTL), InitTimeout: shortDuration(cfg.InitTimeout), LogLevel: cfg.LogLevel,
 		RequestBodyLog: cfg.RequestBodyLog, LogFile: cfg.LogFile, LogMaxTotalMB: cfg.LogMaxTotalMB, Concurrency: cfg.PerAccountConcurrency, RoutingStrategy: cfg.RoutingStrategy,
-		AdminAuthEnabled: cfg.AdminAuthEnabled, AdminUsername: cfg.AdminUsername,
+		AccountFallback: cfg.AccountFallback, AdminAuthEnabled: cfg.AdminAuthEnabled, AdminUsername: cfg.AdminUsername,
 		AdminPasswordSet: cfg.AdminPassword != "", ListenAddr: cfg.ListenAddress,
 		AuthStates: strings.Join(cfg.AuthStatePaths, ","), LogFormat: cfg.LogFormat,
 		ActiveListenAddr: s.active.ListenAddress, RestartFields: []string{},
@@ -208,6 +210,7 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		next.RoutingStrategy = strategy
 		env["ROUTING_STRATEGY"] = strategy
 	}
+	setBool(update.AccountFallback, "ACCOUNT_FALLBACK", &next.AccountFallback)
 	setBool(update.AdminAuthEnabled, "ADMIN_AUTH_ENABLED", &next.AdminAuthEnabled)
 	setString(update.AdminUsername, "ADMIN_USERNAME", &next.AdminUsername)
 	if next.AdminUsername == "" {

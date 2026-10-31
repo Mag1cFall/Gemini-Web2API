@@ -225,6 +225,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	logStartup(cfg, len(loaded))
 
 	adapter.ConfigureSessionTTL(cfg.SessionTTL)
+	adapter.ConfigureAccountFallback(cfg.AccountFallback)
 	pool := balancer.NewAccountPool(cfg.AccountCooldown, cfg.SessionTTL)
 	manager := accounts.New(ctx, pool, accounts.Settings{
 		InitTimeout: cfg.InitTimeout, RetryInterval: cfg.AccountCooldown, Proxy: cfg.ProxyURL,
@@ -235,6 +236,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		config.SetModelMapping(next.ModelMapping)
 		pool.SetTimings(next.AccountCooldown, next.SessionTTL)
 		adapter.ConfigureSessionTTL(next.SessionTTL)
+		adapter.ConfigureAccountFallback(next.AccountFallback)
 		if level, err := logging.ParseLevel(next.LogLevel); err == nil {
 			logging.SetLevel(level)
 		}

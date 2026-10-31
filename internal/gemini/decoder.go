@@ -199,9 +199,9 @@ func bardErrorCode(record []any) (int, bool) {
 func bardProtocolError(code int) *ProtocolError {
 	err := &ProtocolError{HTTPStatus: 502, Code: code, Retryable: true}
 	switch code {
-	case 1037:
+	case 1037, 1173:
 		err.HTTPStatus = 429
-		err.Message = "Gemini Web 账号的当前模型用量已达上限 (1037)"
+		err.Message = fmt.Sprintf("Gemini Web 账号的当前模型用量已达上限 (%d)", code)
 	case 1050:
 		err.HTTPStatus = 400
 		err.Retryable = false

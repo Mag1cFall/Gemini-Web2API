@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
@@ -13,6 +14,22 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 )
+
+var accountFallback atomic.Bool
+
+func init() {
+	accountFallback.Store(true)
+}
+
+// ConfigureAccountFallback 设置当账号遇到模型或上游错误时是否自动换号重试
+func ConfigureAccountFallback(enabled bool) {
+	accountFallback.Store(enabled)
+}
+
+// AccountFallbackEnabled 报告是否开启了账号故障自动换号重试
+func AccountFallbackEnabled() bool {
+	return accountFallback.Load()
+}
 
 // generationMedia 是请求对生成媒体的要求
 type generationMedia struct {
@@ -247,18 +264,23 @@ func runGenerationAttempts(
 		newSession = !exists
 	}
 
-	requestAttempts := 1
-	if sessionKey == "" || newSession {
-		requestAttempts = 2
-	}
-	excludedAccountIDs := make(map[string]struct{})
 	availableAccounts := pool.Size()
 	if availableAccounts == 0 {
 		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 503, Message: "没有可用账号", Retryable: true}
 	}
+	fallbackEnabled := AccountFallbackEnabled()
+	requestAttempts := 1
+	if sessionKey == "" || newSession {
+		requestAttempts = 2
+	}
+	if fallbackEnabled && rebuildable {
+		requestAttempts = availableAccounts
+	}
+	excludedAccountIDs := make(map[string]struct{})
 	usedRequestAttempts := 0
 	lastAccountID := ""
 	var lastErr error
+	reconnectedAccounts := make(map[string]bool)
 	for len(excludedAccountIDs) < availableAccounts {
 		selectionKey := sessionKey
 		if newSession {
@@ -272,7 +294,12 @@ func runGenerationAttempts(
 		if client == nil {
 			if sessionKey != "" && !newSession && accountID != "" {
 				if rebuildable {
-					sessionKey, newSession, requestAttempts = "", true, 2
+					sessionKey, newSession = "", true
+					if fallbackEnabled {
+						requestAttempts = availableAccounts
+					} else {
+						requestAttempts = 2
+					}
 					continue
 				}
 				return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: fmt.Sprintf("会话所在账号 %s，会话没有保存的响应链，无法在其他账号续接", pool.AccountReason(accountID, requestedModel))}
@@ -282,6 +309,7 @@ func runGenerationAttempts(
 			}
 			return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: "没有可用账号", Retryable: true}
 		}
+		reconnected := false
 		result, err := func() (generationResult, error) {
 			defer releaseRequest()
 			result, err := runGenerationWithClient(
@@ -290,7 +318,13 @@ func runGenerationAttempts(
 			)
 			if err == nil {
 				pool.ReportSuccess(accountID, requestedModel)
-			} else if ctx.Err() == nil && retryableAccountError(err) && !isOutputMismatchError(err) {
+				return result, nil
+			}
+			if ctx.Err() == nil && retryableAccountError(err) && !isOutputMismatchError(err) {
+				if gemini.IsAuthenticationError(err) && (hasVisibleOutput == nil || !hasVisibleOutput()) && !reconnectedAccounts[accountID] {
+					reconnected = true
+					return result, err
+				}
 				if usageLimitError(err) {
 					_, _ = client.FetchUsage(ctx)
 				}
@@ -307,15 +341,40 @@ func runGenerationAttempts(
 		if ctx.Err() != nil {
 			return generationResult{}, accountID, err
 		}
+		if reconnected {
+			reconnectedAccounts[accountID] = true
+			trace.Stage("会话失效，自动重新连接", "账号", accountID)
+			logging.Info(accountID, "检测到账号会话失效，尝试自动重新连接一次")
+			reconnectErr := pool.Reconnect(ctx, accountID)
+			if reconnectErr == nil {
+				logging.Info(accountID, "自动重新连接成功，无感重试当前请求")
+				trace.Stage("自动重新连接成功，重试请求", "账号", accountID)
+				delete(excludedAccountIDs, accountID)
+				continue
+			}
+			logging.Warn(accountID, "自动重新连接失败，恢复原错误", "错误", reconnectErr)
+			trace.Stage("自动重新连接失败", "账号", accountID, "错误", reconnectErr)
+			pool.ReportFailure(accountID, requestedModel, err)
+		}
 		if errors.Is(err, gemini.ErrConversationLost) && rebuildable && !newSession && (hasVisibleOutput == nil || !hasVisibleOutput()) {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
-			sessionKey, newSession, requestAttempts = "", true, 2
+			sessionKey, newSession = "", true
+			if fallbackEnabled {
+				requestAttempts = availableAccounts
+			} else {
+				requestAttempts = 2
+			}
 			continue
 		}
 		if rebuildable && sessionKey != "" && !newSession && (isAccountContextError(err) || errors.Is(err, gemini.ErrGuestAttachments) || retryableAccountError(err) && (hasVisibleOutput == nil || !hasVisibleOutput())) {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
-			sessionKey, newSession, requestAttempts = "", true, 2
+			sessionKey, newSession = "", true
+			if fallbackEnabled {
+				requestAttempts = availableAccounts
+			} else {
+				requestAttempts = 2
+			}
 			continue
 		}
 		if isAccountContextError(err) {
@@ -611,8 +670,8 @@ func actualProviderModel(client *gemini.Client, requestedModel string, metadata 
 	return requestedModel
 }
 
-// usageLimitError 判断错误是否为官网用量上限 1037 或用量用满后的模型降级，此时先读取账号用量再按其重置时刻冷却
+// usageLimitError 判断错误是否为官网用量上限 1037、1173 或用量用满后的模型降级，此时先读取账号用量再按其重置时刻冷却
 func usageLimitError(err error) bool {
 	var protocolErr *gemini.ProtocolError
-	return errors.As(err, &protocolErr) && protocolErr.Code == 1037 || errors.Is(err, gemini.ErrModelMismatch)
+	return errors.As(err, &protocolErr) && (protocolErr.Code == 1037 || protocolErr.Code == 1173) || errors.Is(err, gemini.ErrModelMismatch)
 }

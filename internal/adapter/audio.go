@@ -85,59 +85,92 @@ func SpeechHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 
 		modelID := config.MapModel(request.Model)
 		trace.SetStage("等待账号")
-		client, accountID, release, err := pool.AcquireForModel(c.Request.Context(), "", modelID, nil)
-		if err != nil {
-			err = cancelledError(c.Request.Context(), err)
-			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
-			return
-		}
-		if client == nil {
+		excludedAccountIDs := make(map[string]struct{})
+		availableAccounts := pool.Size()
+		if availableAccounts == 0 {
 			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
 			return
 		}
-		c.Set("account_id", accountID)
-		trace.AccountReady(accountID, modelID)
-		upstreamFormat := gemini.SpeechMP3
-		if format == "opus" {
-			upstreamFormat = gemini.SpeechOggOpus
+		maxAttempts := 1
+		if AccountFallbackEnabled() {
+			maxAttempts = availableAccounts
 		}
-		audio, err := client.Speech(c.Request.Context(), request.Input, "", upstreamFormat)
-		err = cancelledError(c.Request.Context(), err)
-		if err != nil {
+		var lastErr error
+		for attempts := 0; attempts < maxAttempts && len(excludedAccountIDs) < availableAccounts; attempts++ {
+			client, accountID, release, err := pool.AcquireForModel(c.Request.Context(), "", modelID, excludedAccountIDs)
+			if err != nil {
+				err = cancelledError(c.Request.Context(), err)
+				writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
+				return
+			}
+			if client == nil {
+				break
+			}
+			c.Set("account_id", accountID)
+			trace.AccountReady(accountID, modelID)
+			upstreamFormat := gemini.SpeechMP3
+			if format == "opus" {
+				upstreamFormat = gemini.SpeechOggOpus
+			}
+			audio, err := client.Speech(c.Request.Context(), request.Input, "", upstreamFormat)
+			err = cancelledError(c.Request.Context(), err)
+			if err != nil && gemini.IsAuthenticationError(err) {
+				release()
+				release = nil
+				logging.Info(accountID, "语音生成会话失效，尝试自动重新连接一次")
+				if rErr := pool.Reconnect(c.Request.Context(), accountID); rErr == nil {
+					logging.Info(accountID, "自动重新连接成功，重试语音生成")
+					var newRelease func()
+					client, accountID, newRelease, err = pool.AcquireForModel(c.Request.Context(), "", modelID, excludedAccountIDs)
+					if err == nil && client != nil {
+						release = newRelease
+						audio, err = client.Speech(c.Request.Context(), request.Input, "", upstreamFormat)
+						err = cancelledError(c.Request.Context(), err)
+					}
+				}
+			}
+			if release != nil {
+				release()
+				release = nil
+			}
+			if err == nil {
+				pool.ReportSuccess(accountID, modelID)
+				contentType := audioContentTypes[format]
+				if upstreamFormat == gemini.SpeechMP3 {
+					if audio, contentType, err = transcodeMP3(audio, format); err != nil {
+						writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error())
+						return
+					}
+				}
+				inputTokens := tokencount.Text(request.Input)
+				outputTokens := int(math.Ceil(audioSeconds(audio) * audioTokensPerSec))
+				trace.SetUsage(inputTokens, 0, outputTokens)
+				trace.SetResult(modelID, "", "stop")
+				if request.StreamFormat != "sse" {
+					c.Data(http.StatusOK, contentType, audio)
+					return
+				}
+				setSSEHeaders(c)
+				for offset := 0; offset < len(audio); offset += speechChunkBytes {
+					chunk := audio[offset:min(offset+speechChunkBytes, len(audio))]
+					if err := writeSSEJSON(c.Writer, gin.H{"type": "speech.audio.delta", "audio": base64.StdEncoding.EncodeToString(chunk)}); err != nil {
+						return
+					}
+				}
+				_ = writeSSEJSON(c.Writer, gin.H{"type": "speech.audio.done"})
+				return
+			}
+			lastErr = err
 			if retryableAccountError(err) {
 				pool.ReportFailure(accountID, modelID, err)
 			}
-			release()
-			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
+			excludedAccountIDs[accountID] = struct{}{}
+		}
+		if lastErr != nil {
+			writeOpenAIError(c, upstreamStatus(lastErr), openAIUpstreamCode(lastErr), lastErr.Error())
 			return
 		}
-		pool.ReportSuccess(accountID, modelID)
-		release()
-		contentType := audioContentTypes[format]
-		if upstreamFormat == gemini.SpeechMP3 {
-			if audio, contentType, err = transcodeMP3(audio, format); err != nil {
-				writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error())
-				return
-			}
-		}
-		inputTokens := tokencount.Text(request.Input)
-		outputTokens := int(math.Ceil(audioSeconds(audio) * audioTokensPerSec))
-		trace.SetUsage(inputTokens, 0, outputTokens)
-		trace.SetResult(modelID, "", "stop")
-		if request.StreamFormat != "sse" {
-			c.Data(http.StatusOK, contentType, audio)
-			return
-		}
-		setSSEHeaders(c)
-		for offset := 0; offset < len(audio); offset += speechChunkBytes {
-			chunk := audio[offset:min(offset+speechChunkBytes, len(audio))]
-			if err := writeSSEJSON(c.Writer, gin.H{"type": "speech.audio.delta", "audio": base64.StdEncoding.EncodeToString(chunk)}); err != nil {
-				return
-			}
-		}
-		_ = writeSSEJSON(c.Writer, gin.H{"type": "speech.audio.done", "usage": gin.H{
-			"input_tokens": inputTokens, "output_tokens": outputTokens, "total_tokens": inputTokens + outputTokens,
-		}})
+		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", "No account is ready for the requested model")
 	}
 }
 

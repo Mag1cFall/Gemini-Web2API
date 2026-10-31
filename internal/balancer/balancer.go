@@ -150,6 +150,8 @@ type AccountPool struct {
 	lastSessionGC time.Time
 	mu            sync.Mutex
 	transport     func()
+	proxyBlocked  func(proxyURL string, err error)
+	reconnect     func(ctx context.Context, accountID string) error
 	// changed 在账号状态、冷却或请求槽变化时关闭并替换，唤醒等待账号的请求
 	changed chan struct{}
 	// queues 为按排队键分组、按到达顺序排列的等待请求唤醒通道
@@ -331,6 +333,9 @@ func (p *AccountPool) MarkFailed(accountID string, err error) bool {
 		state = StateAuthRequired
 	}
 	p.reportTransport(err)
+	if errors.Is(err, gemini.ErrCaptcha) && entry.Info.ProxySource == "pool" {
+		p.reportProxyBlocked(entry.Info.Proxy, err)
+	}
 	changed := entry.State != state || entry.LastError != errorText(err)
 	entry.State = state
 	entry.LastError, entry.LastErrorAt = errorText(err), time.Now()
@@ -353,6 +358,38 @@ func (p *AccountPool) OnTransportError(fn func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.transport = fn
+}
+
+// OnProxyBlocked 设置账号遭遇 Google 人机验证拦截时调用的函数
+func (p *AccountPool) OnProxyBlocked(fn func(proxyURL string, err error)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.proxyBlocked = fn
+}
+
+// SetReconnector 设置账号遇到认证失效时自动重新连接并初始化的函数
+func (p *AccountPool) SetReconnector(fn func(ctx context.Context, accountID string) error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reconnect = fn
+}
+
+// Reconnect 调用已设置的重新连接函数为指定账号重新连接并初始化
+func (p *AccountPool) Reconnect(ctx context.Context, accountID string) error {
+	p.mu.Lock()
+	fn := p.reconnect
+	p.mu.Unlock()
+	if fn == nil {
+		return errors.New("未配置重新连接器")
+	}
+	return fn(ctx, accountID)
+}
+
+// reportProxyBlocked 在代理遭 Google 人机验证拦截时通知外部
+func (p *AccountPool) reportProxyBlocked(proxyURL string, err error) {
+	if p.proxyBlocked != nil && proxyURL != "" {
+		p.proxyBlocked(proxyURL, err)
+	}
 }
 
 // reportTransport 在 err 为连接、TLS 或代理错误时调用 OnTransportError 设置的函数，调用方持有 p.mu
@@ -515,9 +552,11 @@ func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, e
 		if binding, ok := p.sessions[sessionKey]; ok && now.Before(binding.ExpiresAt) {
 			entry := p.entry(binding.AccountID)
 			if entry != nil && entry.schedulable(now, modelID) {
-				entry.LastUsed = now
-				p.sessions[sessionKey] = sessionBinding{AccountID: entry.AccountID, ExpiresAt: now.Add(p.sessionTTL)}
-				return entry.Client, entry.AccountID
+				if _, excluded := excludedAccountIDs[entry.AccountID]; !excluded {
+					entry.LastUsed = now
+					p.sessions[sessionKey] = sessionBinding{AccountID: entry.AccountID, ExpiresAt: now.Add(p.sessionTTL)}
+					return entry.Client, entry.AccountID
+				}
 			}
 			return nil, binding.AccountID
 		}
@@ -614,6 +653,9 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 		return
 	}
 	entry.ConsecutiveFails++
+	if errors.Is(err, gemini.ErrCaptcha) && entry.Info.ProxySource == "pool" {
+		p.reportProxyBlocked(entry.Info.Proxy, err)
+	}
 	if gemini.IsAuthenticationError(err) {
 		entry.State = StateAuthRequired
 		logging.Warn(accountID, "账号待认证", "原因", err)
@@ -640,7 +682,7 @@ func failureScope(err error) (bool, string) {
 	var protocolErr *gemini.ProtocolError
 	if errors.As(err, &protocolErr) {
 		switch protocolErr.Code {
-		case 1037:
+		case 1037, 1173:
 			return true, "usage_limit"
 		case 1095:
 			return true, "rate_limited"
@@ -662,7 +704,7 @@ func failureScope(err error) (bool, string) {
 // usageReset 对用量上限与模型降级返回官网已用满的用量窗口的重置时间
 func usageReset(client *gemini.Client, err error) time.Time {
 	var protocolErr *gemini.ProtocolError
-	limited := errors.As(err, &protocolErr) && protocolErr.Code == 1037 || errors.Is(err, gemini.ErrModelMismatch)
+	limited := errors.As(err, &protocolErr) && (protocolErr.Code == 1037 || protocolErr.Code == 1173) || errors.Is(err, gemini.ErrModelMismatch)
 	if !limited || client == nil {
 		return time.Time{}
 	}
@@ -933,6 +975,15 @@ func (e *accountEntry) schedulable(now time.Time, modelID string) bool {
 	return e.Client != nil && e.State == StateReady && e.blockedUntil(now, modelID).IsZero() && e.supportsModel(modelID)
 }
 
+// isQuotaLimitedModel 报告模型是否受 Pro/Advanced 5小时用量周期限制
+func isQuotaLimitedModel(modelID string) bool {
+	id := strings.ToLower(modelID)
+	if strings.Contains(id, "flash") && !strings.Contains(id, "task") {
+		return false
+	}
+	return strings.Contains(id, "argon") || strings.Contains(id, "pro") || strings.Contains(id, "deep-research") || strings.Contains(id, "task") || strings.Contains(id, "video")
+}
+
 // blockedUntil 返回账号或目标模型冷却的结束时间，没有冷却时为零值
 func (e *accountEntry) blockedUntil(now time.Time, modelID string) time.Time {
 	var until time.Time
@@ -941,6 +992,26 @@ func (e *accountEntry) blockedUntil(now time.Time, modelID string) time.Time {
 	}
 	if value, ok := e.ModelCooldowns[modelID]; ok && now.Before(value.until) && value.until.After(until) {
 		until = value.until
+	}
+	baseID := strings.TrimSuffix(modelID, "-task")
+	if baseID != modelID {
+		if value, ok := e.ModelCooldowns[baseID]; ok && now.Before(value.until) && value.until.After(until) {
+			until = value.until
+		}
+	} else {
+		taskID := modelID + "-task"
+		if value, ok := e.ModelCooldowns[taskID]; ok && now.Before(value.until) && value.until.After(until) {
+			until = value.until
+		}
+	}
+	if isQuotaLimitedModel(modelID) && e.Client != nil {
+		if usage := e.Client.CachedUsage(); usage != nil {
+			for _, window := range []*gemini.UsageWindow{usage.Current, usage.Weekly} {
+				if window != nil && window.UsedRatio >= 1 && now.Before(window.ResetAt) && window.ResetAt.After(until) {
+					until = window.ResetAt
+				}
+			}
+		}
 	}
 	return until
 }
@@ -980,7 +1051,7 @@ func (p *AccountPool) nextAvailable(now time.Time, modelID string, excludedAccou
 	return p.nextFrom(now, modelID, excludedAccountIDs, true)
 }
 
-// nextFrom 在账号或访客会话中按上下文窗口与调度策略选择
+// nextFrom 在账号或访客会话中按单账号配额耗尽优先与上下文窗口统一选择
 func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs map[string]struct{}, guest bool) *accountEntry {
 	if len(p.entries) == 0 {
 		return nil
@@ -1000,21 +1071,62 @@ func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs
 		return nil
 	}
 
-	start := p.index
-	if p.strategy == FillFirst {
-		start = 0
+	quotaRatio := func(entry *accountEntry) float64 {
+		if entry.Client == nil || !isQuotaLimitedModel(modelID) {
+			return 0
+		}
+		usage := entry.Client.CachedUsage()
+		if usage == nil || usage.Current == nil {
+			return 0
+		}
+		if now.After(usage.Current.ResetAt) {
+			return 0
+		}
+		return usage.Current.UsedRatio
 	}
-	for _, idleOnly := range []bool{true, false} {
-		for offset := uint64(0); offset < uint64(len(p.entries)); offset++ {
-			idx := (start + offset) % uint64(len(p.entries))
-			entry := p.entries[idx]
-			if eligible(entry) && entry.Client.ContextWindow() == maxContextWindow && (!idleOnly || !entry.Client.Busy()) {
-				p.index = idx + 1
-				return entry
-			}
+
+	type candidate struct {
+		entry     *accountEntry
+		origIndex int
+		usedRatio float64
+		busy      bool
+	}
+	candidates := make([]candidate, 0, len(p.entries))
+	for idx, entry := range p.entries {
+		if eligible(entry) && entry.Client.ContextWindow() == maxContextWindow {
+			candidates = append(candidates, candidate{
+				entry:     entry,
+				origIndex: idx,
+				usedRatio: quotaRatio(entry),
+				busy:      entry.Client.Busy(),
+			})
 		}
 	}
-	return nil
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// 统一调度策略：单账号配额耗尽优先（Exhaust-First）
+	// 1. 空闲账号优先（!busy 优先于 busy）
+	// 2. 正在消耗配额的账号优先（0 < usedRatio < 1 降序），优先完全耗尽单一账号额度，避免分散消耗多个账号的 5 小时窗口
+	// 3. 配额消耗相同时，严格保持账号列表原始顺序（origIndex），逐个账号依次耗尽
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.busy != b.busy {
+			return !a.busy && b.busy
+		}
+		aInProgress := a.usedRatio > 0 && a.usedRatio < 1
+		bInProgress := b.usedRatio > 0 && b.usedRatio < 1
+		if aInProgress != bInProgress {
+			return aInProgress
+		}
+		if aInProgress && bInProgress && a.usedRatio != b.usedRatio {
+			return a.usedRatio > b.usedRatio
+		}
+		return a.origIndex < b.origIndex
+	})
+
+	return candidates[0].entry
 }
 
 // guest 报告条目是否为访客会话

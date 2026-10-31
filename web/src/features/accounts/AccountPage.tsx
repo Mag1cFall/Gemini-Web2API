@@ -176,7 +176,15 @@ export function AccountPage() {
           </span>
         }
         description={[
-          account.source === 'chrome' ? m.sourceChrome : m.sourceCookie,
+          account.source === 'chrome'
+            ? m.sourceChrome
+            : account.source === 'brave'
+              ? m.sourceBrave
+              : account.source === 'edge'
+                ? m.sourceEdge
+                : account.source === 'firefox'
+                  ? m.sourceFirefox
+                  : m.sourceCookie,
           account.profile,
           account.tier,
         ]

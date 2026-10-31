@@ -38,9 +38,10 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	flags.SetOutput(stderr)
 	var profiles stringList
 	var emails stringList
-	flags.Var(&profiles, "profile", "要导入的 Chrome Profile，可重复")
-	flags.Var(&emails, "email", "要导入的 Google 邮箱，可重复")
-	chromeRoot := flags.String("chrome-root", "", "Chrome User Data 目录")
+	flags.Var(&profiles, "profile", "要导入的浏览器 Profile，可重复")
+	flags.Var(&emails, "email", "要导入的 Google 邮箱或 Profile 名称，可重复")
+	browserFlag := flags.String("browser", "chrome", "要导入的浏览器 (chrome、brave、edge、firefox)")
+	chromeRoot := flags.String("chrome-root", "", "浏览器 User Data 目录（可覆盖默认路径）")
 	output := flags.String("output", "auth", "认证状态输出目录")
 	remote := flags.String("remote", "", "把导入的账号上传到远程实例，例如 https://example.com，配对令牌从标准输入读取")
 	proxy := flags.String("proxy", "", "账号固定代理 URL")
@@ -115,15 +116,46 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 		return fmt.Errorf("--id、--authuser 只与 --cookie、--cookie-file 一起使用")
 	}
 
-	root, err := resolveChromeRoot(*chromeRoot)
-	if err != nil {
-		return err
+	targetBrowser := strings.ToLower(strings.TrimSpace(*browserFlag))
+	if targetBrowser == "" {
+		targetBrowser = BrowserChrome
 	}
+	root := strings.TrimSpace(*chromeRoot)
+	if root == "" {
+		var err error
+		root, err = DefaultBrowserRoot(targetBrowser)
+		if err != nil {
+			return err
+		}
+	} else {
+		var err error
+		root, err = filepath.Abs(root)
+		if err != nil {
+			return fmt.Errorf("解析浏览器目录: %w", err)
+		}
+	}
+
 	if len(profiles) == 0 && len(emails) == 0 {
 		if !interactive {
 			return fmt.Errorf("非交互模式请通过 --profile 或 --email 选择账号")
 		}
-		accounts, err := Discover(root)
+		accounts, err := DiscoverBrowser(targetBrowser, root)
+		if (err != nil || len(accounts) == 0) && targetBrowser == BrowserChrome && *chromeRoot == "" {
+			altBrowsers := []string{BrowserBrave, BrowserEdge, BrowserFirefox}
+			for _, b := range altBrowsers {
+				altRoot, rErr := DefaultBrowserRoot(b)
+				if rErr == nil {
+					if accs, dErr := DiscoverBrowser(b, altRoot); dErr == nil && len(accs) > 0 {
+						targetBrowser = b
+						root = altRoot
+						accounts = accs
+						err = nil
+						fmt.Fprintf(stderr, "未发现 Chrome 账号，自动切换到 %s\n", b)
+						break
+					}
+				}
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -133,8 +165,9 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 		}
 	}
 
-	results, modelCount, err := Import(ctx, ImportOptions{
-		ChromeRoot:   root,
+	results, modelCount, err := ImportBrowser(ctx, BrowserImportOptions{
+		Browser:      targetBrowser,
+		BrowserRoot:  root,
 		Output:       outputPath,
 		Proxy:        proxyURL,
 		RequestProxy: requestProxy,
@@ -151,7 +184,7 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	return finish(paths, modelCount)
 }
 
-// promptAccounts 列出可导入账号并按输入的编号返回选中账号的邮箱
+// promptAccounts 列出可导入账号并按输入的编号返回选中账号的邮箱或 Profile
 func promptAccounts(accounts []Account, input io.Reader, output io.Writer) (stringList, error) {
 	available := make([]Account, 0, len(accounts))
 	for _, account := range accounts {
@@ -160,11 +193,19 @@ func promptAccounts(accounts []Account, input io.Reader, output io.Writer) (stri
 		}
 	}
 	if len(available) == 0 {
-		return nil, fmt.Errorf("本机 Chrome 没有可导入账号")
+		return nil, fmt.Errorf("没有可导入账号")
 	}
 	fmt.Fprintln(output, "可导入账号:")
 	for index, account := range available {
-		fmt.Fprintf(output, "%d. %s  %s  %s\n", index+1, account.Email, account.Profile, account.DisplayName)
+		extra := ""
+		if account.SourceType == "cookie" {
+			extra = " [Cookie]"
+		}
+		label := account.Email
+		if label == "" {
+			label = account.Profile
+		}
+		fmt.Fprintf(output, "%d. %s  %s  %s%s\n", index+1, label, account.Profile, account.DisplayName, extra)
 	}
 	fmt.Fprint(output, "请输入逗号分隔的编号: ")
 	line, err := bufio.NewReader(input).ReadString('\n')
@@ -178,28 +219,25 @@ func promptAccounts(accounts []Account, input io.Reader, output io.Writer) (stri
 	selected := make(stringList, 0)
 	seen := make(map[int]struct{})
 	for _, raw := range strings.Split(line, ",") {
-		index, err := strconv.Atoi(strings.TrimSpace(raw))
-		if err != nil || index < 1 || index > len(available) {
-			return nil, fmt.Errorf("账号编号 %q 无效", strings.TrimSpace(raw))
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
 		}
-		if _, exists := seen[index]; exists {
+		index, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || index < 1 || index > len(available) {
+			return nil, fmt.Errorf("编号无效: %q", raw)
+		}
+		if _, ok := seen[index]; ok {
 			continue
 		}
 		seen[index] = struct{}{}
-		selected = append(selected, available[index-1].Email)
+		target := available[index-1].Email
+		if target == "" {
+			target = available[index-1].Profile
+		}
+		selected = append(selected, target)
 	}
 	return selected, nil
-}
-
-func resolveChromeRoot(value string) (string, error) {
-	if strings.TrimSpace(value) == "" {
-		return DefaultChromeRoot()
-	}
-	root, err := filepath.Abs(strings.TrimSpace(value))
-	if err != nil {
-		return "", fmt.Errorf("解析 Chrome User Data 目录: %w", err)
-	}
-	return root, nil
 }
 
 func writeJSON(writer io.Writer, value any) error {
