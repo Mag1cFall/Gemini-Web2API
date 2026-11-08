@@ -1,9 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { type ReactNode, useState } from 'react'
+import { createContext, type ReactNode, use, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 
+import { Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { DurationInput } from '@/components/ui/duration-input'
 import { Input, Textarea } from '@/components/ui/input'
 import { NumberInput } from '@/components/ui/number-input'
 import { Card, CardHeader, PageHeader } from '@/components/ui/page'
@@ -12,11 +14,15 @@ import { ErrorState, Loading } from '@/components/ui/states'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
+import { Tooltip } from '@/components/ui/tooltip'
+import { useAccounts } from '@/features/accounts/queries'
+import { maskKey, parseKeyAccounts } from '@/features/settings/apiKeys'
 import { ListInput } from '@/features/settings/ListInput'
 import { settingsMessages } from '@/features/settings/messages'
 import { ProxyPoolCard } from '@/features/settings/ProxyPoolCard'
 import { configKey, proxiesKey, useConfig } from '@/features/settings/queries'
 import type { ConfigPatch, ServiceConfig } from '@/features/settings/types'
+import { FilterMenu } from '@/features/usage/FilterMenu'
 import { api } from '@/lib/api'
 import { fill, useMessages } from '@/lib/i18n'
 
@@ -44,10 +50,42 @@ const editableKeys = [
   'listen_addr',
   'auth_states',
   'log_format',
+  'api_key_accounts',
+  'first_event_hedge',
+  'first_event_hedge_models',
 ] as const
 
 // restartKeys 是重启服务后才生效的配置项
 const restartKeys = new Set<string>(['listen_addr', 'auth_states', 'log_format'])
+
+// envNames 是各配置项在 .env 中的名称
+const envNames: Record<string, string> = {
+  proxy_api_key: 'PROXY_API_KEY',
+  proxy: 'PROXY',
+  save_history: 'GEMINI_SAVE_HISTORY',
+  model_mapping: 'MODEL_MAPPING',
+  account_cooldown: 'ACCOUNT_COOLDOWN',
+  session_ttl: 'SESSION_TTL',
+  init_timeout: 'INIT_TIMEOUT',
+  per_account_concurrency: 'PER_ACCOUNT_CONCURRENCY',
+  routing_strategy: 'ROUTING_STRATEGY',
+  log_level: 'LOG_LEVEL',
+  request_body_log: 'REQUEST_BODY_LOG',
+  log_file: 'LOG_FILE',
+  log_max_total_mb: 'LOG_MAX_TOTAL_MB',
+  admin_auth_enabled: 'ADMIN_AUTH_ENABLED',
+  admin_username: 'ADMIN_USERNAME',
+  admin_password: 'ADMIN_PASSWORD',
+  listen_addr: 'LISTEN_ADDR',
+  auth_states: 'GEMINI_AUTH_STATES',
+  log_format: 'LOG_FORMAT',
+  api_key_accounts: 'API_KEY_ACCOUNTS',
+  first_event_hedge: 'FIRST_EVENT_HEDGE',
+  first_event_hedge_models: 'FIRST_EVENT_HEDGE_MODELS',
+}
+
+// LockedContext 提供由环境变量或启动参数决定的配置项，键为 .env 名
+const LockedContext = createContext<ServiceConfig['locked']>({})
 
 // SettingRow 是行卡片中的一行：左侧名称、说明与生效方式，右侧控件
 function SettingRow({
@@ -66,6 +104,8 @@ function SettingRow({
   children: ReactNode
 }) {
   const m = useMessages(settingsMessages)
+  const key = envNames[id] ?? id
+  const locked = use(LockedContext)[key]
   return (
     <div
       className={
@@ -79,12 +119,25 @@ function SettingRow({
         </label>
         <p id={id + '-hint'} className="text-xs text-foreground-muted">
           {hint}
-          <span className="ml-2 rounded-sm bg-muted px-[6px] whitespace-nowrap text-foreground-muted">
-            {restart ? m.restart : m.immediate}
-          </span>
+          {locked ? (
+            <Tooltip label={locked === 'env' ? fill(m.lockedEnvHint, { key }) : m.lockedFlagHint}>
+              <button type="button" className="ml-2 inline-flex cursor-default align-middle">
+                <Tag>{locked === 'env' ? m.lockedEnv : m.lockedFlag}</Tag>
+              </button>
+            </Tooltip>
+          ) : (
+            <span className="ml-2 rounded-sm bg-muted px-[6px] whitespace-nowrap text-foreground-muted">
+              {restart ? m.restart : m.immediate}
+            </span>
+          )}
         </p>
       </div>
-      <div className="flex w-full shrink-0 justify-end md:w-[260px]">{children}</div>
+      <fieldset
+        disabled={Boolean(locked)}
+        className="flex w-full min-w-0 shrink-0 justify-end md:w-[260px]"
+      >
+        {children}
+      </fieldset>
     </div>
   )
 }
@@ -128,6 +181,57 @@ function SwitchControl({
         aria-describedby={id + '-hint'}
       />
     </span>
+  )
+}
+
+// KeyAccounts 为每个 API key 选择可用账号，读写 API_KEY_ACCOUNTS 的 key:账号|账号 写法，不选账号的 key 可用全部账号
+function KeyAccounts({
+  keys,
+  value,
+  onChange,
+}: {
+  keys: string[]
+  value: string
+  onChange: (value: string) => void
+}) {
+  const m = useMessages(settingsMessages)
+  const accounts = useAccounts().data?.accounts ?? []
+  const bindings = parseKeyAccounts(value)
+  if (keys.length === 0) {
+    return <p className="text-sm text-foreground-muted">{m.keyAccountsNone}</p>
+  }
+  const label = (id: string) => accounts.find((item) => item.account_id === id)?.email ?? id
+  return (
+    <ul className="flex w-full flex-col gap-2">
+      {keys.map((key) => {
+        const selected = bindings.get(key) ?? []
+        return (
+          <li key={key} className="flex min-w-0 items-center justify-between gap-2">
+            <code className="min-w-0 truncate font-mono text-sm" title={key}>
+              {maskKey(key)}
+            </code>
+            <FilterMenu
+              label={selected.length === 0 ? m.keyAccountsAll : selected.map(label).join(', ')}
+              options={accounts.map((item) => item.account_id)}
+              selected={selected}
+              format={label}
+              onChange={(next) => {
+                const updated = new Map(bindings)
+                if (next.length > 0) updated.set(key, next)
+                else updated.delete(key)
+                onChange(
+                  [...updated]
+                    .filter(([item]) => keys.includes(item))
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([item, ids]) => item + ':' + ids.join('|'))
+                    .join(','),
+                )
+              }}
+            />
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 
@@ -179,9 +283,32 @@ export function SettingsPage() {
   const dirty = Object.keys(patch).length > 0
   const labels: Record<string, string> = {
     listen_addr: m.listenAddr,
+    proxy: m.proxy,
     auth_states: m.authStates,
+    save_history: m.saveHistory,
+    model_mapping: m.modelMapping,
+    per_account_concurrency: m.perAccountConcurrency,
+    routing_strategy: m.routingStrategy,
+    account_cooldown: m.accountCooldown,
+    session_ttl: m.sessionTtl,
+    init_timeout: m.initTimeout,
+    proxy_api_key: m.apiKey,
+    admin_auth_enabled: m.adminAuthSwitch,
+    admin_username: m.adminUsername,
+    log_level: m.logLevel,
     log_format: m.logFormat,
+    log_file: m.logFile,
+    log_max_total_mb: m.logMaxTotal,
+    request_body_log: m.requestBodyLog,
+    api_key_accounts: m.keyAccounts,
+    first_event_hedge: m.firstEventHedge,
+    first_event_hedge_models: m.hedgeModels,
   }
+  const hedgeMode = ['off', 'auto'].includes(value.first_event_hedge)
+    ? value.first_event_hedge
+    : 'fixed'
+  const envLabel = (key: string) =>
+    labels[Object.keys(envNames).find((field) => envNames[field] === key) ?? ''] ?? key
   const text = (key: 'listen_addr' | 'auth_states' | 'admin_username', placeholder = '') => (
     <Input
       id={key}
@@ -193,24 +320,37 @@ export function SettingsPage() {
       }}
     />
   )
-  const duration = (
-    key: 'account_cooldown' | 'session_ttl' | 'init_timeout',
-    placeholder: string,
-  ) => (
-    <Input
+  const duration = (key: 'account_cooldown' | 'session_ttl' | 'init_timeout', label: string) => (
+    <DurationInput
       id={key}
       value={value[key]}
-      placeholder={placeholder}
       aria-describedby={key + '-hint'}
-      className="w-[120px]"
-      onChange={(event) => {
-        set(key, event.target.value)
+      units={{ s: m.unitSeconds, m: m.unitMinutes, h: m.unitHours }}
+      unitLabel={fill(m.unitOf, { name: label })}
+      onChange={(next) => {
+        set(key, next)
       }}
     />
   )
   return (
-    <>
+    <LockedContext value={original.locked}>
       <PageHeader title={m.title} description={m.description} />
+      {original.invalid.length > 0 && (
+        <Callout tone="warning" role="status">
+          {m.invalidNotice}
+          <ul className="mt-1 list-disc pl-5">
+            {original.invalid.map((item) => (
+              <li key={item.key}>
+                <code className="font-mono">
+                  {item.key}
+                  {item.value && '=' + item.value}
+                </code>
+                {' · ' + envLabel(item.key)}
+              </li>
+            ))}
+          </ul>
+        </Callout>
+      )}
       {original.restart_required && (
         <Callout tone="warning" role="status">
           {fill(m.pendingRestart, {
@@ -326,13 +466,58 @@ export function SettingsPage() {
             />
           </SettingRow>
           <SettingRow id="account_cooldown" label={m.accountCooldown} hint={m.accountCooldownHint}>
-            {duration('account_cooldown', '2m')}
+            {duration('account_cooldown', m.accountCooldown)}
           </SettingRow>
           <SettingRow id="session_ttl" label={m.sessionTtl} hint={m.sessionTtlHint}>
-            {duration('session_ttl', '30m')}
+            {duration('session_ttl', m.sessionTtl)}
           </SettingRow>
           <SettingRow id="init_timeout" label={m.initTimeout} hint={m.initTimeoutHint}>
-            {duration('init_timeout', '20s')}
+            {duration('init_timeout', m.initTimeout)}
+          </SettingRow>
+          <SettingRow id="first_event_hedge" label={m.firstEventHedge} hint={m.firstEventHedgeHint}>
+            <span className="flex items-center gap-2">
+              <Select
+                id="first_event_hedge"
+                label={m.firstEventHedge}
+                value={hedgeMode}
+                className="w-[128px]"
+                onValueChange={(next) => {
+                  set('first_event_hedge', next === 'fixed' ? '30' : next)
+                }}
+                options={[
+                  { value: 'off', label: m.hedgeOff },
+                  { value: 'auto', label: m.hedgeAuto },
+                  { value: 'fixed', label: m.hedgeFixed },
+                ]}
+              />
+              {hedgeMode === 'fixed' && (
+                <>
+                  <NumberInput
+                    aria-label={m.hedgeFixed}
+                    value={Number(value.first_event_hedge)}
+                    min={1}
+                    max={600}
+                    decreaseLabel={m.decrease}
+                    increaseLabel={m.increase}
+                    onChange={(next) => {
+                      set('first_event_hedge', String(next))
+                    }}
+                  />
+                  <span className="text-sm text-foreground-muted">{m.unitSeconds}</span>
+                </>
+              )}
+            </span>
+          </SettingRow>
+          <SettingRow id="first_event_hedge_models" label={m.hedgeModels} hint={m.hedgeModelsHint}>
+            <Input
+              id="first_event_hedge_models"
+              value={value.first_event_hedge_models}
+              aria-describedby="first_event_hedge_models-hint"
+              className="font-mono"
+              onChange={(event) => {
+                set('first_event_hedge_models', event.target.value)
+              }}
+            />
           </SettingRow>
         </SettingCard>
       )}
@@ -348,6 +533,20 @@ export function SettingsPage() {
               removeLabel={m.apiKeyRemove}
               onChange={(next) => {
                 set('proxy_api_key', next)
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            id="api_key_accounts"
+            label={m.keyAccounts}
+            hint={m.keyAccountsHint}
+            align="start"
+          >
+            <KeyAccounts
+              keys={value.proxy_api_key.split(',').filter(Boolean)}
+              value={value.api_key_accounts}
+              onChange={(next) => {
+                set('api_key_accounts', next)
               }}
             />
           </SettingRow>
@@ -429,18 +628,21 @@ export function SettingsPage() {
             />
           </SettingRow>
           <SettingRow id="log_max_total_mb" label={m.logMaxTotal} hint={m.logMaxTotalHint}>
-            <NumberInput
-              id="log_max_total_mb"
-              aria-describedby="log_max_total_mb-hint"
-              value={value.log_max_total_mb}
-              min={20}
-              max={100000}
-              decreaseLabel={m.decrease}
-              increaseLabel={m.increase}
-              onChange={(next) => {
-                set('log_max_total_mb', next)
-              }}
-            />
+            <span className="flex items-center gap-2">
+              <NumberInput
+                id="log_max_total_mb"
+                aria-describedby="log_max_total_mb-hint"
+                value={value.log_max_total_mb}
+                min={20}
+                max={100000}
+                decreaseLabel={m.decrease}
+                increaseLabel={m.increase}
+                onChange={(next) => {
+                  set('log_max_total_mb', next)
+                }}
+              />
+              <span className="text-sm text-foreground-muted">{m.megabytes}</span>
+            </span>
           </SettingRow>
           <SettingRow id="request_body_log" label={m.requestBodyLog} hint={m.requestBodyLogHint}>
             <SwitchControl
@@ -487,6 +689,6 @@ export function SettingsPage() {
           </div>
         </div>
       )}
-    </>
+    </LockedContext>
   )
 }

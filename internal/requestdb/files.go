@@ -247,9 +247,11 @@ func scanFiles(rows *sql.Rows) ([]StoredFile, error) {
 	return files, rows.Err()
 }
 
-// purgeExpiredFiles 删除已过期的文件
+// purgeExpiredFiles 删除已过期的文件与生成超过 GeneratedRetention 的生成文件
 func (store *Store) purgeExpiredFiles(ctx context.Context) {
-	rows, err := store.db.QueryContext(ctx, `SELECT id FROM files WHERE expires_at > 0 AND expires_at < ?`, time.Now().UnixMilli())
+	now := time.Now()
+	rows, err := store.db.QueryContext(ctx, `SELECT id FROM files WHERE expires_at > 0 AND expires_at < ? OR source = 'generated' AND created_at < ?`,
+		now.UnixMilli(), now.Add(-GeneratedRetention).UnixMilli())
 	if err != nil {
 		return
 	}

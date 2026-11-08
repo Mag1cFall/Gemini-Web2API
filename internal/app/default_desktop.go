@@ -61,16 +61,16 @@ func runDefault(args []string) error {
 		return fmt.Errorf("定位可执行文件: %w", err)
 	}
 	return desktop.Run(desktop.Options{
-		URL:     AdminURL(cfg.ListenAddress),
 		Title:   appName,
 		DataDir: filepath.Join(workDir, dataDir, "webview"),
 		Hidden:  hidden,
-		Serve: func(ctx context.Context) error {
+		Serve: func(ctx context.Context, ready func(string)) error {
 			instance, err := Start(cfg, nil, true)
 			if err != nil {
 				return err
 			}
 			instance.executable, instance.restart = executable, desktopRestart
+			ready(AdminURL(instance.Address()))
 			return instance.Serve(ctx)
 		},
 	})

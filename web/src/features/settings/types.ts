@@ -19,9 +19,25 @@ export interface ServiceConfig {
   listen_addr: string
   auth_states: string
   log_format: 'json' | 'text'
+  // api_key_accounts 是 API key 可用账号的 .env 写法：key:账号|账号，逗号分隔
+  api_key_accounts: string
+  // first_event_hedge 是首事件备用请求方式：off、auto 或等待秒数
+  first_event_hedge: string
+  first_event_hedge_models: string
   active_listen_addr: string
   restart_required: boolean
   restart_fields: string[]
+  // invalid 是启动时取值无效、按默认值运行的 .env 项
+  invalid: InvalidValue[]
+  // locked 是由进程环境变量（env）或启动参数（flag）决定的配置项，键为 .env 名
+  locked: Record<string, 'env' | 'flag'>
+}
+
+// InvalidValue 对应 internal/config 的 InvalidValue
+export interface InvalidValue {
+  key: string
+  value: string
+  reason: string
 }
 
 // ConfigPatch 是提交给 PUT /api/config 的可写字段
@@ -45,6 +61,9 @@ export type ConfigPatch = Partial<{
   listen_addr: string
   auth_states: string
   log_format: ServiceConfig['log_format']
+  api_key_accounts: string
+  first_event_hedge: string
+  first_event_hedge_models: string
 }>
 
 // ProxyStatus 对应 GET /api/proxies 的 proxy，checked_at 在首次检测前省略

@@ -6,6 +6,7 @@ import { z } from 'zod'
 
 import { Header } from '@/app/Header'
 import { appMessages } from '@/app/messages'
+import { SessionError } from '@/app/SessionError'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Field } from '@/components/ui/field'
@@ -146,7 +147,10 @@ export function LoginPage() {
     },
   })
   if (session.isPending) return <Loading label={app.loading} />
-  if (session.data?.authenticated) return <Navigate to={next} replace />
+  if (session.isError && !session.data) {
+    return <SessionError error={session.error} onRetry={() => void session.refetch()} />
+  }
+  if (session.data.authenticated) return <Navigate to={next} replace />
   const errors = form.formState.errors
   return (
     <div className="flex min-h-dvh flex-col safe-x">
@@ -157,7 +161,7 @@ export function LoginPage() {
             <h1 className="text-2xl font-semibold">{m.title}</h1>
             <p className="mt-1 text-sm text-foreground-muted">{m.description}</p>
           </div>
-          {session.data?.enabled === false ? (
+          {!session.data.enabled ? (
             <Callout tone="muted" role="status">
               {m.disabled}
             </Callout>

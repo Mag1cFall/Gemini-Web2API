@@ -1,10 +1,12 @@
 package adapter
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -212,7 +214,9 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				projection := newStreamProjection(bridge, includeThoughts)
 				result, err := generate(choice,
 					func(event gemini.Event) error {
-						stream.release()
+						if !usageOnly(event) {
+							stream.release()
+						}
 						return projection.project(event, func(event gemini.Event) error {
 							if err := writeRole(); err != nil {
 								return err
@@ -335,47 +339,68 @@ func recordChoiceUsage(c *gin.Context, n int, usage *gemini.Usage) {
 	}
 }
 
+// chatToolNames 返回调用 ID 到结果标签的映射，连续的调用消息算作同一轮
+func chatToolNames(messages []ChatMessage) map[string]string {
+	names := map[string]string{}
+	var turn []toolCallRef
+	for _, message := range messages {
+		if len(message.ToolCalls) == 0 {
+			labelToolCalls(names, turn)
+			turn = nil
+		}
+		for _, call := range message.ToolCalls {
+			turn = append(turn, toolCallRef{ID: call.ID, Name: call.Function.Name})
+		}
+	}
+	labelToolCalls(names, turn)
+	return names
+}
+
 func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRequest, continuation bool, bridge ToolBridge) (string, []gemini.FileData, error) {
+	toolNames := chatToolNames(request.Messages)
 	messages := request.Messages
 	if continuation {
 		messages = continuationMessages(messages)
 	}
-	records := make([]map[string]interface{}, 0, len(messages))
+	turns := make([]transcriptTurn, 0, len(messages))
 	var files []gemini.FileData
 	for _, message := range messages {
-		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client)
+		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client, nil)
 		if err != nil {
 			return "", nil, err
 		}
 		files = append(files, attachments...)
 		role := transcriptRole(message.Role)
-		record := map[string]interface{}{"role": role, "content": content}
-		if len(message.TranscriptItems) > 0 {
-			record["events"] = message.TranscriptItems
+		var builder strings.Builder
+		if role == "tool" {
+			writeResultBlock(&builder, cmp.Or(toolNames[message.ToolCallID], message.Name, message.ToolCallID), content)
+		} else {
+			builder.WriteString(speakerText(message.Name, content))
 		}
-		if len(message.ToolCalls) > 0 {
-			record["tool_calls"] = message.ToolCalls
+		for _, item := range message.TranscriptItems {
+			appendTranscriptObject(&builder, item)
 		}
-		if message.ToolCallID != "" {
-			record["tool_call_id"] = message.ToolCallID
+		for _, call := range message.ToolCalls {
+			writeCallBlock(&builder, call.Function.Name, json.RawMessage(call.Function.Arguments))
 		}
-		if role == "tool" && message.Name != "" {
-			record["name"] = message.Name
-		}
-		records = append(records, record)
+		turns = append(turns, transcriptTurn{Role: role, Text: builder.String()})
 	}
-	if len(records) == 0 {
-		records = append(records, map[string]interface{}{"role": "user", "content": "Hello"})
-	}
-	transcript, err := renderTranscript(records)
-	if err != nil {
-		return "", nil, err
+	if len(turns) == 0 {
+		turns = append(turns, transcriptTurn{Role: "user", Text: "Hello"})
 	}
 	suffix, err := bridge.PromptSuffix()
 	if err != nil {
 		return "", nil, err
 	}
-	return transcript + suffix, files, nil
+	return renderTranscript(turns, suffix), files, nil
+}
+
+// speakerText 在带 name 的消息正文前写上说话人名称
+func speakerText(name string, text string) string {
+	if name == "" || text == "" {
+		return text
+	}
+	return name + ": " + text
 }
 
 func buildOpenAIResponse(responseID string, created int64, result generationResult, bridge ToolBridge, includeThoughts bool, audioOptions *ChatAudioOptions) (gin.H, error) {

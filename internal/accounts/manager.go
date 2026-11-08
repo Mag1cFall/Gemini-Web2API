@@ -637,6 +637,28 @@ func (m *Manager) ImportChrome(ctx context.Context, emails []string, proxy strin
 	return ids, nil
 }
 
+// CookieAccount 是 Cookie 中一个已登录的账号、按邮箱生成的账号 ID 及其导入状态
+type CookieAccount struct {
+	chromeauth.CookieAccount
+	ID       string `json:"id"`
+	Imported bool   `json:"imported"`
+}
+
+// DiscoverCookie 识别 Cookie 中各会话登录的账号，并标出已导入的账号
+func (m *Manager) DiscoverCookie(ctx context.Context, cookies string, proxy string) ([]CookieAccount, error) {
+	found, err := chromeauth.DiscoverCookieAccounts(ctx, cookies, proxy, m.importProxy())
+	if err != nil {
+		return nil, err
+	}
+	ids := m.IDs()
+	result := make([]CookieAccount, len(found))
+	for index, account := range found {
+		id := chromeauth.AccountID(account.Email)
+		result[index] = CookieAccount{CookieAccount: account, ID: id, Imported: slices.Contains(ids, id)}
+	}
+	return result, nil
+}
+
 // ImportCookie 从 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt 导入账号并启动
 func (m *Manager) ImportCookie(ctx context.Context, cookies string, id string, proxy string, authUser int) (string, error) {
 	settings := m.Settings()

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -21,7 +22,12 @@ var errCatalogNotReady = &gemini.ProtocolError{HTTPStatus: http.StatusServiceUna
 
 // modelKnown 判断模型能否识别：没有任何模型目录时为 503；已读取的目录都没有该模型时，有账号尚未读取目录为 503 并写明其状态，否则为 404
 func modelKnown(pool *balancer.AccountPool, modelName string) error {
-	availability := pool.ModelAvailability(config.MapModel(modelName))
+	availability := pool.ModelAvailability(context.Background(), config.MapModel(modelName))
+	return catalogError(modelName, availability, modelNotFoundMessage(pool, modelName))
+}
+
+// catalogError 按模型目录情况返回模型不能识别的错误，能识别时为空，已读取的目录都没有该模型时以 notFound 为 404 说明
+func catalogError(modelName string, availability balancer.ModelAvailability, notFound string) error {
 	switch {
 	case availability.Known:
 		return nil
@@ -30,7 +36,7 @@ func modelKnown(pool *balancer.AccountPool, modelName string) error {
 	case len(availability.Pending) > 0:
 		return &gemini.ProtocolError{HTTPStatus: http.StatusServiceUnavailable, Message: fmt.Sprintf("模型 %q 不在已读取的模型目录中，尚未读取模型目录的账号：%s", modelName, strings.Join(availability.Pending, "；"))}
 	}
-	return &gemini.ProtocolError{HTTPStatus: http.StatusNotFound, Message: modelNotFoundMessage(pool, modelName)}
+	return &gemini.ProtocolError{HTTPStatus: http.StatusNotFound, Message: notFound}
 }
 
 // awaitModel 判断模型能否调度：识别失败按 modelKnown，支持该模型的账号都未就绪时为 503 并列出原因，全部冷却时最早恢复的账号在 modelRecoveryWindow 内恢复则等待，否则为 429
@@ -38,14 +44,17 @@ func awaitModel(c *gin.Context, pool *balancer.AccountPool, modelName string) er
 	modelID := config.MapModel(modelName)
 	for {
 		changed := pool.Changed()
-		availability := pool.ModelAvailability(modelID)
+		availability := pool.ModelAvailability(c.Request.Context(), modelID)
 		switch {
 		case availability.Ready:
 			return nil
 		case !availability.Catalog || !availability.Known:
-			return modelKnown(pool, modelName)
+			if err := modelKnown(pool, modelName); err != nil {
+				return err
+			}
+			return catalogError(modelName, availability, fmt.Sprintf("模型 %q 不在当前 API key 绑定账号的模型目录中", modelName))
 		}
-		recoverAt := pool.RetryAfter(modelID)
+		recoverAt := pool.RetryAfter(c.Request.Context(), modelID)
 		if recoverAt.IsZero() {
 			return &gemini.ProtocolError{HTTPStatus: http.StatusServiceUnavailable, Message: fmt.Sprintf("模型 %q 暂无可用账号：%s", modelName, strings.Join(availability.Reasons, "；"))}
 		}

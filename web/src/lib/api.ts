@@ -11,6 +11,17 @@ export class ApiError extends Error {
   }
 }
 
+// basePath 是管理端所在的路径，以 / 结尾；经反向代理挂在子路径下时为该子路径，取自服务写入入口页的 <base>
+export const basePath = new URL(document.baseURI).pathname
+
+// serviceURL 是浏览器访问本服务的根地址，不以 / 结尾
+export const serviceURL = new URL(document.baseURI).origin + basePath.slice(0, -1)
+
+// appURL 把以 / 开头的服务路径换成 basePath 下的路径，其他地址原样返回
+export function appURL(path: string) {
+  return path.startsWith('/') ? basePath + path.slice(1) : path
+}
+
 interface ErrorBody {
   error?: { code?: string; message?: string }
 }
@@ -26,7 +37,7 @@ export async function api<T>(
   if (json !== undefined) headers.set('Content-Type', 'application/json')
   let response: Response
   try {
-    response = await fetch(path, {
+    response = await fetch(appURL(path), {
       ...rest,
       headers,
       body: json === undefined ? (rest.body ?? null) : JSON.stringify(json),

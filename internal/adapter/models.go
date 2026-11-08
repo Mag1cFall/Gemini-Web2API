@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -214,20 +215,54 @@ func RetrieveModelHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	}
 }
 
-// GeminiListModelsHandler 返回 Gemini 模型目录，没有任何目录时返回 503
+// GeminiListModelsHandler 按 pageSize 与 pageToken 分页返回 Gemini 模型目录，没有任何目录时返回 503
 func GeminiListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if len(pool.CatalogAccounts()) == 0 {
 			writeGeminiError(c, http.StatusServiceUnavailable, "UNAVAILABLE", errCatalogNotReady.Message)
 			return
 		}
-		models := availableModels(pool)
+		models, next, err := geminiPage(c, availableModels(pool))
+		if err != nil {
+			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+			return
+		}
 		data := make([]gin.H, 0, len(models))
 		for _, model := range models {
 			data = append(data, geminiModelObject(model))
 		}
-		c.JSON(http.StatusOK, gin.H{"models": data})
+		response := gin.H{"models": data}
+		if next != "" {
+			response["nextPageToken"] = next
+		}
+		c.JSON(http.StatusOK, response)
 	}
+}
+
+// geminiPage 按 Gemini API 的 pageSize（默认 50、最多 1000）与 pageToken（下一页的起始位置）返回一页与下一页令牌
+func geminiPage(c *gin.Context, items []CatalogModel) ([]CatalogModel, string, error) {
+	size, offset := 50, 0
+	if value := c.Query("pageSize"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return nil, "", fmt.Errorf("invalid pageSize %q", value)
+		}
+		if parsed > 0 {
+			size = min(parsed, 1000)
+		}
+	}
+	if token := c.Query("pageToken"); token != "" {
+		parsed, err := strconv.Atoi(token)
+		if err != nil || parsed < 0 || parsed > len(items) {
+			return nil, "", fmt.Errorf("invalid pageToken %q", token)
+		}
+		offset = parsed
+	}
+	end := min(offset+size, len(items))
+	if end < len(items) {
+		return items[offset:end], strconv.Itoa(end), nil
+	}
+	return items[offset:end], "", nil
 }
 
 // GeminiGetModelHandler 返回单个 Gemini 模型

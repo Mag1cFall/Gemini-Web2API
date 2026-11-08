@@ -41,11 +41,15 @@ const errorCardPrefix = "http://googleusercontent.com/card_content/"
 // errorCardPattern 匹配整段正文为错误卡片链接
 var errorCardPattern = regexp.MustCompile(`^http://googleusercontent\.com/card_content/\d+$`)
 
-// failureTextGuard 在主候选正文仍可能是固定失败文字时暂缓正文事件，结束时最终正文整段为固定失败文字则返回可重试错误
+// failureTextGuard 在主候选正文仍可能是失败回复时暂缓正文事件，结束时上游标为失败回复或最终正文整段为固定失败文字则返回可重试错误
 type failureTextGuard struct {
 	emit    func(Event) error
 	pending []Event
 	text    string
+	// flagged 表示上游元数据把本次回答标为失败回复
+	flagged bool
+	// media 表示主候选带有媒体，官网在失败文字旁仍交付视频时按正常回答处理
+	media   bool
 	decided bool
 }
 
@@ -53,13 +57,18 @@ func newFailureTextGuard(emit func(Event) error) *failureTextGuard {
 	return &failureTextGuard{emit: emit}
 }
 
-// Emit 转发事件，正文可能是固定失败文字时暂存，结束时整段相等则返回可重试错误
+// Emit 转发事件，正文可能是失败回复时暂存，结束时上游标为失败回复或整段等于固定失败文字则返回可重试错误
 func (g *failureTextGuard) Emit(event Event) error {
-	if event.Kind == EventText && event.Candidate == 0 {
+	switch {
+	case event.Kind == EventText && event.Candidate == 0:
 		g.text = event.Snapshot
+	case event.Kind == EventMetadata && event.Metadata != nil:
+		g.flagged = event.Metadata.FailureReply
+	case event.Kind == EventMedia && event.Candidate == 0:
+		g.media = true
 	}
 	if g.decided {
-		if event.Kind == EventDone && isFailureText(g.text) {
+		if event.Kind == EventDone && g.failed() {
 			return failureTextError(g.text)
 		}
 		return g.emit(event)
@@ -67,12 +76,12 @@ func (g *failureTextGuard) Emit(event Event) error {
 	switch {
 	case event.Kind == EventText && event.Candidate == 0:
 		g.pending = append(g.pending, event)
-		if isFailureTextPrefix(g.text) {
+		if g.flagged || isFailureTextPrefix(g.text) {
 			return nil
 		}
 		return g.release()
 	case event.Kind == EventDone:
-		if len(g.pending) > 0 && isFailureText(g.text) {
+		if len(g.pending) > 0 && g.failed() {
 			return failureTextError(g.text)
 		}
 		if err := g.release(); err != nil {
@@ -97,6 +106,11 @@ func (g *failureTextGuard) release() error {
 		}
 	}
 	return nil
+}
+
+// failed 报告本次回答是否为失败回复
+func (g *failureTextGuard) failed() bool {
+	return !g.media && (g.flagged || isFailureText(g.text))
 }
 
 func isFailureTextPrefix(text string) bool {

@@ -82,7 +82,9 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildClaudePrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 				}, func(event gemini.Event) error {
-					stream.release()
+					if !usageOnly(event) {
+						stream.release()
+					}
 					if event.Kind == gemini.EventMetadata && event.Usage != nil {
 						return processor.ProcessEvent(event)
 					}
@@ -312,32 +314,50 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 			}
 		}
 	}
-	records := make([]map[string]interface{}, 0, len(messages)+1)
+	turns := make([]transcriptTurn, 0, len(messages)+1)
 	var files []gemini.FileData
 	if !continuation {
 		if system, err := claude.ParseSystemPrompt(request.System); err != nil {
 			return "", nil, err
 		} else if system != "" {
-			records = append(records, map[string]interface{}{"role": "system", "content": system})
+			turns = append(turns, transcriptTurn{Role: "system", Text: system})
 		}
 	}
+	toolNames := claudeToolNames(request.Messages)
 	for _, message := range messages {
-		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client)
+		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client, toolNames)
 		if err != nil {
 			return "", nil, err
 		}
-		records = append(records, map[string]interface{}{"role": transcriptRole(message.Role), "content": content})
+		turns = append(turns, transcriptTurn{Role: transcriptRole(message.Role), Text: content})
 		files = append(files, attachments...)
-	}
-	transcript, err := renderTranscript(records)
-	if err != nil {
-		return "", nil, err
 	}
 	suffix, err := bridge.PromptSuffix()
 	if err != nil {
 		return "", nil, err
 	}
-	return transcript + suffix, files, nil
+	return renderTranscript(turns, suffix), files, nil
+}
+
+// claudeToolNames 返回消息中 tool_use 的调用 ID 到结果标签的映射
+func claudeToolNames(messages []claude.Message) map[string]string {
+	names := map[string]string{}
+	for _, message := range messages {
+		var blocks []struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(message.Content, &blocks)
+		var turn []toolCallRef
+		for _, block := range blocks {
+			if block.Type == "tool_use" {
+				turn = append(turn, toolCallRef{ID: block.ID, Name: block.Name})
+			}
+		}
+		labelToolCalls(names, turn)
+	}
+	return names
 }
 
 func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
@@ -347,6 +367,13 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 		if tool.IsWebSearch() {
 			bridge.WebSearch = true
 			webTool = true
+			continue
+		}
+		kind := ""
+		if tool.Type != nil {
+			kind = strings.ToLower(*tool.Type)
+		}
+		if anthropicServerTool(kind) {
 			continue
 		}
 		if tool.Name == nil || *tool.Name == "" {
@@ -359,6 +386,9 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 		description := ""
 		if tool.Description != nil {
 			description = *tool.Description
+		}
+		if text, schema := anthropicDefinedTool(tool, kind); schema != nil {
+			description, parameters = text, schema
 		}
 		bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: *tool.Name, Description: description, Parameters: parameters})
 	}

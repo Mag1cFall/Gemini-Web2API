@@ -9,6 +9,7 @@ import type { Cooldown, Model } from '@/features/models/types'
 import type { RequestInfo } from '@/features/requests/types'
 import { statusKey } from '@/features/service/queries'
 import type { ServiceStatus } from '@/features/service/types'
+import { appURL } from '@/lib/api'
 
 // logsKey 保存事件流推送的服务日志，最多 2000 条
 export const logsKey = ['logs'] as const
@@ -102,7 +103,7 @@ export function useAdminEvents(enabled: boolean): EventsConnection {
   const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     if (!enabled) return
-    const source = new EventSource('/api/events')
+    const source = new EventSource(appURL('/api/events'))
     let timer: ReturnType<typeof setTimeout> | undefined
     source.onopen = () => {
       client.setQueryData(logsKey, [])

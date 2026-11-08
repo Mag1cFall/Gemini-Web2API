@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -15,7 +16,7 @@ import (
 )
 
 // fillInMiddleInstruction 是带 suffix 的补全请求写入系统消息的要求
-const fillInMiddleInstruction = "Write the text that belongs between the prompt and the suffix in the next message. Output only that text, without repeating the prompt or the suffix."
+const fillInMiddleInstruction = "Write the text that belongs between the prompt and the suffix in the next message. Output only that text as plain text, without a code block and without repeating the prompt or the suffix."
 
 // CompletionRequest 表示 OpenAI 旧版 Completions 请求
 type CompletionRequest struct {
@@ -83,14 +84,17 @@ func repeatEach(prompts []string, n int) []string {
 }
 
 // completionTranscript 把 prompt 与 suffix 写成发送给网页的会话
-func completionTranscript(prompt string, suffix string) (string, error) {
+func completionTranscript(prompt string, suffix string) string {
 	if suffix == "" {
-		return renderTranscript([]map[string]interface{}{{"role": "user", "content": prompt}})
+		return prompt
 	}
-	return renderTranscript([]map[string]interface{}{
-		{"role": "system", "content": fillInMiddleInstruction},
-		{"role": "user", "content": map[string]string{"prompt": prompt, "suffix": suffix}},
-	})
+	var builder strings.Builder
+	builder.WriteString("[Prompt]\n")
+	builder.WriteString(fenced(prompt))
+	builder.WriteString("[/Prompt]\n[Suffix]\n")
+	builder.WriteString(fenced(suffix))
+	builder.WriteString("[/Suffix]")
+	return renderTranscript([]transcriptTurn{{Role: "system", Text: fillInMiddleInstruction}, {Role: "user", Text: builder.String()}}, "")
 }
 
 // unsupportedCompletionParameters 返回网页不支持的补全采样参数
@@ -164,10 +168,7 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 		var usage gemini.Usage
 		generate := func(index int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
-			transcript, err := completionTranscript(prompts[index], request.Suffix)
-			if err != nil {
-				return generationResult{}, err
-			}
+			transcript := completionTranscript(prompts[index], request.Suffix)
 			result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionCreate, request.Model, fmt.Sprintf("%s-%d", id, index), generationMedia{}, gemini.ThinkingLow, ToolBridge{Stop: sequences},
 				func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 					return transcript, nil, nil
@@ -218,7 +219,9 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			}
 			projection := newStreamProjection(ToolBridge{}, false)
 			result, err := generate(index, func(event gemini.Event) error {
-				stream.release()
+				if !usageOnly(event) {
+					stream.release()
+				}
 				return projection.project(event, func(event gemini.Event) error {
 					return writeSSEJSON(c.Writer, chunk([]gin.H{completionChoice(index, event.Delta, nil)}))
 				}, func(err error) error {

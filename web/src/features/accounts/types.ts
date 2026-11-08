@@ -89,3 +89,38 @@ export interface PairingToken {
   token: string
   expires_at: string
 }
+
+// AccountTaskItem 是导入任务中的一个账号，label 为邮箱
+export interface AccountTaskItem {
+  label: string
+  state: 'pending' | 'running' | 'done' | 'failed'
+  error?: string
+}
+
+// AccountTask 对应 GET /api/accounts/tasks 的 task
+export interface AccountTask {
+  id: string
+  kind: 'chrome' | 'cookie'
+  state: 'running' | 'done' | 'failed'
+  items: AccountTaskItem[]
+  started_at: string
+}
+
+// CookieAccount 对应 POST /api/accounts/import/cookie/discover 的 account，auth_user 为 Cookie 中的会话序号
+export interface CookieAccount {
+  auth_user: number
+  email: string
+  id: string
+  imported: boolean
+}
+
+// WarmupResult 对应 POST /api/warmup 的返回，request 是请求记录 ID
+export interface WarmupResult {
+  account: string
+  model: string
+  ok: boolean
+  duration_ms: number
+  error?: string
+  request: string
+  usage?: AccountUsage
+}

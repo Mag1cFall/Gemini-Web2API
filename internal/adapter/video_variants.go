@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
@@ -22,8 +23,10 @@ func saveVideoThumbnail(ctx context.Context, client *gemini.Client, store *reque
 	}
 	data, err := client.FetchMedia(ctx, media.Thumbnail)
 	if err == nil {
+		created := time.Now()
 		_, err = store.CreateFile(context.WithoutCancel(ctx), requestdb.StoredFile{
-			ID: videoThumbnailFileID(fileID), Filename: fileID + "-thumbnail", MIMEType: http.DetectContentType(data), Purpose: "video", Source: "generated",
+			ID: videoThumbnailFileID(fileID), CreatedAt: created, ExpiresAt: created.Add(requestdb.GeneratedRetention),
+			Filename: fileID + "-thumbnail", MIMEType: http.DetectContentType(data), Purpose: "video", Source: "generated",
 		}, bytes.NewReader(data))
 	}
 	if err != nil {

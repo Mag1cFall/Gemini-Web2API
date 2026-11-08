@@ -16,7 +16,7 @@
 - **官网工具**：Create video、Create music、Canvas、Deep Research、Guided Learning 与 Task 模式以独立模型 ID 提供
 - **多账户负载均衡**：按模型可用性调度多个 Google 账户，用量上限与频率限制只冷却对应模型，并发数与调度策略可配置
 - **访客会话**：没有可用账号时以 Gemini 网页的未登录会话提供官网未登录可用的模型（当前为 `gemini-3.5-flash-lite`，不含官网工具与附件上传），账号就绪后优先使用账号
-- **管理端与桌面版**：网页管理端提供实时日志、活动请求、用量与费用统计、账号导入与管理、模型目录、设置与 Playground；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
+- **管理端与桌面版**：网页管理端提供各客户端的接入配置、实时日志、活动请求、用量与费用统计、账号导入与管理、模型目录、设置与 Playground；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
 - **运行日志**：彩色分列控制台日志，逐请求记录开始、选号、上传、首个输出、换号、等待与结束
 - **请求账本**：SQLite 保存每个请求的用量，按模型、账号与协议统计并按 Gemini API 单价估算费用
 - **Gems**：账号自建的 Gem 与 Google 预置 Gem 以 `gem-<Gem ID>` 模型 ID 提供
@@ -78,8 +78,9 @@ cmd /c start /wait gemini-web2api.exe setup --email "name@example.com"
 | macOS | `desktop-…-darwin-universal.tar.gz` | `~/Library/Application Support/Gemini-Web2API` |
 | Linux | `desktop-…-linux-amd64.tar.gz` 或 `desktop-…-linux-arm64.tar.gz` | `~/.config/Gemini-Web2API` |
 
-- 桌面版都是便携包：macOS 解压后打开 `Gemini-Web2API.app`；Linux 解压后运行 `gemini-web2api`，需要系统的 GTK 4 与 WebKitGTK 6.0
-- 桌面版在窗口中打开管理端，关闭窗口后留在托盘；托盘菜单可复制 API 地址、设置开机启动
+- 桌面版都是便携包：macOS 解压后打开 `Gemini-Web2API.app`；Linux 解压后运行 `gemini-web2api`，需要系统的 GTK 3 与 WebKitGTK 4.1（Ubuntu 22.04、Debian 12 及更新的桌面系统自带）
+- 桌面版在窗口中打开管理端；macOS 关闭窗口后只留菜单栏图标，Dock 图标随之隐藏，菜单栏图标或再次打开应用唤回窗口；Linux 关闭窗口即退出
+- 托盘与菜单栏菜单可复制 API 地址、设置开机启动，菜单文字随管理端的界面语言切换
 - 账号在管理端的“导入账号”页从本机 Chrome、Cookie 或远程配对导入
 - `.env`、`auth/` 与 `data/` 都在上表的数据目录中
 
@@ -119,7 +120,7 @@ Windows 首次使用时，直接运行交互式配置：
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name
 ```
 
-Cookie 来自登录了多个 Google 账号的浏览器时，用 `--authuser` 指定要使用的账号，取值为官网地址 `gemini.google.com/u/N/app` 中的 `N`，默认 0；管理端 Cookie 导入的“账号序号”与之相同：
+Cookie 来自登录了多个 Google 账号的浏览器时，用 `--authuser` 指定要使用的账号，取值为官网地址 `gemini.google.com/u/N/app` 中的 `N`，默认 0；管理端 Cookie 导入在粘贴后自动列出其中登录的账号：
 
 ```powershell
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name --authuser 1
@@ -165,7 +166,7 @@ docker compose up -d
 - `docker-compose.yml` 使用 `ghcr.io/mag1cfall/gemini-web2api:latest`，数据目录挂载到 `./data`，其中放 `.env`、`auth/` 与请求账本
 - 端口对外开放时设置 `PROXY_API_KEY`；从容器外打开管理端需要 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`
 - 账号用管理端的 Cookie 导入、远程配对，或把其他电脑上的 `auth/<账号>/` 复制到 `data/auth/`
-- 修改 `data/.env` 后执行 `docker compose restart`
+- 修改 `data/.env` 后执行 `docker compose restart`；写在 `docker-compose.yml` 的 `environment` 中的配置项由容器环境决定，设置页中对应的项不可修改
 
 ### 代理
 
@@ -209,6 +210,8 @@ GET    /v1/videos
 GET    /v1/videos/{id}
 GET    /v1/videos/{id}/content
 DELETE /v1/videos/{id}
+POST   /v1/videos/{id}/remix
+POST   /v1/videos/extensions
 POST   /v1/files
 GET    /v1/files
 GET    /v1/files/{id}
@@ -217,12 +220,12 @@ DELETE /v1/files/{id}
 GET    /v1/models
 ```
 
-- **Responses**：默认保存到 `data/requests.db`，可读取、列出输入与删除，`store: false` 不保存；`background: true` 立即返回 `queued`，之后轮询或取消
+- **Responses**：默认保存到 `data/requests.db` 30 天，可读取、列出输入与删除，`store: false` 不保存；`background: true` 立即返回 `queued`，之后轮询或取消
 - **续接**：`previous_response_id` 与会话 ID 在服务重启后的 `SESSION_TTL` 内仍可续接；每轮发送完整历史的客户端在历史与上一轮回答一致时续接同一网页会话，只发送新消息
-- **文件**：上传的文件保存在 `data/files/`，生成请求以 `file_id` 引用
+- **文件**：上传的文件保存在 `data/files/`，生成请求以 `file_id` 引用；`expires_after` 按 OpenAI 规则设置到期时间，`purpose=batch` 的文件默认 30 天后删除
 - **朗读**：`/v1/audio/speech` 使用官网回答的朗读功能，输出 mp3、opus、wav、flac 或 pcm，`voice` 与 `speed` 不生效
 - **转写与翻译**：由所选对话模型完成
-- **视频**：`/v1/videos` 使用 `gemini-video`
+- **视频**：`/v1/videos` 使用 `gemini-video`，JSON 请求的 `input_reference`（`image_url` 或 `file_id`）作为首帧；生成的视频与缩略图保存 48 小时，视频对象的 `expires_at` 为到期时间；`remix` 与 `extensions` 在本服务生成的已完成视频的网页会话中继续生成，`extensions` 的成品是拼接后的完整视频，`seconds` 为实际时长
 - **官网没有的能力**：Embeddings、Moderations 与 Realtime 端点返回 404 `model_not_found`
 
 ### Claude 兼容
@@ -256,6 +259,14 @@ GET    /v1beta/models
 
 `streamGenerateContent` 不带 `alt=sse` 时返回 JSON 数组。上传的文件以 `fileData.fileUri` 引用，YouTube 链接按官网读取视频内容。`predictLongRunning` 使用 `gemini-video`。
 
+### MCP
+
+```text
+POST   /mcp
+```
+
+MCP 客户端以 Streamable HTTP 连接 `http://127.0.0.1:8007/mcp`，认证方式与 API 相同。工具：`web_search`（Google 搜索后作答并列出来源）、`generate_image`（生成或修改图片）、`generate_music`、`create_video_task` 与 `get_video_status`、`start_deep_research` 与 `get_deep_research`；各工具的 `model` 参数可选模型目录中对应功能的模型。
+
 ### 服务状态
 
 ```text
@@ -268,10 +279,14 @@ GET  /readyz
 
 浏览器打开 `http://127.0.0.1:8007/` 进入管理端，页面使用 `/api/*` 接口。
 
+- **接入**：“接入”页列出三种协议的 base URL，并按所选模型给出 Claude Code、Codex、OpenCode、Cherry Studio、SillyTavern 与 curl 的现成配置；“连通测试”用所选 API key 读取模型列表并向所选模型发一条最短的请求，逐条显示结果、耗时与错误原因
+- **导入账号**：粘贴 Cookie 后自动识别其中登录的账号，勾选后导入；导入在服务端后台运行，离开页面后继续，页面显示每个账号的进度与失败原因
+- **预热**：“全部账号”页的“预热”对选中的账号与模型各发一条最小生成请求，逐行显示结果、耗时与失败原因，请求计入请求记录
+- **监听端口**：配置的端口落在 Windows 的系统保留端口段（Hyper-V、WSL2、Docker）时，服务改用其后第一个可用端口，管理端顶部显示实际地址
 - **远程访问**：默认只接受本机访问；设置 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`，并让 `LISTEN_ADDR` 监听对外地址后，可从其他设备登录；登录连续失败 5 次后，60 秒内的登录返回 429 并带 `Retry-After`
-- **反向代理**：代理需把浏览器请求的原始 `Host` 头透传给服务，nginx 写 `proxy_set_header Host $host;`
-- **设置生效**：设置页修改的配置写回 `.env`；监听地址、认证路径与日志格式重启后生效，其余立即生效
-- **在线更新**：“关于”页显示 GitHub 最新发行版本与更新内容，命令行版与桌面版确认后下载当前平台的发行包、校验 SHA-256、替换可执行文件并重启到新版本，下载经 `PROXY` 的第一个代理发出，未设置时使用系统代理；Docker 部署随镜像更新
+- **反向代理**：代理需把浏览器请求的原始 `Host` 头透传给服务，nginx 写 `proxy_set_header Host $http_host;`；也可挂在子路径下，例如 nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_buffering off; }`，管理端从 `/gemini/` 打开，客户端的 Base URL 带上同一前缀
+- **设置生效**：设置页修改的配置写回 `.env`，与默认值相同的项从 `.env` 中删去；监听地址、认证路径与日志格式重启后生效，其余立即生效；`.env` 中取值无效的项按默认值运行并在设置页顶部列出；由进程环境变量或 `--auth`、`--listen` 决定的项在设置页标出来源且不可修改
+- **在线更新**：“关于”页显示 GitHub 最新发行版本与更新内容，命令行版与桌面版确认后下载当前平台的发行包、校验 SHA-256、替换可执行文件并重启到新版本，更新期间显示下载进度，新版本启动时删除被替换的旧文件；下载经 `PROXY` 的第一个代理发出，未设置时使用系统代理；Docker 部署随镜像更新
 
 ## 使用示例
 
@@ -287,7 +302,7 @@ curl http://127.0.0.1:8007/v1/chat/completions \
   }'
 ```
 
-OpenAI SDK 的 base URL 使用 `http://127.0.0.1:8007/v1`；Claude 和 Google GenAI SDK 使用 `http://127.0.0.1:8007`。
+OpenAI SDK 的 base URL 使用 `http://127.0.0.1:8007/v1`；Claude 和 Google GenAI SDK 使用 `http://127.0.0.1:8007`。常用客户端的配置在管理端“接入”页复制。
 
 ## 目录结构
 
@@ -306,6 +321,7 @@ internal/
   desktop/           # 桌面窗口与托盘
   gemini/            # Gemini Web 协议客户端
   logging/           # 运行日志与请求追踪
+  mcp/               # MCP 服务与工具
   pricing/           # 等价 API 单价
   requestdb/         # 请求账本
   streamio/          # HTTP 流刷新
@@ -325,10 +341,10 @@ build/               # 桌面版图标与打包配置
 | `PROXY_API_KEY` | 本地 2API 访问密钥，多个 key 用逗号分隔 | 空 |
 | `PROXY` | 代理池，多个代理用逗号分隔 | 空 |
 | `MODEL_MAPPING` | 外部模型名到当前模型 ID 的映射 | 空 |
-| `ACCOUNT_COOLDOWN` | 账号失败后的冷却时间 | `2m` |
+| `ACCOUNT_COOLDOWN` | 账号失败后的冷却时间，上游频率限制最多冷却 1 分钟 | `2m` |
 | `SESSION_TTL` | 显式会话状态的存活时间 | `30m` |
 | `INIT_TIMEOUT` | 单账号启动初始化超时 | `20s` |
-| `PER_ACCOUNT_CONCURRENCY` | 每个账号同时进行的上游请求数 | `1` |
+| `PER_ACCOUNT_CONCURRENCY` | 每个账号同时进行的上游请求数；等待上游首个输出满 1 分钟的请求让出名额，每个账号同时让出一个 | `1` |
 | `ROUTING_STRATEGY` | 无会话请求的调度策略 | `round-robin` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
 | `LOG_FORMAT` | 控制台日志格式：`text` 或 `json` | `text` |
@@ -338,35 +354,13 @@ build/               # 桌面版图标与打包配置
 | `ADMIN_AUTH_ENABLED` | 管理端登录 | `false` |
 | `ADMIN_USERNAME` | 管理端用户名 | `admin` |
 | `ADMIN_PASSWORD` | 管理端密码 | 空 |
+| `API_KEY_ACCOUNTS` | API key 可用的账号，每项 `key:账号|账号`，多项用逗号分隔 | 空 |
+| `FIRST_EVENT_HEDGE` | 首事件备用请求：`auto`、等待秒数或 `off` | `auto` |
+| `FIRST_EVENT_HEDGE_MODELS` | 发起首事件备用请求的模型 ID，多个用逗号分隔 | `gemini-4-argon` |
 
-`MODEL_MAPPING` 的格式为 `别名:模型 ID`，多项用逗号分隔。启动初始化失败的账号按 `ACCOUNT_COOLDOWN` 间隔重试。`ROUTING_STRATEGY` 为 `round-robin` 时从随机位置开始在账号间轮流分配，为 `fill-first` 时优先使用排在前面的空闲账号。
+`MODEL_MAPPING` 的格式为 `别名:模型 ID`，多项用逗号分隔。启动初始化失败的账号按 `ACCOUNT_COOLDOWN` 间隔重试。`ROUTING_STRATEGY` 为 `round-robin` 时从随机位置开始在账号间轮流分配，为 `fill-first` 时优先使用排在前面的空闲账号。`API_KEY_ACCOUNTS` 未列出的 key 可用全部账号，列出的 key 只用指定账号且不使用访客会话。`FIRST_EVENT_HEDGE` 在原请求迟迟没有首个事件时用另一个空闲账号发出同一请求，采用先返回的一个；`auto` 按各模型近 24 小时首事件等待的 p95 发起。
 
 命令行 `--auth` 和 `--listen` 可以覆盖认证路径与监听地址；`--open-ui` 控制启动后是否在浏览器中打开管理端，不带参数启动时默认打开。
-
-## 故障排除
-
-### Windows 端口被系统保留
-
-如果启动时提示 `LISTEN_ADDR` 配置的端口被占用，任务管理器中又找不到占用进程，可能是 Hyper-V、WSL2 或 Docker 的 NAT 服务保留了端口段。
-
-以下命令需要在管理员权限的 PowerShell 或 CMD 中运行。
-
-```powershell
-netsh interface ipv4 show excludedportrange protocol=tcp
-```
-
-如果 `8007` 落在输出的 `Start Port` 和 `End Port` 范围内，可以修改 `LISTEN_ADDR`，或重启 WinNAT 服务后再次检查：
-
-```powershell
-net stop winnat
-net start winnat
-```
-
-端口空闲后，也可以将 `8007` 加入持久保留：
-
-```powershell
-netsh int ipv4 add excludedportrange protocol=tcp startport=8007 numberofports=1 store=persistent
-```
 
 ## 注意
 

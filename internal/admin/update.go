@@ -27,6 +27,15 @@ type UpdateStatus struct {
 	CheckedAt   time.Time `json:"checked_at,omitzero"`
 	Error       string    `json:"error,omitempty"`
 	Updating    bool      `json:"updating"`
+	// Progress 是进行中的在线更新的阶段与下载字节数
+	Progress *UpdateProgress `json:"progress,omitempty"`
+}
+
+// UpdateProgress 是在线更新的阶段（download、verify、install、restart）与发行包的已下载和总字节数，总字节数未知时为 0
+type UpdateProgress struct {
+	Stage      string `json:"stage"`
+	Downloaded int64  `json:"downloaded"`
+	Total      int64  `json:"total"`
 }
 
 // UpdateConflict 表示当前状态不能安装更新

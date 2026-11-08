@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,6 +58,9 @@ type Attempt struct {
 	Status     int    `json:"status"`
 	Error      string `json:"error"`
 	DurationMS int64  `json:"duration_ms"`
+	// Hedge 表示首事件超时后发起的备用请求，Superseded 表示另一方先返回首事件后被取消
+	Hedge      bool `json:"hedge,omitempty"`
+	Superseded bool `json:"superseded,omitempty"`
 }
 
 // RequestInfo 是请求的阶段、账号、用量与结果
@@ -114,6 +118,10 @@ type Request struct {
 	stallLogged    time.Time
 	stalled        bool
 	finished       bool
+
+	// parent 是备用请求跟踪所属的原请求，owner 是备用请求胜出后接管其后续记录的原请求
+	parent *Request
+	owner  atomic.Pointer[Request]
 }
 
 type requestContextKey struct{}
@@ -149,6 +157,81 @@ func FromContext(ctx context.Context) *Request {
 	return request
 }
 
+// WithRequest 返回以 request 为请求跟踪的 context
+func WithRequest(ctx context.Context, request *Request) context.Context {
+	return context.WithValue(ctx, requestContextKey{}, request)
+}
+
+// Progress 以 source 输出一条带请求 ID 的进度日志
+func (r *Request) Progress(level string, source string, message string, fields ...any) {
+	if r = r.self(); r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.publishLocked(level, source, EventRequestProgress, Message(message, fields...))
+}
+
+// self 返回实际记录的跟踪：备用请求胜出后为原请求
+func (r *Request) self() *Request {
+	if r == nil {
+		return nil
+	}
+	if owner := r.owner.Load(); owner != nil {
+		return owner
+	}
+	return r
+}
+
+// Hedge 返回首事件备用请求的跟踪，日志沿用原请求 ID 并附带原请求的状态，账号、阶段与网络计数只记在备用请求自身
+func (r *Request) Hedge() *Request {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	return &Request{
+		info:    RequestInfo{ID: r.info.ID, State: StateRunning, Protocol: r.info.Protocol, Model: r.info.Model, StartedAt: r.info.StartedAt},
+		started: r.started, cancel: func(error) {}, begun: true, phaseStarted: now, parent: r,
+	}
+}
+
+// AdoptHedge 在备用请求取得输出时并入其跟踪：reason 非空时原请求的尝试以该原因记为被取代，账号、阶段、网络计数与首事件取备用请求的，此后备用请求跟踪的记录都写入原请求
+func (r *Request) AdoptHedge(hedge *Request, reason string) {
+	if r == nil || hedge == nil {
+		return
+	}
+	hedge.mu.Lock()
+	defer hedge.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if reason != "" {
+		r.info.Attempts = append(r.info.Attempts, Attempt{
+			Account: r.info.Account, Status: StatusClientClosed, Error: reason, DurationMS: time.Since(r.attemptStarted).Milliseconds(), Superseded: true,
+		})
+	}
+	r.info.Account, r.info.Stage, r.info.Thinking, r.info.Media = hedge.info.Account, hedge.info.Stage, hedge.info.Thinking, hedge.info.Media
+	r.info.Heartbeats, r.info.UpstreamBytes = hedge.info.Heartbeats, r.info.UpstreamBytes+hedge.info.UpstreamBytes
+	r.info.FirstEventMS = hedge.info.FirstEventMS
+	r.attemptStarted, r.attemptBytes, r.lastRead = hedge.attemptStarted, hedge.attemptBytes, hedge.lastRead
+	r.lastEvent, r.lastEventKind = hedge.lastEvent, hedge.lastEventKind
+	r.phase, r.phaseStarted, r.stallLogged, r.stalled = hedge.phase, hedge.phaseStarted, time.Time{}, false
+	hedge.owner.Store(r)
+}
+
+// HedgeSuperseded 记录原请求先返回首事件后被取消的备用请求
+func (r *Request) HedgeSuperseded(account string, duration time.Duration, reason string) {
+	if r = r.self(); r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.info.Attempts = append(r.info.Attempts, Attempt{
+		Account: account, Status: StatusClientClosed, Error: reason, DurationMS: duration.Milliseconds(), Hedge: true, Superseded: true,
+	})
+}
+
 // ID 返回请求 ID
 func (r *Request) ID() string {
 	if r == nil {
@@ -177,7 +260,7 @@ func (r *Request) Begin(protocol string, model string, stream bool, messages int
 
 // SetMedia 记录本次请求上传的附件数
 func (r *Request) SetMedia(count int) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -197,7 +280,7 @@ func (r *Request) SetResponseID(responseID string) {
 
 // AccountReady 记录已取得账号请求槽，开始一次上游尝试
 func (r *Request) AccountReady(account string, model string) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -223,7 +306,7 @@ func (r *Request) AccountReady(account string, model string) {
 
 // Stage 记录上游准备阶段，例如上传附件与接受条款
 func (r *Request) Stage(stage string, fields ...any) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -234,7 +317,7 @@ func (r *Request) Stage(stage string, fields ...any) {
 
 // SetThinking 记录按账号模型目录选定的网页思考强度
 func (r *Request) SetThinking(level string) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -244,7 +327,7 @@ func (r *Request) SetThinking(level string) {
 
 // SetStage 记录当前阶段名，不输出日志，等待诊断与取消日志使用该名称
 func (r *Request) SetStage(stage string) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -254,7 +337,7 @@ func (r *Request) SetStage(stage string) {
 
 // UpstreamResponse 记录生成请求取得响应头
 func (r *Request) UpstreamResponse(status int) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -270,7 +353,7 @@ func (r *Request) UpstreamResponse(status int) {
 
 // UpstreamRead 记录读取到的上游响应字节
 func (r *Request) UpstreamRead(n int) {
-	if r == nil || n <= 0 {
+	if r = r.self(); r == nil || n <= 0 {
 		return
 	}
 	r.mu.Lock()
@@ -282,7 +365,7 @@ func (r *Request) UpstreamRead(n int) {
 
 // UpstreamHeartbeat 记录上游等待期间的心跳帧
 func (r *Request) UpstreamHeartbeat() {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -292,7 +375,7 @@ func (r *Request) UpstreamHeartbeat() {
 
 // UpstreamEvent 记录解码出的语义事件，kind 为 thought、text、code、media 等
 func (r *Request) UpstreamEvent(kind string) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -317,7 +400,7 @@ func (r *Request) UpstreamEvent(kind string) {
 
 // Background 记录生成转入后台，服务开始轮询成品
 func (r *Request) Background(kind string) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -348,7 +431,7 @@ func (r *Request) AttemptFailed(account string, status int, err error, retry boo
 
 // SetUsage 记录 token 用量
 func (r *Request) SetUsage(input int, reasoning int, reply int) {
-	if r == nil {
+	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -557,7 +640,14 @@ func (r *Request) publishLocked(level string, source string, name string, messag
 	if err != nil || !Enabled(parsed) {
 		return
 	}
-	info := r.snapshotLocked(time.Now())
+	var info RequestInfo
+	if r.parent != nil {
+		r.parent.mu.Lock()
+		info = r.parent.snapshotLocked(time.Now())
+		r.parent.mu.Unlock()
+	} else {
+		info = r.snapshotLocked(time.Now())
+	}
 	Publish(Event{Level: level, Source: source, Message: message, Event: name, Request: &info})
 }
 

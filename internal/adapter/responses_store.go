@@ -147,7 +147,7 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 	shell := responseShell(run.id, config.MapModel(request.Model), run.created, "queued")
 	applyRequestFields(shell, request)
 	saveResponse(c.Request.Context(), store, request, run.id, run.created, shell)
-	trace, ctx := logging.NewRequest(context.Background(), c.Request.Method, c.Request.URL.Path, c.ClientIP())
+	trace, ctx := logging.NewRequest(context.WithoutCancel(c.Request.Context()), c.Request.Method, c.Request.URL.Path, c.ClientIP())
 	trace.Begin("responses", request.Model, false, responsesInputCount(request.Input), len(request.Tools))
 	responseJobs.Lock()
 	responseJobs.jobs[run.id] = &responseJob{cancel: trace.Cancel}

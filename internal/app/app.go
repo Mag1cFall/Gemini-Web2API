@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -138,9 +139,12 @@ func Version() string {
 
 // LoadConfig 读取 .env 与启动参数，同时返回启动后是否打开管理页
 func LoadConfig(args []string) (config.Config, bool, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return config.Config{}, false, err
+	cfg := config.Load()
+	cfg.Locked = map[string]string{}
+	for key := range config.Defaults {
+		if _, ok := os.LookupEnv(key); ok && !slices.Contains(dotenvKeys, key) {
+			cfg.Locked[key] = "env"
+		}
 	}
 	openUI, err := ParseFlags(args, &cfg)
 	if err != nil {
@@ -157,6 +161,8 @@ type Instance struct {
 	cfg      config.Config
 	lock     *flock.Flock
 	listener net.Listener
+	// reserved 是被 Windows 保留而改用后续端口的配置地址，没有改用时为空
+	reserved string
 	started  time.Time
 	desktop  bool
 	// openUI 表示服务开始接受请求后用系统浏览器打开管理页
@@ -188,11 +194,43 @@ func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, err
 		return nil, fmt.Errorf("同一目录已有 Gemini-Web2API 实例在运行（%s）", filepath.Join(dataDir, "gemini-web2api.lock"))
 	}
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
+	reserved := ""
+	if errors.Is(err, portReserved) {
+		if listener, err = listenAfter(cfg.ListenAddress); err == nil {
+			reserved = cfg.ListenAddress
+		}
+	}
 	if err != nil {
 		_ = lock.Unlock()
 		return nil, fmt.Errorf("监听 %s: %w", cfg.ListenAddress, err)
 	}
-	return &Instance{cfg: cfg, lock: lock, listener: listener, started: started, desktop: desktop}, nil
+	return &Instance{cfg: cfg, lock: lock, listener: listener, reserved: reserved, started: started, desktop: desktop}, nil
+}
+
+// Address 返回实际监听地址
+func (instance *Instance) Address() string {
+	return instance.listener.Addr().String()
+}
+
+// portReserved 是 Windows 拒绝监听系统保留端口（Hyper-V、WSL2、Docker 的 WinNAT 保留端口段）时返回的 WSAEACCES
+const portReserved = syscall.Errno(10013)
+
+// listenAfter 从 address 的下一个端口起依次监听，返回第一个监听成功的监听器
+func listenAfter(address string) (net.Listener, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	first, err := strconv.Atoi(port)
+	if err != nil {
+		return nil, err
+	}
+	for next := first + 1; next <= 65535; next++ {
+		if listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(next))); err == nil {
+			return listener, nil
+		}
+	}
+	return nil, fmt.Errorf("%s 之后没有可监听的端口", address)
 }
 
 // Serve 运行服务直到 ctx 结束，停机后释放端口与实例锁
@@ -231,6 +269,8 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		SaveHistory: cfg.SaveHistory, AuthDir: authDirectory, Concurrency: cfg.PerAccountConcurrency,
 	})
 	pool.SetStrategy(cfg.RoutingStrategy)
+	pool.SetAPIKeyAccounts(cfg.APIKeyAccounts)
+	adapter.SetFirstEventHedge(firstEventHedge(cfg))
 	settings := admin.NewSettings(envPath, cfg, func(next config.Config) {
 		config.SetModelMapping(next.ModelMapping)
 		pool.SetTimings(next.AccountCooldown, next.SessionTTL)
@@ -243,6 +283,8 @@ func (instance *Instance) Serve(ctx context.Context) error {
 			logging.Error(logging.SourceService, "日志文件设置失败", "错误", err)
 		}
 		pool.SetStrategy(next.RoutingStrategy)
+		pool.SetAPIKeyAccounts(next.APIKeyAccounts)
+		adapter.SetFirstEventHedge(firstEventHedge(next))
 		manager.SetSettings(accounts.Settings{
 			InitTimeout: next.InitTimeout, RetryInterval: next.AccountCooldown, Proxy: next.ProxyURL,
 			SaveHistory: next.SaveHistory, AuthDir: authDirectory, Concurrency: next.PerAccountConcurrency,
@@ -251,17 +293,25 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	workDir, _ := os.Getwd()
 	shuttingDown := make(chan struct{})
 	updater := newSelfUpdater(Version(), instance.executable, func() string { return updateProxy(settings.Snapshot().ProxyURL) }, instance.restart)
+	if instance.executable != "" {
+		if err := removeReplacedExecutables(instance.executable); err != nil {
+			logging.Warn(logging.SourceService, "删除在线更新留下的旧版本失败", "错误", err)
+		}
+	}
 	server := newHTTPServer(NewRouter(Deps{
 		Pool: pool, Store: store, Accounts: manager, APIKey: settings.APIKey,
 		Admin: &admin.Deps{
 			Pool: pool, Accounts: manager, Store: store, Settings: settings, Version: Version(), StartedAt: started,
-			ListenAddr: listener.Addr().String(), DataDir: workDir, Desktop: instance.desktop, Updates: updater, Stopping: shuttingDown,
+			ListenAddr: listener.Addr().String(), ReservedListen: instance.reserved, DataDir: workDir, Desktop: instance.desktop, Updates: updater, Stopping: shuttingDown,
 		},
 	}))
 	server.RegisterOnShutdown(func() { close(shuttingDown) })
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
 	adminURL := AdminURL(listener.Addr().String())
+	if instance.reserved != "" {
+		logging.Warn(logging.SourceService, "监听端口被 Windows 保留，改用其后第一个可用端口", "配置", instance.reserved, "地址", listener.Addr().String())
+	}
 	logging.Info(logging.SourceService, "服务已启动", "地址", "http://"+listener.Addr().String(), "管理端", adminURL)
 	if instance.openUI {
 		if err := openBrowser(adminURL); err != nil {
@@ -328,6 +378,9 @@ func logStartup(cfg config.Config, accountCount int) {
 	logging.Info(logging.SourceService, "配置",
 		"监听", cfg.ListenAddress, "认证", strings.Join(cfg.AuthStatePaths, ","), "账号", accountCount,
 		"代理", proxy, "API key", key, "历史记录", cfg.SaveHistory, "日志", cfg.LogLevel)
+	for _, invalid := range cfg.Invalid {
+		logging.Warn(logging.SourceService, "配置取值无效，按默认值启动", "项", invalid.Key, "取值", invalid.Value, "原因", invalid.Reason)
+	}
 	if cfg.ProxyAPIKey == "" && !loopbackAddress(cfg.ListenAddress) {
 		logging.Warn(logging.SourceService, "监听地址不是本机回环且未设置 PROXY_API_KEY，能访问该地址的任何人都可以调用", "监听", cfg.ListenAddress)
 	}
@@ -376,6 +429,15 @@ func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 }
 
+// firstEventHedge 把配置中的首事件备用请求方式换成适配层设置
+func firstEventHedge(cfg config.Config) adapter.FirstEventHedge {
+	seconds, _ := strconv.Atoi(cfg.FirstEventHedge)
+	return adapter.FirstEventHedge{Auto: cfg.FirstEventHedge == "auto", After: time.Duration(seconds) * time.Second, Models: cfg.FirstEventHedgeModels}
+}
+
+// flagKeys 是启动参数覆盖的配置项
+var flagKeys = map[string]string{"auth": "GEMINI_AUTH_STATES", "listen": "LISTEN_ADDR"}
+
 // ParseFlags 用命令行参数覆盖最常用的启动配置，返回是否打开管理页，不带参数启动时默认打开
 func ParseFlags(args []string, cfg *config.Config) (bool, error) {
 	flags := flag.NewFlagSet("gemini-web2api", flag.ContinueOnError)
@@ -398,6 +460,14 @@ func ParseFlags(args []string, cfg *config.Config) (bool, error) {
 	if flags.NArg() != 0 {
 		return false, fmt.Errorf("未知参数 %q", flags.Arg(0))
 	}
+	flags.Visit(func(set *flag.Flag) {
+		if key := flagKeys[set.Name]; key != "" {
+			if cfg.Locked == nil {
+				cfg.Locked = map[string]string{}
+			}
+			cfg.Locked[key] = "flag"
+		}
+	})
 
 	cfg.AuthStatePaths = splitFlagList(*authPaths)
 	cfg.ListenAddress = strings.TrimSpace(*listenAddress)

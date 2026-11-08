@@ -100,6 +100,9 @@ func chatHistoryTurns(messages []ChatMessage) []historyTurn {
 	turns := make([]historyTurn, 0, len(messages))
 	for _, message := range messages {
 		turn := historyTurn{Role: transcriptRole(message.Role), Text: historyText(message.Content)}
+		if turn.Role != "tool" {
+			turn.Text = speakerText(message.Name, turn.Text)
+		}
 		for _, call := range message.ToolCalls {
 			turn.Calls = append(turn.Calls, historyCall{Name: call.Function.Name, Arguments: canonicalJSON(json.RawMessage(call.Function.Arguments))})
 		}

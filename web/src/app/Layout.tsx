@@ -1,5 +1,6 @@
 import {
   Boxes,
+  Cable,
   ChartColumn,
   ChevronDown,
   LayoutDashboard,
@@ -20,7 +21,10 @@ import { Navigate, NavLink, Outlet, useLocation } from 'react-router'
 
 import { type EventsConnection, useAdminEvents } from '@/app/events'
 import { Header } from '@/app/Header'
+import { ListenNotice } from '@/app/ListenNotice'
 import { appMessages } from '@/app/messages'
+import { lastLocation, useRememberLocation } from '@/app/remember'
+import { SessionError } from '@/app/SessionError'
 import { Collapse } from '@/components/ui/collapse'
 import { Loading } from '@/components/ui/states'
 import { useAccounts } from '@/features/accounts/queries'
@@ -60,10 +64,15 @@ interface NavItem {
 const navClass =
   'relative flex h-control items-center gap-3 rounded-sm pr-2 pl-[42px] text-base text-foreground hover:bg-nav-active active:bg-nav-pressed aria-[current=page]:bg-nav-active aria-[current=page]:before:absolute aria-[current=page]:before:top-1/2 aria-[current=page]:before:left-0 aria-[current=page]:before:h-4 aria-[current=page]:before:w-1 aria-[current=page]:before:-translate-y-1/2 aria-[current=page]:before:rounded-full aria-[current=page]:before:bg-primary'
 
-// NavRow 渲染一个导航项，文字截断时悬停显示全文
+// NavRow 渲染一个导航项，回到该项时恢复上次的查询参数，文字截断时悬停显示全文
 function NavRow({ item, className = navClass }: { item: NavItem; className?: string }) {
+  const location = useLocation()
   return (
-    <NavLink to={item.to} end={item.end ?? false} className={className}>
+    <NavLink
+      to={lastLocation(item.to, item.end ?? false, location)}
+      end={item.end ?? false}
+      className={className}
+    >
       {item.icon && <item.icon size={20} aria-hidden className="shrink-0" />}
       {item.dot && (
         <span aria-hidden className="flex size-icon shrink-0 items-center justify-center">
@@ -191,8 +200,12 @@ export function Layout() {
   const connection = useAdminEvents(authenticated)
   const accounts = useAccounts()
   const [collapsed, setCollapsed] = useState(readCollapsed)
+  useRememberLocation()
   if (session.isPending) return <Loading label={m.loading} />
-  if (session.data && !authenticated) {
+  if (session.isError && !session.data) {
+    return <SessionError error={session.error} onRetry={() => void session.refetch()} />
+  }
+  if (!authenticated) {
     return (
       <Navigate
         to={'/login?next=' + encodeURIComponent(location.pathname + location.search)}
@@ -218,6 +231,7 @@ export function Layout() {
       icon: Server,
       items: [
         { to: '/', label: m.overview, icon: LayoutDashboard, end: true },
+        { to: '/connect', label: m.connect, icon: Cable },
         { to: '/logs', label: m.logs, icon: ScrollText },
         { to: '/requests', label: m.requests, icon: SquareActivity },
         { to: '/usage', label: m.usage, icon: ChartColumn },
@@ -312,6 +326,7 @@ export function Layout() {
           tabIndex={-1}
           className="relative min-w-0 flex-1 [scrollbar-gutter:stable] overflow-y-auto rounded-tl-panel border-t border-l border-panel-edge bg-panel focus:outline-none"
         >
+          <ListenNotice />
           {offline && (
             <p
               role="status"

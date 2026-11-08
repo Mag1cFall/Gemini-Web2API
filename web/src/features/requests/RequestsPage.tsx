@@ -1,5 +1,6 @@
 import { Activity, History, Snowflake } from 'lucide-react'
 import { useState } from 'react'
+import { useSearchParams } from 'react-router'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardEmpty, CardHeader, CountBadge, PageHeader } from '@/components/ui/page'
@@ -13,11 +14,17 @@ import {
 import { useAccountLabel, useClearCooldown } from '@/features/accounts/queries'
 import { useCooldowns } from '@/features/models/queries'
 import { requestsMessages } from '@/features/requests/messages'
-import { useCancelRequest, useFinished, useRunning } from '@/features/requests/queries'
+import {
+  useCancelRequest,
+  useFinished,
+  useLedgerRecord,
+  useRunning,
+} from '@/features/requests/queries'
 import { RequestDetailSheet } from '@/features/requests/RequestDetailSheet'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import type { RequestInfo } from '@/features/requests/types'
 import { protocolLabels } from '@/features/usage/model'
+import { RecordDrawer } from '@/features/usage/RecordDrawer'
 import { ApiError } from '@/lib/api'
 import {
   formatBytes,
@@ -32,7 +39,7 @@ import { useNow } from '@/lib/time'
 // recentLimit 是最近结束列表显示的请求数
 const recentLimit = 20
 
-// RequestsPage 显示进行中的请求与取消、最近结束的请求与账号冷却及其清除，数据来自事件流
+// RequestsPage 显示进行中的请求与取消、最近结束的请求与账号冷却及其清除，数据来自事件流，地址带 id 时打开请求账本中该请求的记录
 export function RequestsPage() {
   const m = useMessages(requestsMessages)
   const rm = useMessages(cooldownReasonMessages)
@@ -45,6 +52,8 @@ export function RequestsPage() {
   const finished = useFinished(recentLimit)
   const cooldowns = useCooldowns().data?.cooldowns ?? []
   const cancel = useCancelRequest()
+  const [params, setParams] = useSearchParams()
+  const linked = useLedgerRecord(params.get('id'))
   const [selected, setSelected] = useState<RequestInfo | null>(null)
   const live = selected
     ? (running.find((item) => item.id === selected.id) ??
@@ -308,6 +317,12 @@ export function RequestsPage() {
         onCancel={cancelRequest}
         onClose={() => {
           setSelected(null)
+        }}
+      />
+      <RecordDrawer
+        record={linked.data ?? null}
+        onClose={() => {
+          setParams({}, { replace: true })
         }}
       />
     </>

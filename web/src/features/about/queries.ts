@@ -16,6 +16,15 @@ export interface UpdateStatus {
   checked_at?: string
   error?: string
   updating: boolean
+  // progress 是进行中的在线更新的阶段与下载字节数，total 未知时为 0
+  progress?: UpdateProgress
+}
+
+// UpdateProgress 对应 internal/admin 的 UpdateProgress
+export interface UpdateProgress {
+  stage: 'download' | 'verify' | 'install' | 'restart'
+  downloaded: number
+  total: number
 }
 
 // updateKey 是更新状态的查询键
@@ -46,6 +55,17 @@ export function useApplyUpdate() {
       client.setQueryData(updateKey, status)
     },
   })
+}
+
+// useUpdateProgress 在 enabled 时每 500 ms 读取一次在线更新进度
+export function useUpdateProgress(enabled: boolean) {
+  return useQuery({
+    queryKey: ['update', 'progress'],
+    queryFn: () => api<UpdateStatus>('/api/update'),
+    enabled,
+    refetchInterval: 500,
+    select: (status) => status.progress,
+  }).data
 }
 
 // useRestartedVersion 在 enabled 时轮询服务状态，返回重启后服务报告的版本

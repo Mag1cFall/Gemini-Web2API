@@ -16,7 +16,7 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Official tools**: Create video, Create music, Canvas, Deep Research, Guided Learning, and Task mode are available as separate model IDs
 - **Multi-account balancing**: schedules Google accounts by model availability; usage and rate limits cool down only the affected model, with configurable concurrency and routing strategy
 - **Guest session**: when no account is available, serves the models the Gemini website offers without sign-in (currently `gemini-3.5-flash-lite`, without website tools or attachment uploads) through a signed-out session; ready accounts are always preferred
-- **Console and desktop app**: the web console shows live logs, active requests, usage and cost statistics, account import and management, the model catalog, settings, and a playground; desktop apps for Windows, macOS, and Linux add a tray icon, single instance, and launch at login
+- **Console and desktop app**: the web console shows ready-made client configuration, live logs, active requests, usage and cost statistics, account import and management, the model catalog, settings, and a playground; desktop apps for Windows, macOS, and Linux add a tray icon, single instance, and launch at login
 - **Run logs**: colored columnar console logs that record each request's start, account selection, uploads, first output, account switches, waits, and completion
 - **Request ledger**: SQLite stores per-request usage, with statistics by model, account, and protocol and cost estimates at Gemini API prices
 - **Gems**: each account's own Gems and Google's pre-made Gems are available as `gem-<Gem ID>` model IDs
@@ -78,8 +78,9 @@ Download the desktop build for your system from [Releases](https://github.com/Ma
 | macOS | `desktop-…-darwin-universal.tar.gz` | `~/Library/Application Support/Gemini-Web2API` |
 | Linux | `desktop-…-linux-amd64.tar.gz` or `desktop-…-linux-arm64.tar.gz` | `~/.config/Gemini-Web2API` |
 
-- Every desktop build is portable: on macOS, extract it and open `Gemini-Web2API.app`; on Linux, extract it and run `gemini-web2api`, which needs the system GTK 4 and WebKitGTK 6.0
-- The desktop app opens the console in a window and stays in the tray after the window closes; the tray menu copies the API address and toggles launch at login
+- Every desktop build is portable: on macOS, extract it and open `Gemini-Web2API.app`; on Linux, extract it and run `gemini-web2api`, which needs the system GTK 3 and WebKitGTK 4.1 (included with Ubuntu 22.04, Debian 12, and newer desktop systems)
+- The desktop app opens the console in a window; on macOS, closing the window leaves only the menu bar icon and hides the Dock icon, and the menu bar icon or reopening the app brings the window back; on Linux, closing the window quits the app
+- The tray and menu bar menu copies the API address and toggles launch at login, and follows the console language
 - Import accounts from local Chrome, cookies, or remote pairing on the console's Import account page
 - `.env`, `auth/`, and `data/` live in the data directory listed above
 
@@ -119,7 +120,7 @@ Import a cookie JSON exported by a browser extension or a Netscape `cookies.txt`
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name
 ```
 
-When the cookies come from a browser signed in to several Google accounts, select the account with `--authuser`, the `N` in `gemini.google.com/u/N/app` (default 0). The console's cookie import has the same Account index field:
+When the cookies come from a browser signed in to several Google accounts, select the account with `--authuser`, the `N` in `gemini.google.com/u/N/app` (default 0). The console's cookie import lists the accounts signed in to the pasted cookies automatically:
 
 ```powershell
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name --authuser 1
@@ -165,7 +166,7 @@ docker compose up -d
 - `docker-compose.yml` uses `ghcr.io/mag1cfall/gemini-web2api:latest` and mounts the data directory at `./data`, which holds `.env`, `auth/`, and the request ledger
 - Set `PROXY_API_KEY` when the port is reachable from other hosts; opening the console from outside the container requires `ADMIN_AUTH_ENABLED=true` and `ADMIN_PASSWORD`
 - Add accounts with the console's cookie import or remote pairing, or copy `auth/<account>/` from another computer to `data/auth/`
-- Run `docker compose restart` after editing `data/.env`
+- Run `docker compose restart` after editing `data/.env`; settings in the `environment` section of `docker-compose.yml` are set by the container environment and are read-only in the console
 
 ### Proxy
 
@@ -209,6 +210,8 @@ GET    /v1/videos
 GET    /v1/videos/{id}
 GET    /v1/videos/{id}/content
 DELETE /v1/videos/{id}
+POST   /v1/videos/{id}/remix
+POST   /v1/videos/extensions
 POST   /v1/files
 GET    /v1/files
 GET    /v1/files/{id}
@@ -217,12 +220,12 @@ DELETE /v1/files/{id}
 GET    /v1/models
 ```
 
-- **Responses**: stored in `data/requests.db` by default and can be retrieved, have their input items listed, and be deleted; `store: false` skips storage. `background: true` returns `queued` immediately for later polling or cancellation
+- **Responses**: stored in `data/requests.db` for 30 days by default and can be retrieved, have their input items listed, and be deleted; `store: false` skips storage. `background: true` returns `queued` immediately for later polling or cancellation
 - **Continuation**: `previous_response_id` and conversation IDs keep working across service restarts within `SESSION_TTL`; clients that resend the full history continue the same web conversation and send only the new messages when the history matches the previous answer
-- **Files**: uploaded files are stored in `data/files/` and referenced from generation requests by `file_id`
+- **Files**: uploaded files are stored in `data/files/` and referenced from generation requests by `file_id`; `expires_after` sets the expiry by the OpenAI rules, and `purpose=batch` files are deleted after 30 days by default
 - **Speech**: `/v1/audio/speech` uses the website's read-aloud feature and returns mp3, opus, wav, flac, or pcm; `voice` and `speed` have no effect
 - **Transcription and translation**: performed by the selected chat model
-- **Video**: `/v1/videos` uses `gemini-video`
+- **Video**: `/v1/videos` uses `gemini-video`, and `input_reference` (`image_url` or `file_id`) in a JSON request becomes the first frame; generated videos and thumbnails are kept for 48 hours, and the video object's `expires_at` is the expiry time; `remix` and `extensions` continue in the Gemini Web conversation of a completed video generated by this service, an extension returns the stitched full video, and `seconds` is the actual duration
 - **Capabilities Gemini Web lacks**: the Embeddings, Moderations, and Realtime endpoints return 404 `model_not_found`
 
 ### Claude compatible
@@ -256,6 +259,14 @@ GET    /v1beta/models
 
 `streamGenerateContent` without `alt=sse` returns a JSON array. Uploaded files are referenced with `fileData.fileUri`, and YouTube links are read as video content the same way as on the website. `predictLongRunning` uses `gemini-video`.
 
+### MCP
+
+```text
+POST   /mcp
+```
+
+MCP clients connect to `http://127.0.0.1:8007/mcp` over Streamable HTTP with the same authentication as the API. Tools: `web_search` (answers after a Google search and lists the sources), `generate_image` (creates or edits images), `generate_music`, `create_video_task` and `get_video_status`, `start_deep_research` and `get_deep_research`; each tool's `model` argument accepts the catalog models for that feature.
+
 ### Service status
 
 ```text
@@ -268,10 +279,14 @@ Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, `x-goog-api-key`
 
 Open `http://127.0.0.1:8007/` in a browser for the console, which uses the `/api/*` endpoints.
 
+- **Connect**: the Connect page lists the base URLs of the three protocols and ready-made configuration for Claude Code, Codex, OpenCode, Cherry Studio, SillyTavern, and curl with the selected model; Connection test lists models with the selected API key and sends the shortest request to the selected model, showing the result, duration, and error reason per request
+- **Import accounts**: pasting cookies lists the accounts signed in to them; the import of the selected accounts runs in the background on the service and continues after you leave the page, which shows the progress and failure reason of each account
+- **Warm up**: Warm up on the All accounts page sends one minimal generation request for each selected account and model and lists the result, duration, and failure reason per row; the requests appear in the request records
+- **Listen port**: when the configured port falls inside a range reserved by Windows (Hyper-V, WSL2, Docker), the service listens on the next available port and the console shows the actual address at the top
 - **Remote access**: only local connections are accepted by default; with `ADMIN_AUTH_ENABLED=true`, `ADMIN_PASSWORD`, and `LISTEN_ADDR` on an externally reachable address, other devices can sign in; after 5 consecutive failed sign-ins, sign-in returns 429 with `Retry-After` for 60 seconds
-- **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service; in nginx, use `proxy_set_header Host $host;`
-- **Applying settings**: settings saved in the console are written back to `.env`; the listen address, auth paths, and log format take effect after a restart, and everything else applies immediately
-- **Online update**: the About page shows the latest GitHub release and its notes; after confirmation the command-line and desktop builds download the package for the current platform, verify its SHA-256, replace the executable, and restart into the new version; downloads go through the first proxy in `PROXY`, or the system proxy when it is unset; Docker deployments update with the image
+- **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service; in nginx, use `proxy_set_header Host $http_host;`. The service also works under a subpath, for example nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_buffering off; }`; open the console at `/gemini/` and add the same prefix to client base URLs
+- **Applying settings**: settings saved in the console are written back to `.env`, and values equal to the default are removed from it; the listen address, auth paths, and log format take effect after a restart, and everything else applies immediately; invalid values in `.env` run with the default and are listed at the top of the settings page; settings set by process environment variables or `--auth` and `--listen` show their source and are read-only
+- **Online update**: the About page shows the latest GitHub release and its notes; after confirmation the command-line and desktop builds download the package for the current platform, verify its SHA-256, replace the executable, and restart into the new version, showing download progress meanwhile; the new version deletes the replaced files when it starts; downloads go through the first proxy in `PROXY`, or the system proxy when it is unset; Docker deployments update with the image
 
 ## Example
 
@@ -287,7 +302,7 @@ curl http://127.0.0.1:8007/v1/chat/completions \
   }'
 ```
 
-Use `http://127.0.0.1:8007/v1` as the OpenAI SDK base URL. Claude and Google GenAI SDKs use `http://127.0.0.1:8007`.
+Use `http://127.0.0.1:8007/v1` as the OpenAI SDK base URL. Claude and Google GenAI SDKs use `http://127.0.0.1:8007`. Copy configuration for common clients from the Connect page in the console.
 
 ## Layout
 
@@ -306,6 +321,7 @@ internal/
   desktop/           # Desktop window and tray
   gemini/            # Gemini Web protocol client
   logging/           # Run logs and request tracing
+  mcp/               # MCP server and tools
   pricing/           # Equivalent API prices
   requestdb/         # Request ledger
   streamio/          # HTTP stream flushing
@@ -325,10 +341,10 @@ build/               # Desktop icons and packaging configuration
 | `PROXY_API_KEY` | Local 2API access keys, comma-separated | empty |
 | `PROXY` | Proxy pool, comma-separated | empty |
 | `MODEL_MAPPING` | External model name to current model ID mapping | empty |
-| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure | `2m` |
+| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure; upstream rate limits cool down for at most 1 minute | `2m` |
 | `SESSION_TTL` | Lifetime of explicit session state | `30m` |
 | `INIT_TIMEOUT` | Per-account startup timeout | `20s` |
-| `PER_ACCOUNT_CONCURRENCY` | Concurrent upstream requests per account | `1` |
+| `PER_ACCOUNT_CONCURRENCY` | Concurrent upstream requests per account; a request that has waited 1 minute for the first upstream output yields its slot, one per account at a time | `1` |
 | `ROUTING_STRATEGY` | Routing strategy for requests without a session | `round-robin` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `LOG_FORMAT` | Console log format: `text` or `json` | `text` |
@@ -338,35 +354,13 @@ build/               # Desktop icons and packaging configuration
 | `ADMIN_AUTH_ENABLED` | Console sign-in | `false` |
 | `ADMIN_USERNAME` | Console username | `admin` |
 | `ADMIN_PASSWORD` | Console password | empty |
+| `API_KEY_ACCOUNTS` | Accounts each API key may use, as `key:account|account` items separated by commas | empty |
+| `FIRST_EVENT_HEDGE` | First-event backup request: `auto`, a wait in seconds, or `off` | `auto` |
+| `FIRST_EVENT_HEDGE_MODELS` | Model IDs that send first-event backup requests, separated by commas | `gemini-4-argon` |
 
-`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts; with `fill-first`, the first idle account is preferred.
+`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts; with `fill-first`, the first idle account is preferred. Keys missing from `API_KEY_ACCOUNTS` can use every account; listed keys use only their accounts and never the guest session. `FIRST_EVENT_HEDGE` sends the same request from another idle account when the original has not returned its first event for a while and uses whichever answers first; `auto` uses the p95 first-event wait of each model over the last 24 hours.
 
 The `--auth` and `--listen` flags override auth paths and the listener address; `--open-ui` controls whether the console opens in the browser after startup, and defaults to on when the program starts without arguments.
-
-## Troubleshooting
-
-### Windows Port Reserved by System
-
-If startup reports that the port configured by `LISTEN_ADDR` is unavailable while Task Manager shows no owning process, Hyper-V, WSL2, or Docker NAT may have reserved the port range.
-
-Run the following commands from an elevated PowerShell or CMD window.
-
-```powershell
-netsh interface ipv4 show excludedportrange protocol=tcp
-```
-
-If `8007` falls inside a reserved range, change `LISTEN_ADDR`, or restart WinNAT and inspect the range again:
-
-```powershell
-net stop winnat
-net start winnat
-```
-
-When the port is free, it can be reserved persistently:
-
-```powershell
-netsh int ipv4 add excludedportrange protocol=tcp startport=8007 numberofports=1 store=persistent
-```
 
 ## Notes
 

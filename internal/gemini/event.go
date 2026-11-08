@@ -67,6 +67,8 @@ type EventMetadataData struct {
 	ModelName    string
 	// LimitNotice 是用量用满后上游随降级回答给出的额度提示
 	LimitNotice string
+	// FailureReply 表示上游把本次回答标为固定失败回复
+	FailureReply bool
 }
 
 // CodeEventType 表示 Gemini Web 内置代码执行事件类型

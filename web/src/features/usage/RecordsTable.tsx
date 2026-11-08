@@ -15,6 +15,7 @@ import { usePreference } from '@/features/usage/preference'
 import { recordsParams, type RecordsScope, useUsageRecords } from '@/features/usage/queries'
 import { RecordDrawer } from '@/features/usage/RecordDrawer'
 import type { UsageRecord } from '@/features/usage/types'
+import { appURL } from '@/lib/api'
 import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 
 // Column 是请求记录表可开关的列
@@ -277,7 +278,7 @@ export function RecordsTable({
         </Popover>
         {scope ? (
           <Button size="sm" asChild>
-            <a href={'/api/usage/records.csv?' + recordsParams(scope).toString()} download>
+            <a href={appURL('/api/usage/records.csv?' + recordsParams(scope).toString())} download>
               <Download size={16} aria-hidden />
               {m.export}
             </a>

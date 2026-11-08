@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/gin-gonic/gin"
 )
 
@@ -42,8 +43,9 @@ func holdStream(c *gin.Context, frame []byte) (*keepaliveWriter, func()) {
 	return startStreamWriter(c, frame, true)
 }
 
-// startStreamWriter 替换 c.Writer 并开始发送保活帧，返回写入器与停止函数，停止时写出仍暂存的输出
+// startStreamWriter 替换 c.Writer 并开始发送保活帧，响应头要求反向代理不缓冲，返回写入器与停止函数，停止时写出仍暂存的输出
 func startStreamWriter(c *gin.Context, frame []byte, held bool) (*keepaliveWriter, func()) {
+	c.Header("X-Accel-Buffering", "no")
 	now := time.Now()
 	writer := &keepaliveWriter{
 		ResponseWriter: c.Writer, lastWrite: now, started: now, frame: frame, held: held,
@@ -59,6 +61,11 @@ func startStreamWriter(c *gin.Context, frame []byte, held bool) (*keepaliveWrite
 			writer.release()
 		})
 	}
+}
+
+// usageOnly 判断事件是否只携带生成开始时的提示词用量，这类事件不放出暂存的流式输出
+func usageOnly(event gemini.Event) bool {
+	return event.Kind == gemini.EventMetadata && event.Usage != nil && event.Metadata == nil
 }
 
 // release 写出暂存的输出，此后的写入直接发出
@@ -87,7 +94,7 @@ func (w *keepaliveWriter) reject() bool {
 		return false
 	}
 	w.held, w.buffer, w.frame = false, nil, nil
-	for _, name := range []string{"Content-Type", "Cache-Control", "Connection"} {
+	for _, name := range []string{"Content-Type", "Cache-Control", "Connection", "X-Accel-Buffering"} {
 		w.Header().Del(name)
 	}
 	return true

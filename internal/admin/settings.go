@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,14 @@ type ServiceConfig struct {
 	ActiveListenAddr string   `json:"active_listen_addr"`
 	RestartRequired  bool     `json:"restart_required"`
 	RestartFields    []string `json:"restart_fields"`
+
+	APIKeyAccounts        string `json:"api_key_accounts"`
+	FirstEventHedge       string `json:"first_event_hedge"`
+	FirstEventHedgeModels string `json:"first_event_hedge_models"`
+	// Invalid 是启动时取值无效、按默认值运行的 .env 项
+	Invalid []config.InvalidValue `json:"invalid"`
+	// Locked 是由进程环境变量或启动参数决定的配置项，键为 .env 名，值为 env 或 flag
+	Locked map[string]string `json:"locked"`
 }
 
 // ConfigUpdate 是设置页提交的修改，nil 表示不修改
@@ -88,6 +97,9 @@ type ConfigUpdate struct {
 	ListenAddr       *string `json:"listen_addr"`
 	AuthStates       *string `json:"auth_states"`
 	LogFormat        *string `json:"log_format"`
+	APIKeyAccounts   *string `json:"api_key_accounts"`
+	FirstEventHedge  *string `json:"first_event_hedge"`
+	HedgeModels      *string `json:"first_event_hedge_models"`
 }
 
 // View 返回设置页的配置视图
@@ -104,6 +116,9 @@ func (s *Settings) View() ServiceConfig {
 		AdminPasswordSet: cfg.AdminPassword != "", ListenAddr: cfg.ListenAddress,
 		AuthStates: strings.Join(cfg.AuthStatePaths, ","), LogFormat: cfg.LogFormat,
 		ActiveListenAddr: s.active.ListenAddress, RestartFields: []string{},
+		Invalid: nonNil(cfg.Invalid), Locked: cfg.Locked,
+		APIKeyAccounts: config.FormatAPIKeyAccounts(cfg.APIKeyAccounts), FirstEventHedge: cfg.FirstEventHedge,
+		FirstEventHedgeModels: strings.Join(cfg.FirstEventHedgeModels, ","),
 	}
 	if cfg.ListenAddress != s.active.ListenAddress {
 		view.RestartFields = append(view.RestartFields, "listen_addr")
@@ -248,10 +263,45 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		next.LogFormat = format
 		env["LOG_FORMAT"] = format
 	}
+	if update.APIKeyAccounts != nil || update.ProxyAPIKey != nil {
+		raw := config.FormatAPIKeyAccounts(next.APIKeyAccounts)
+		if update.APIKeyAccounts != nil {
+			raw = *update.APIKeyAccounts
+		}
+		bindings, err := config.ParseAPIKeyAccounts(raw, next.ProxyAPIKey)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("API_KEY_ACCOUNTS %w", err))
+		}
+		next.APIKeyAccounts = bindings
+		if formatted := config.FormatAPIKeyAccounts(bindings); update.APIKeyAccounts != nil || formatted != config.FormatAPIKeyAccounts(s.current.APIKeyAccounts) {
+			env["API_KEY_ACCOUNTS"] = formatted
+		}
+	}
+	if update.FirstEventHedge != nil {
+		mode := strings.ToLower(strings.TrimSpace(*update.FirstEventHedge))
+		if err := config.ValidateFirstEventHedge(mode); err != nil {
+			problems = append(problems, fmt.Errorf("FIRST_EVENT_HEDGE %w", err))
+		}
+		next.FirstEventHedge = mode
+		env["FIRST_EVENT_HEDGE"] = mode
+	}
+	if update.HedgeModels != nil {
+		next.FirstEventHedgeModels = config.SplitList(*update.HedgeModels)
+		env["FIRST_EVENT_HEDGE_MODELS"] = strings.Join(next.FirstEventHedgeModels, ",")
+	}
+	for key := range env {
+		if source := s.current.Locked[key]; source != "" {
+			problems = append(problems, fmt.Errorf("%s 由%s决定，设置页不能修改", key, map[string]string{"env": "环境变量", "flag": "启动参数"}[source]))
+		}
+	}
 	if len(problems) > 0 {
 		s.mu.Unlock()
 		return &validationError{errors.Join(problems...)}
 	}
+	next.Invalid = slices.DeleteFunc(slices.Clone(next.Invalid), func(item config.InvalidValue) bool {
+		_, saved := env[item.Key]
+		return saved
+	})
 	if err := config.WriteEnv(s.envPath, env); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("写入 %s: %w", s.envPath, err)

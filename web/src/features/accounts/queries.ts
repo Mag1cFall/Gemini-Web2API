@@ -3,13 +3,29 @@ import { useCallback } from 'react'
 
 import { toast } from '@/components/ui/toast'
 import { accountsMessages } from '@/features/accounts/messages'
-import type { Account } from '@/features/accounts/types'
+import type { Account, AccountTask } from '@/features/accounts/types'
 import { cooldownsKey } from '@/features/models/queries'
 import { api } from '@/lib/api'
 import { useMessages } from '@/lib/i18n'
 
 // accountsKey 是账户列表的查询键，事件流推送时直接写入
 export const accountsKey = ['accounts'] as const
+
+// tasksKey 是导入账号任务的查询键
+export const tasksKey = ['account-tasks'] as const
+
+// chromeProfilesKey 是本机 Chrome 账号列表的查询键
+export const chromeProfilesKey = ['chrome-profiles'] as const
+
+// useAccountTasks 读取导入账号任务，有任务进行中时每秒刷新
+export function useAccountTasks() {
+  return useQuery({
+    queryKey: tasksKey,
+    queryFn: async () => (await api<{ tasks: AccountTask[] }>('/api/accounts/tasks')).tasks,
+    refetchInterval: (query) =>
+      query.state.data?.some((task) => task.state === 'running') ? 1000 : false,
+  })
+}
 
 // useAccounts 读取全部账户
 export function useAccounts() {

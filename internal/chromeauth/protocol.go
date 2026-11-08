@@ -35,6 +35,9 @@ func multiloginStatusError(phase string, statusCode int, status string) error {
 	if status == "INVALID_TOKENS" {
 		return fmt.Errorf("%w: OAuthMultilogin %s 阶段失败 HTTP %d status %s", ErrCredentialsRejected, phase, statusCode, status)
 	}
+	if statusCode >= http.StatusInternalServerError {
+		return fmt.Errorf("%w: OAuthMultilogin %s 阶段失败 HTTP %d status %s", gemini.ErrTransport, phase, statusCode, status)
+	}
 	return fmt.Errorf("OAuthMultilogin %s 阶段失败 HTTP %d status %s", phase, statusCode, status)
 }
 
@@ -213,6 +216,9 @@ func requestMultilogin(ctx context.Context, client tls_client.HttpClient, gaiaID
 	}
 	var result multiloginResponse
 	if err := json.Unmarshal(body, &result); err != nil {
+		if response.StatusCode >= http.StatusInternalServerError {
+			return response.StatusCode, multiloginResponse{}, fmt.Errorf("%w: OAuthMultilogin 返回无法解析的响应 HTTP %d", gemini.ErrTransport, response.StatusCode)
+		}
 		return response.StatusCode, multiloginResponse{}, fmt.Errorf("OAuthMultilogin 返回无法解析的响应 HTTP %d", response.StatusCode)
 	}
 	return response.StatusCode, result, nil

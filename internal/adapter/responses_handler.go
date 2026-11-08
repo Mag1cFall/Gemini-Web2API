@@ -169,7 +169,9 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			result, accountID, err := runGeneration(
 				ctx, pool, sessionKey, policy, request.Model, responseID, media, thinkingLevel, bridge,
 				responsesPrompt(c, request, rebuilt, sessionKey, bridge), func(event gemini.Event) error {
-					stream.release()
+					if !usageOnly(event) {
+						stream.release()
+					}
 					if event.Kind == gemini.EventImageProgress {
 						projection.bufferText = true
 						if bridge.disallowsHostedTools() {
@@ -800,10 +802,9 @@ func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *Ev
 			}
 			parts, _ := item["content"].([]gin.H)
 			if len(parts) > 0 {
-				markdownOutput := responsesMarkdownOutput(primary)
-				text := renderCandidateMarkdown(primary.Text, markdownOutput, projection.textRunes)
-				if text != "" {
-					if err := w.textDelta(text); err != nil {
+				text, _ := parts[0]["text"].(string)
+				if runes := []rune(text); projection.textRunes < len(runes) {
+					if err := w.textDelta(string(runes[projection.textRunes:])); err != nil {
 						return err
 					}
 				}

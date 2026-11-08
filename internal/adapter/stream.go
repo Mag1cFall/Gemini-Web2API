@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
@@ -55,8 +57,13 @@ func (e *outputMismatchError) Error() string { return e.err.Error() }
 func (e *outputMismatchError) Unwrap() error { return e.err }
 
 type streamProjection struct {
-	bufferText     bool
-	bufferThought  bool
+	bridge        ToolBridge
+	bufferText    bool
+	bufferThought bool
+	// gateCalls 表示正文扣到结束时仍实时输出调用块之前的部分
+	gateCalls bool
+	// heldText 是已到达但可能属于调用块开头的正文尾部
+	heldText       string
 	includeThought bool
 	emittedText    bool
 	emittedThought bool
@@ -67,25 +74,49 @@ type streamProjection struct {
 
 func newStreamProjection(bridge ToolBridge, includeThought bool) *streamProjection {
 	disallowHostedTools := bridge.disallowsHostedTools()
+	holdAll := len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 || bridge.WebSearch || bridge.RequireImageGeneration || bridge.RequireCodeExecution || disallowHostedTools
 	return &streamProjection{
-		bufferText:     len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 || bridge.WebSearch || bridge.RequireImageGeneration || bridge.RequireCodeExecution || disallowHostedTools,
+		bridge:         bridge,
+		bufferText:     len(bridge.Definitions) > 0 || holdAll,
 		bufferThought:  bridge.RequireImageGeneration || disallowHostedTools,
+		gateCalls:      len(bridge.Definitions) > 0 && !holdAll,
 		includeThought: includeThought,
 	}
 }
 
 func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) error, emitError func(error) error) error {
+	if usageOnly(event) && !p.visibleOutput {
+		*p = *newStreamProjection(p.bridge, p.includeThought)
+		return nil
+	}
 	if event.Candidate != 0 {
 		return nil
 	}
 	if event.Kind == gemini.EventCode || event.Kind == gemini.EventMedia {
 		p.bufferText = true
+		p.gateCalls = false
 		return nil
 	}
 	if event.Kind != gemini.EventText && event.Kind != gemini.EventThought {
 		return nil
 	}
 	if event.Kind == gemini.EventThought && !p.includeThought {
+		return nil
+	}
+	if event.Kind == gemini.EventText && p.gateCalls && event.Operation == gemini.SnapshotAppend {
+		safe, held, call := splitCallGate(p.heldText + event.Delta)
+		p.heldText = held
+		p.gateCalls = !call
+		if safe == "" {
+			return nil
+		}
+		event.Delta = safe
+		if err := emit(event); err != nil {
+			return err
+		}
+		p.emittedText = true
+		p.textRunes += len([]rune(safe))
+		p.visibleOutput = true
 		return nil
 	}
 	buffered := &p.bufferText
@@ -111,6 +142,9 @@ func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) e
 		p.visibleOutput = true
 		return nil
 	}
+	if event.Kind == gemini.EventText {
+		p.gateCalls = false
+	}
 	if !*emitted {
 		*buffered = true
 		return nil
@@ -127,6 +161,21 @@ func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) e
 
 func (p *streamProjection) hasVisibleOutput() bool {
 	return p.visibleOutput
+}
+
+// partialCallPattern 匹配正文末尾可能是调用块开头前缀的部分
+var partialCallPattern = regexp.MustCompile(`\\?\[\s*(?:C(?:a(?:l(?:l\s*(?:\\?(?::[^\]\r\n\\]*\\?)?)?)?)?)?)?$|\\$`)
+
+// splitCallGate 把正文分为可以输出的部分与暂扣的尾部：出现调用块开头时从调用块起全部暂扣并报告 call；否则暂扣可能是调用块开头前缀的尾部与末尾空白
+func splitCallGate(text string) (safe string, held string, call bool) {
+	cut := len(text)
+	if location := callStartPattern.FindStringIndex(text); location != nil {
+		cut, call = location[0], true
+	} else if location := partialCallPattern.FindStringIndex(text); location != nil {
+		cut = location[0]
+	}
+	cut = len(strings.TrimRightFunc(text[:cut], unicode.IsSpace))
+	return text[:cut], text[cut:], call
 }
 
 func streamEventName(kind gemini.EventKind) string {
@@ -257,9 +306,10 @@ func runGenerationAttempts(
 		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 503, Message: "没有可用账号", Retryable: true}
 	}
 	usedRequestAttempts := 0
+	regenerated, regenerating := 0, false
 	lastAccountID := ""
 	var lastErr error
-	for len(excludedAccountIDs) < availableAccounts {
+	for len(excludedAccountIDs) < availableAccounts || regenerating {
 		selectionKey := sessionKey
 		if newSession {
 			selectionKey = ""
@@ -269,35 +319,41 @@ func runGenerationAttempts(
 		if err != nil {
 			return generationResult{}, accountID, err
 		}
+		if client == nil && regenerating {
+			regenerating = false
+			clear(excludedAccountIDs)
+			continue
+		}
+		regenerating = false
 		if client == nil {
 			if sessionKey != "" && !newSession && accountID != "" {
 				if rebuildable {
 					sessionKey, newSession, requestAttempts = "", true, 2
 					continue
 				}
-				return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: fmt.Sprintf("会话所在账号 %s，会话没有保存的响应链，无法在其他账号续接", pool.AccountReason(accountID, requestedModel))}
+				return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: fmt.Sprintf("会话所在账号 %s，会话没有保存的响应链，无法在其他账号续接", pool.AccountReason(ctx, accountID, requestedModel))}
 			}
 			if lastErr != nil {
 				return generationResult{}, lastAccountID, lastErr
 			}
 			return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: "没有可用账号", Retryable: true}
 		}
-		result, err := func() (generationResult, error) {
-			defer releaseRequest()
-			result, err := runGenerationWithClient(
-				ctx, pool, client, accountID, sessionKey, newSession, requestedModel, responseID,
-				media, thinkingLevel, bridge, prepare, onEvent,
-			)
-			if err == nil {
-				pool.ReportSuccess(accountID, requestedModel)
-			} else if ctx.Err() == nil && retryableAccountError(err) && !isOutputMismatchError(err) {
-				if usageLimitError(err) {
-					_, _ = client.FetchUsage(ctx)
-				}
-				pool.ReportFailure(accountID, requestedModel, err)
+		attemptSessionKey, attemptNewSession := sessionKey, newSession
+		run := func(ctx context.Context, client *gemini.Client, accountID string, emit func(gemini.Event) error) (generationResult, error) {
+			return runGenerationWithClient(ctx, pool, client, accountID, attemptSessionKey, attemptNewSession, requestedModel, responseID, media, thinkingLevel, bridge, prepare, emit)
+		}
+		var target *hedgeTarget
+		if delay, ok := hedgeDelay(requestedModel); ok && (newSession || rebuildable) {
+			hedgeSessionKey := ""
+			if newSession {
+				hedgeSessionKey = sessionKey
 			}
-			return result, err
-		}()
+			target = &hedgeTarget{delay: delay, excluded: excludedAccountIDs, run: func(ctx context.Context, client *gemini.Client, accountID string, emit func(gemini.Event) error) (generationResult, error) {
+				return runGenerationWithClient(ctx, pool, client, accountID, hedgeSessionKey, true, requestedModel, responseID, media, thinkingLevel, bridge, prepare, emit)
+			}}
+		}
+		result, winnerID, err := raceFirstEvent(ctx, pool, requestedModel, client, accountID, releaseRequest, run, onEvent, target)
+		accountID = winnerID
 		if err == nil {
 			result.Model = requestedModel
 			return result, accountID, nil
@@ -326,6 +382,13 @@ func runGenerationAttempts(
 			excludedAccountIDs[accountID] = struct{}{}
 			continue
 		}
+		if (gemini.TransientError(err) || isOutputMismatchError(err)) && (sessionKey == "" || newSession) && regenerated < regenerations && (hasVisibleOutput == nil || !hasVisibleOutput()) {
+			regenerated++
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
+			excludedAccountIDs[accountID] = struct{}{}
+			regenerating = true
+			continue
+		}
 		usedRequestAttempts++
 		if usedRequestAttempts >= requestAttempts || !retryableAccountError(err) ||
 			hasVisibleOutput != nil && hasVisibleOutput() {
@@ -337,6 +400,9 @@ func runGenerationAttempts(
 	}
 	return generationResult{}, lastAccountID, lastErr
 }
+
+// regenerations 是生成流中断、5xx、固定失败文字或输出不符合请求要求且客户端没有收到内容时重新生成的次数上限，优先换用其他账号，没有其他账号时回到失败的账号
+const regenerations = 3
 
 func runGenerationWithClient(
 	ctx context.Context,
@@ -404,10 +470,14 @@ func runGenerationWithClient(
 		feature = gemini.FeatureImage
 	}
 	accumulator := NewEventAccumulator()
-	initialUsageSent := false
 	cutter := newStopCutter(bridge.Stop)
 	streamCtx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
+	if onEvent != nil {
+		if err := onEvent(gemini.Event{Kind: gemini.EventMetadata, Usage: &gemini.Usage{PromptTokens: promptTokens, TotalTokens: promptTokens}}); err != nil {
+			return generationResult{}, adapterEmitError{err: err}
+		}
+	}
 	err = client.Stream(streamCtx, gemini.GenerateRequest{
 		Prompt:        prompt,
 		Model:         model.ID,
@@ -431,13 +501,6 @@ func runGenerationWithClient(
 			metadata := *event.Metadata
 			metadata.ModelName = actualProviderModel(client, model.ID, event.Metadata)
 			event.Metadata = &metadata
-		}
-		if onEvent != nil && !initialUsageSent && event.Kind != gemini.EventError {
-			initialUsageSent = true
-			usage := &gemini.Usage{PromptTokens: promptTokens, TotalTokens: promptTokens}
-			if err := onEvent(gemini.Event{Kind: gemini.EventMetadata, Usage: usage}); err != nil {
-				return adapterEmitError{err: err}
-			}
 		}
 		if err := accumulator.Apply(event); err != nil {
 			return err

@@ -30,9 +30,11 @@ type Deps struct {
 	Version    string
 	StartedAt  time.Time
 	ListenAddr string
-	Desktop    bool
-	DataDir    string
-	Updates    UpdateService
+	// ReservedListen 是被 Windows 保留而改用 ListenAddr 的配置地址，没有改用时为空
+	ReservedListen string
+	Desktop        bool
+	DataDir        string
+	Updates        UpdateService
 	// Stopping 在服务开始停机时关闭，已打开的事件流随之结束
 	Stopping <-chan struct{}
 }
@@ -43,6 +45,7 @@ type handler struct {
 	sessions sessionStore
 	attempts loginAttempts
 	pairing  pairingTokens
+	tasks    accountTasks
 }
 
 // Mount 在 /api 下注册管理端接口
@@ -62,7 +65,11 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.POST("/accounts/:id/verify", h.verifyAccount)
 	api.GET("/accounts/import/chrome", h.chromeProfiles)
 	api.POST("/accounts/import/chrome", h.importChrome)
+	api.POST("/accounts/import/cookie/discover", h.discoverCookie)
 	api.POST("/accounts/import/cookie", h.importCookie)
+	api.GET("/accounts/tasks", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"tasks": h.tasks.list()}) })
+	api.DELETE("/accounts/tasks/:id", h.removeTask)
+	api.POST("/warmup", h.warmup)
 	api.POST("/pairing", h.createPairing)
 	api.GET("/accounts/usage", func(c *gin.Context) {
 		refresh, _ := strconv.ParseBool(c.Query("refresh"))
@@ -116,6 +123,7 @@ type serviceStatus struct {
 	Ready          bool          `json:"ready"`
 	StartedAt      time.Time     `json:"started_at"`
 	ListenAddr     string        `json:"listen_addr"`
+	ReservedListen string        `json:"reserved_listen,omitempty"`
 	BaseURL        string        `json:"base_url"`
 	APIKeyRequired bool          `json:"api_key_required"`
 	ActiveRequests int           `json:"active_requests"`
@@ -129,7 +137,7 @@ type serviceStatus struct {
 func (h *handler) status() serviceStatus {
 	pool := h.Pool.Status()
 	return serviceStatus{
-		Version: h.Version, Ready: pool.Ready(), StartedAt: h.StartedAt, ListenAddr: h.ListenAddr,
+		Version: h.Version, Ready: pool.Ready(), StartedAt: h.StartedAt, ListenAddr: h.ListenAddr, ReservedListen: h.ReservedListen,
 		BaseURL: baseURL(h.ListenAddr), APIKeyRequired: h.settings.APIKey() != "", ActiveRequests: logging.ActiveCount(),
 		Accounts: accountCounts{
 			Total: pool.Total, Available: pool.Available, CoolingDown: pool.CoolingDown, Initializing: pool.Initializing,

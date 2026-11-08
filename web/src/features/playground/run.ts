@@ -11,6 +11,7 @@ import {
   type Protocol,
   videoState,
 } from '@/features/playground/protocols'
+import { appURL } from '@/lib/api'
 
 // Run 是一次请求的进度与结果，firstMs 为流式响应首个事件的耗时，progress 为视频任务的当前状态
 export interface Run {
@@ -71,7 +72,7 @@ async function readStream(response: Response, protocol: Protocol, started: numbe
 
 // download 下载生成的媒体并返回 blob URL，失败时返回错误说明
 async function download(url: string, headers: Record<string, string>, signal: AbortSignal) {
-  const response = await fetch(url, { headers, signal })
+  const response = await fetch(appURL(url), { headers, signal })
   if (!response.ok) return { status: response.status, error: parseError(await response.text()) }
   const blob = await response.blob()
   return { status: response.status, media: { type: blob.type, url: URL.createObjectURL(blob) } }
@@ -91,7 +92,7 @@ async function followVideo(
   update({ progress: state.status })
   while (!state.done) {
     await wait(videoPollMs, signal)
-    const poll = await fetch(state.poll, { headers, signal })
+    const poll = await fetch(appURL(state.poll), { headers, signal })
     raw = await poll.text()
     if (!poll.ok) {
       update({ status: poll.status, raw, result: { error: parseError(raw) } })
@@ -120,7 +121,7 @@ async function transfer(
   started: number,
   update: Update,
 ) {
-  const response = await fetch(request.url, {
+  const response = await fetch(appURL(request.url), {
     method: 'POST',
     headers: request.headers,
     body: request.body instanceof FormData ? request.body : JSON.stringify(request.body),

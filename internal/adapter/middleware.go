@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
@@ -42,7 +43,7 @@ func CORSMiddleware() gin.HandlerFunc {
 // authFailedKey 是标记请求鉴权失败的 gin 上下文键
 const authFailedKey = "gw.auth_failed"
 
-// AuthMiddleware 校验服务公开 API key，apiKey 返回当前生效的密钥，多个 key 以逗号分隔，任一匹配即通过；未设密钥时拒绝 null 来源与非本机网页发起的请求，以 IP 地址打开的本服务页面照常访问，断点续传的后续请求凭 upload_id 授权
+// AuthMiddleware 校验服务公开 API key，apiKey 返回当前生效的密钥，多个 key 以逗号分隔，任一匹配即通过，账号池按匹配的 key 绑定的账号选号；未设密钥时拒绝 null 来源与非本机网页发起的请求，以 IP 地址打开的本服务页面照常访问，断点续传的后续请求凭 upload_id 授权
 func AuthMiddleware(apiKey func() string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.URL.Path == "/upload/v1beta/files" && geminiUploadExists(c.Query("upload_id")) {
@@ -60,17 +61,18 @@ func AuthMiddleware(apiKey func() string) gin.HandlerFunc {
 			return
 		}
 		provided, matched := apiKeyMatches(c, keys)
-		if !matched {
+		if matched == "" {
 			writeAuthError(c, provided)
 			c.Abort()
 			return
 		}
+		c.Request = c.Request.WithContext(balancer.ContextWithAPIKey(c.Request.Context(), matched))
 		c.Next()
 	}
 }
 
-// apiKeyMatches 报告请求是否带了 API key，以及查询参数或请求头中是否有任一 key 与配置的某个 key 相同
-func apiKeyMatches(c *gin.Context, keys []string) (bool, bool) {
+// apiKeyMatches 报告请求是否带了 API key，并返回查询参数或请求头中与配置相同的 key，没有时为空串
+func apiKeyMatches(c *gin.Context, keys []string) (bool, string) {
 	bearer := ""
 	if scheme, value, ok := strings.Cut(strings.TrimSpace(c.GetHeader("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
 		bearer = value
@@ -84,11 +86,11 @@ func apiKeyMatches(c *gin.Context, keys []string) (bool, bool) {
 		provided = true
 		for _, key := range keys {
 			if subtle.ConstantTimeCompare([]byte(candidate), []byte(key)) == 1 {
-				return true, true
+				return true, key
 			}
 		}
 	}
-	return provided, false
+	return provided, ""
 }
 
 // foreignWebOrigin 报告 Origin 为 null，或是非本机且不是以 IP 地址打开的本服务页面的 http、https 网页，没有 Origin 的客户端与其他 scheme 不算
@@ -128,8 +130,11 @@ func LoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// RequestMiddleware 为公开 API 请求分配 ID、跟踪生成请求的阶段，结束时输出结果并把生成请求写入账本
+// RequestMiddleware 为公开 API 请求分配 ID、跟踪生成请求的阶段，结束时输出结果并把生成请求写入账本，首次创建时从账本补入首事件样本
 func RequestMiddleware(store *requestdb.Store) gin.HandlerFunc {
+	if store != nil {
+		go firstEvents.seed(store)
+	}
 	return func(c *gin.Context) {
 		started := time.Now()
 		request, ctx := logging.NewRequest(c.Request.Context(), c.Request.Method, c.Request.URL.Path, c.ClientIP())
@@ -224,7 +229,7 @@ func thinkingLevelNames(levels []gemini.ThinkingLevel) []string {
 	return names
 }
 
-// writeAuthError 按请求协议写与官方同形的鉴权错误，provided 表示请求带了 API key
+// writeAuthError 按请求协议写与官方同形的鉴权错误，provided 表示请求带了 API key；Gemini 路由的无效 key 带 ErrorInfo 与 LocalizedMessage，不带 alt=sse 的 streamGenerateContent 外层为数组
 func writeAuthError(c *gin.Context, provided bool) {
 	c.Set(authFailedKey, true)
 	path := c.Request.URL.Path
@@ -238,7 +243,7 @@ func writeAuthError(c *gin.Context, provided bool) {
 			body = gin.H{"error": gin.H{"code": status, "message": message, "status": "INVALID_ARGUMENT", "details": []gin.H{{
 				"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID", "domain": "googleapis.com",
 				"metadata": gin.H{"service": "generativelanguage.googleapis.com"},
-			}}}}
+			}, {"@type": "type.googleapis.com/google.rpc.LocalizedMessage", "locale": "en-US", "message": message}}}}
 		} else {
 			status, message = http.StatusForbidden, "Method doesn't allow unregistered callers (callers without established identity). Please use API Key or other form of API consumer identity to call this API."
 			body = gin.H{"error": gin.H{"code": status, "message": message, "status": "PERMISSION_DENIED"}}
@@ -258,5 +263,9 @@ func writeAuthError(c *gin.Context, provided bool) {
 		body = gin.H{"error": gin.H{"message": message, "type": "invalid_request_error", "param": nil, "code": code}}
 	}
 	logging.FromContext(c.Request.Context()).Fail(status, message)
+	if strings.HasSuffix(path, ":streamGenerateContent") && c.Query("alt") != "sse" {
+		c.JSON(status, []gin.H{body})
+		return
+	}
 	c.JSON(status, body)
 }

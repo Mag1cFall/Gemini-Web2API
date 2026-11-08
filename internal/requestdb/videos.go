@@ -20,6 +20,8 @@ type StoredVideo struct {
 	Object json.RawMessage
 	// FileID 为成品视频在文件存储中的 ID，未完成时为空
 	FileID string
+	// Session 为视频所在网页会话的 JSON，未完成时为空
+	Session json.RawMessage
 }
 
 // SaveVideo 写入或替换视频任务
@@ -27,6 +29,12 @@ func (store *Store) SaveVideo(ctx context.Context, video StoredVideo) error {
 	_, err := store.db.ExecContext(ctx, `INSERT INTO videos(id,created_at,protocol,status,object,file_id) VALUES(?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET status=excluded.status, object=excluded.object, file_id=excluded.file_id`,
 		video.ID, video.CreatedAt.UnixMilli(), video.Protocol, video.Status, string(video.Object), video.FileID)
+	return err
+}
+
+// SaveVideoSession 写入视频所在的网页会话
+func (store *Store) SaveVideoSession(ctx context.Context, id string, session json.RawMessage) error {
+	_, err := store.db.ExecContext(ctx, `UPDATE videos SET session=? WHERE id=?`, string(session), id)
 	return err
 }
 
@@ -101,7 +109,7 @@ func (store *Store) DeleteVideo(ctx context.Context, id string) (bool, error) {
 }
 
 // videoColumns 是视频表按 scanVideos 顺序读取的列
-const videoColumns = `id,created_at,protocol,status,object,file_id`
+const videoColumns = `id,created_at,protocol,status,object,file_id,session`
 
 // scanVideos 读取视频行并关闭结果集
 func scanVideos(rows *sql.Rows) ([]StoredVideo, error) {
@@ -110,11 +118,11 @@ func scanVideos(rows *sql.Rows) ([]StoredVideo, error) {
 	for rows.Next() {
 		var video StoredVideo
 		var created int64
-		var object string
-		if err := rows.Scan(&video.ID, &created, &video.Protocol, &video.Status, &object, &video.FileID); err != nil {
+		var object, session string
+		if err := rows.Scan(&video.ID, &created, &video.Protocol, &video.Status, &object, &video.FileID, &session); err != nil {
 			return nil, err
 		}
-		video.CreatedAt, video.Object = time.UnixMilli(created), json.RawMessage(object)
+		video.CreatedAt, video.Object, video.Session = time.UnixMilli(created), json.RawMessage(object), json.RawMessage(session)
 		videos = append(videos, video)
 	}
 	return videos, rows.Err()

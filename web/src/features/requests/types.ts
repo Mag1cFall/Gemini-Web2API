@@ -37,6 +37,9 @@ export interface Attempt {
   status: number
   error: string
   duration_ms: number
+  // hedge 表示首事件备用请求，superseded 表示该次尝试被先返回的另一次取代
+  hedge?: boolean
+  superseded?: boolean
 }
 
 // RequestInfo 对应 internal/logging 的 RequestInfo，可选字段为空时后端省略

@@ -8,6 +8,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/admin"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/mcp"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/webui"
 
@@ -80,6 +81,8 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.GET("/v1/videos/:video", adapter.VideoRetrieveHandler(deps.Store))
 	api.DELETE("/v1/videos/:video", adapter.VideoDeleteHandler(deps.Store))
 	api.GET("/v1/videos/:video/content", adapter.VideoContentHandler(deps.Store))
+	api.POST("/v1/videos/:video/remix", adapter.VideoRemixHandler(pool, deps.Store))
+	api.POST("/v1/videos/extensions", adapter.VideoExtensionHandler(pool, deps.Store))
 	api.GET("/v1beta/models/:model/operations/:operation", adapter.GeminiOperationHandler(deps.Store))
 	api.GET("/v1beta/operations/:operation", adapter.GeminiOperationHandler(deps.Store))
 	api.POST("/v1/audio/speech", adapter.SpeechHandler(pool))
@@ -91,6 +94,10 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.POST("/v1/realtime/sessions", adapter.UnavailableOpenAIHandler("realtime", "the Realtime API"))
 	api.POST("/v1/realtime/client_secrets", adapter.UnavailableOpenAIHandler("realtime", "the Realtime API"))
 	api.GET("/ws/*method", adapter.GeminiLiveHandler)
+	mcpHandler := mcp.Handler(router, pool, Version())
+	api.POST("/mcp", mcpHandler)
+	api.GET("/mcp", mcpHandler)
+	api.DELETE("/mcp", mcpHandler)
 
 	if deps.Admin != nil {
 		admin.Mount(router, *deps.Admin)

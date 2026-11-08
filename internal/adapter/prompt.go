@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -29,7 +30,8 @@ func writeTextSegment(builder *strings.Builder, text string) {
 	builder.WriteString(text)
 }
 
-func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemini.Client) (string, []gemini.FileData, error) {
+// decodeMessageContent 把消息内容解码为提示词正文与附件，toolNames 是历史调用 ID 到工具名称的映射，用于写出工具结果
+func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemini.Client, toolNames map[string]string) (string, []gemini.FileData, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return "", nil, nil
 	}
@@ -75,7 +77,7 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 					continue
 				}
 				if source.Type == "content" {
-					text, attachments, err := decodeMessageContent(ctx, source.Content, client)
+					text, attachments, err := decodeMessageContent(ctx, source.Content, client, toolNames)
 					if err != nil {
 						return "", nil, err
 					}
@@ -99,15 +101,17 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			if file != nil {
 				files = append(files, *file)
 			}
-		case "server_tool_use", "web_search_tool_result":
+		case "server_tool_use", "web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result", "text_editor_code_execution_tool_result",
+			"tool_search_tool_result", "advisor_tool_result", "mcp_tool_use", "mcp_tool_result", "container_upload", "search_result", "tool_reference":
 			appendTranscriptObject(&builder, part)
+		case "compaction":
+			var summary string
+			_ = json.Unmarshal(part["content"], &summary)
+			writeTextSegment(&builder, summary)
 		case "tool_use":
-			var id, name string
-			var input json.RawMessage
-			_ = json.Unmarshal(part["id"], &id)
+			var name string
 			_ = json.Unmarshal(part["name"], &name)
-			input = part["input"]
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_use", "id": id, "name": name, "input": input})
+			writeCallBlock(&builder, name, part["input"])
 		case "tool_result":
 			var id string
 			_ = json.Unmarshal(part["tool_use_id"], &id)
@@ -116,7 +120,7 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 				return "", nil, err
 			}
 			files = append(files, attachments...)
-			appendTranscriptObject(&builder, map[string]interface{}{"type": "tool_result", "tool_use_id": id, "content": content})
+			writeResultBlock(&builder, cmp.Or(toolNames[id], id), content)
 		case "thinking", "redacted_thinking":
 		default:
 			return "", nil, fmt.Errorf("不支持的消息内容段类型 %q", partType)
@@ -125,21 +129,17 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 	return builder.String(), files, nil
 }
 
-// toolResultContent 返回工具结果写入提示词的内容：内容段中有文字以外的段时解码为正文与附件，否则原样保留
-func toolResultContent(ctx context.Context, raw json.RawMessage, client *gemini.Client) (any, []gemini.FileData, error) {
-	var parts []struct {
-		Type string `json:"type"`
+// toolResultContent 返回工具结果写入提示词的原文与附件：字符串取原文，内容段数组解码为正文与附件，其余取 JSON 原文
+func toolResultContent(ctx context.Context, raw json.RawMessage, client *gemini.Client) (string, []gemini.FileData, error) {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text, nil, nil
 	}
-	if json.Unmarshal(raw, &parts) != nil {
-		return raw, nil, nil
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(raw, &parts) == nil {
+		return decodeMessageContent(ctx, raw, client, nil)
 	}
-	for _, part := range parts {
-		if part.Type != "text" {
-			text, files, err := decodeMessageContent(ctx, raw, client)
-			return text, files, err
-		}
-	}
-	return raw, nil, nil
+	return string(raw), nil, nil
 }
 
 var markdownImagePattern = regexp.MustCompile(`!\[[^\r\n]*\]\((data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/_=-]+)\)`)
@@ -348,22 +348,30 @@ func decodeBase64(value string) ([]byte, error) {
 	return nil, fmt.Errorf("base64 数据无效")
 }
 
-// renderTranscript 把消息记录写成网页提示词，单条普通用户消息与官网一样直接发送原文
-func renderTranscript(records []map[string]interface{}) (string, error) {
-	if len(records) == 1 && len(records[0]) == 2 && records[0]["role"] == "user" {
-		if content, ok := records[0]["content"].(string); ok {
-			return content, nil
-		}
+// transcriptTurn 是转录中的一轮消息：角色与已写成提示词的正文
+type transcriptTurn struct {
+	Role string
+	Text string
+}
+
+// renderTranscript 把消息与协议说明写成网页提示词：单条用户消息与官网一样发送原文并接上协议说明；多轮消息写成 ChatML 角色块，协议说明作为最后一个系统块，末尾留出助手轮
+func renderTranscript(turns []transcriptTurn, suffix string) string {
+	if len(turns) == 1 && turns[0].Role == "user" {
+		return turns[0].Text + suffix
 	}
-	transcript, err := json.Marshal(map[string]interface{}{"messages": records})
-	if err != nil {
-		return "", err
+	var builder strings.Builder
+	for _, turn := range turns {
+		fmt.Fprintf(&builder, "<|im_start|>%s\n%s\n<|im_end|>\n", turn.Role, strings.TrimRightFunc(turn.Text, unicode.IsSpace))
 	}
-	return string(transcript), nil
+	if suffix = strings.TrimSpace(suffix); suffix != "" {
+		fmt.Fprintf(&builder, "<|im_start|>system\n%s\n<|im_end|>\n", suffix)
+	}
+	builder.WriteString("<|im_start|>assistant\n")
+	return builder.String()
 }
 
 func appendTranscriptObject(builder *strings.Builder, value interface{}) {
-	data, err := json.Marshal(value)
+	data, err := marshalJSON(value)
 	if err != nil {
 		return
 	}

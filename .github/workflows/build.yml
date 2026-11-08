@@ -50,14 +50,10 @@ jobs:
           node-version: '22.23.3'
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-      - name: Check And Build Frontend
+      - name: Build Frontend
         working-directory: web
         run: |
           pnpm install --frozen-lockfile
-          pnpm run lint
-          pnpm run format:check
-          pnpm run typecheck
-          pnpm run test
           pnpm run build
       - uses: actions/upload-artifact@v7
         with:
@@ -65,12 +61,35 @@ jobs:
           path: internal/webui/dist
           retention-days: 7
 
-  headless:
+  web-checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.23.3'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Check Frontend
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run lint
+          pnpm run format:check
+          pnpm run typecheck
+          pnpm run test
+
+  checks:
     needs: web
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        check: [test, vet]
     env:
       CGO_ENABLED: '0'
-      VERSION: ${{ needs.web.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -78,39 +97,88 @@ jobs:
           name: webui
           path: internal/webui/dist
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
       - name: Run Unit Tests
+        if: matrix.check == 'test'
         run: go test -mod=readonly ./...
       - name: Check Minimum Go Version
+        if: matrix.check == 'vet'
         run: |
           go version
           go vet ./...
           go build -mod=readonly ./cmd/gemini-web2api
+      - uses: actions/cache/save@v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
+  headless:
+    needs: web
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+    env:
+      CGO_ENABLED: '0'
+      VERSION: ${{ needs.web.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: webui
+          path: internal/webui/dist
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version: stable
           cache: false
-      - name: Build Packages
+      - id: cache
+        run: echo "key=go-headless-${TARGET/\//-}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.cache.outputs.key }}-${{ github.sha }}
+          restore-keys: ${{ steps.cache.outputs.key }}-
+      - name: Build Package
         run: |
-          mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            export GOOS="${target%/*}" GOARCH="${target#*/}"
-            name="gemini-web2api-${VERSION}-${GOOS}-${GOARCH}"
-            mkdir -p "dist/$name"
-            go build -mod=readonly -tags nomsgpack -trimpath -ldflags="-s -w -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api" ./cmd/gemini-web2api
-            tar -czf "dist/$name.tar.gz" -C dist "$name"
-          done
+          export GOOS="${TARGET%/*}" GOARCH="${TARGET#*/}"
+          name="gemini-web2api-${VERSION}-${GOOS}-${GOARCH}"
+          mkdir -p "dist/$name"
+          go build -mod=readonly -tags nomsgpack -trimpath -ldflags="-s -w -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api" ./cmd/gemini-web2api
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          echo "ARTIFACT=packages-headless-${GOOS}-${GOARCH}" >> "$GITHUB_ENV"
+      - uses: actions/cache/save@v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.cache.outputs.key }}-${{ github.sha }}
       - uses: actions/upload-artifact@v7
         with:
-          name: packages-headless
+          name: ${{ env.ARTIFACT }}
           path: dist/*.tar.gz
           retention-days: 7
 
   desktop-windows:
     needs: web
-    runs-on: windows-latest
+    runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: '0'
       VERSION: ${{ needs.web.outputs.version }}
@@ -122,9 +190,17 @@ jobs:
           name: webui
           path: internal/webui/dist
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version: stable
-          cache-dependency-path: go.sum
+          cache: false
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-windows-amd64-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: go-windows-amd64-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
       - name: Install Packaging Tools
         run: go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
       - name: Build Desktop Package
@@ -136,8 +212,15 @@ jobs:
           wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest bin/wails.exe.manifest -info bin/info.json -out cmd/gemini-web2api/wails_windows_amd64.syso
           name="gemini-web2api-${VERSION}-windows-amd64"
           mkdir -p "dist/$name"
-          go build -mod=readonly -tags desktop,production,nomsgpack -trimpath -ldflags="-s -w -H windowsgui -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api.exe" ./cmd/gemini-web2api
-          (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)
+          GOOS=windows GOARCH=amd64 go build -mod=readonly -tags desktop,production,nomsgpack -trimpath -ldflags="-s -w -H windowsgui -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api.exe" ./cmd/gemini-web2api
+          (cd dist && 7z a -tzip -bso0 "$name.zip" "$name")
+      - uses: actions/cache/save@v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-windows-amd64-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
       - uses: actions/upload-artifact@v7
         with:
           name: packages-desktop-windows
@@ -149,7 +232,7 @@ jobs:
     runs-on: macos-15
     env:
       CGO_ENABLED: '1'
-      CGO_CFLAGS: -mmacosx-version-min=12.0
+      CGO_CPPFLAGS: -mmacosx-version-min=12.0
       CGO_LDFLAGS: -mmacosx-version-min=12.0
       MACOSX_DEPLOYMENT_TARGET: '12.0'
       VERSION: ${{ needs.web.outputs.version }}
@@ -161,9 +244,17 @@ jobs:
           name: webui
           path: internal/webui/dist
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version: stable
-          cache-dependency-path: go.sum
+          cache: false
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/Library/Caches/go-build
+          key: go-desktop-macos-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: go-desktop-macos-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
       - name: Build App Bundle
         run: |
           for arch in arm64 amd64; do
@@ -180,6 +271,13 @@ jobs:
           codesign --force --deep --sign - "$app"
           mkdir -p dist
           tar -czf "dist/gemini-web2api-desktop-${VERSION}-darwin-universal.tar.gz" -C bin Gemini-Web2API.app
+      - uses: actions/cache/save@v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/Library/Caches/go-build
+          key: go-desktop-macos-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
       - uses: actions/upload-artifact@v7
         with:
           name: packages-desktop-macos
@@ -191,9 +289,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-22.04
             arch: amd64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-22.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     env:
@@ -207,19 +305,34 @@ jobs:
           name: webui
           path: internal/webui/dist
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version: stable
-          cache-dependency-path: go.sum
+          cache: false
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-desktop-linux-${{ matrix.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: go-desktop-linux-${{ matrix.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Build Desktop Package
         run: |
           name="gemini-web2api-desktop-${VERSION}-linux-${ARCH}"
           mkdir -p "dist/$name"
-          go build -mod=readonly -tags desktop,production,nomsgpack -trimpath -ldflags="-s -w -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api" ./cmd/gemini-web2api
+          go build -mod=readonly -tags desktop,production,gtk3,nomsgpack -trimpath -ldflags="-s -w -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api" ./cmd/gemini-web2api
           tar -czf "dist/$name.tar.gz" -C dist "$name"
+      - uses: actions/cache/save@v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-desktop-linux-${{ matrix.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
       - uses: actions/upload-artifact@v7
         with:
           name: packages-desktop-linux-${{ matrix.arch }}
@@ -228,7 +341,7 @@ jobs:
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [headless, desktop-windows, desktop-macos, desktop-linux]
+    needs: [web-checks, checks, headless, desktop-windows, desktop-macos, desktop-linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -250,32 +363,87 @@ jobs:
 
   docker:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: headless
-    runs-on: ubuntu-24.04
+    needs: [web-checks, checks, headless]
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages-headless-linux-${{ matrix.arch }}
+          path: release
+      - run: mkdir -p release/linux-${{ matrix.arch }} && tar -xzf release/*.tar.gz --strip-components=1 -C release/linux-${{ matrix.arch }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ steps.image.outputs.name }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: release
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      - run: |
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*
+          retention-days: 1
+
+  docker-manifest:
+    needs: docker
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=semver,pattern={{raw}}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          build-args: VERSION=${{ github.ref_name }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - working-directory: digests
+        run: docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") $(printf "${IMAGE}@sha256:%s " *)
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}

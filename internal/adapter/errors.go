@@ -200,7 +200,7 @@ func setRetryAfter(c *gin.Context, status int) {
 	if !ok {
 		return
 	}
-	until := scope.pool.RetryAfter(config.MapModel(scope.model))
+	until := scope.pool.RetryAfter(c.Request.Context(), config.MapModel(scope.model))
 	if until.IsZero() {
 		return
 	}

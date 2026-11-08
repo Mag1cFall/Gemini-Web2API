@@ -16,14 +16,14 @@ import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { AccountsUsage } from '@/features/accounts/types'
 import { sessionKey, useSession, useStatus } from '@/features/service/queries'
-import { api } from '@/lib/api'
-import { isDesktop, maximisedEvent, windowControl } from '@/lib/desktop'
+import { api, appURL } from '@/lib/api'
+import { isDesktop, maximisedEvent, nativeTitleBar, windowControl } from '@/lib/desktop'
 import { fill, type Language, languages, useI18n, useMessages } from '@/lib/i18n'
 import { setTheme, useTheme } from '@/lib/theme'
 
 // BrandMark 是产品标志，Gemini Advanced 渐变四角星
 function BrandMark() {
-  return <img src="/favicon.svg" alt="" aria-hidden className="size-6 shrink-0" />
+  return <img src={appURL('/favicon.svg')} alt="" aria-hidden className="size-6 shrink-0" />
 }
 
 // ServiceChip 在服务无法连接或没有可用账号时提示，正常运行时不显示
@@ -62,10 +62,12 @@ function ThemeToggle() {
 function HeaderAction({
   label,
   onClick,
+  className = '',
   children,
 }: {
   label: string
   onClick?: () => void
+  className?: string
   children: ReactNode
 }) {
   return (
@@ -75,7 +77,10 @@ function HeaderAction({
         size="icon"
         aria-label={label}
         onClick={onClick}
-        className="text-foreground no-drag enabled:hover:bg-header-hover enabled:active:bg-muted"
+        className={
+          'text-foreground no-drag enabled:hover:bg-header-hover enabled:active:bg-muted ' +
+          className
+        }
       >
         {children}
       </Button>
@@ -83,7 +88,7 @@ function HeaderAction({
   )
 }
 
-// WindowControls 是桌面无边框窗口右上角的最小化、最大化与关闭
+// WindowControls 是桌面无边框窗口右上角的最小化、最大化与关闭，Windows 上作为非客户区按钮参与系统命中测试
 function WindowControls() {
   const m = useMessages(appMessages)
   const [maximised, setMaximised] = useState(false)
@@ -100,6 +105,7 @@ function WindowControls() {
     <div className="flex items-center gap-2 border-l border-border pl-2">
       <HeaderAction
         label={m.minimise}
+        className="[--wails-non-client-region:minimize]"
         onClick={() => {
           windowControl('minimise')
         }}
@@ -108,6 +114,7 @@ function WindowControls() {
       </HeaderAction>
       <HeaderAction
         label={maximised ? m.restore : m.maximise}
+        className="[--wails-non-client-region:maximize]"
         onClick={() => {
           windowControl('toggle-maximise')
         }}
@@ -116,6 +123,7 @@ function WindowControls() {
       </HeaderAction>
       <HeaderAction
         label={m.close}
+        className="[--wails-non-client-region:close]"
         onClick={() => {
           windowControl('close')
         }}
@@ -167,7 +175,8 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
     <header
       className={
         'flex h-header shrink-0 items-center gap-4 px-4 select-none ' +
-        (isDesktop ? 'drag-region' : '')
+        (isDesktop ? 'drag-region ' : '') +
+        (nativeTitleBar ? 'pl-[84px]' : '')
       }
     >
       {onMenu && (
@@ -186,7 +195,9 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
         className="flex min-w-0 items-center gap-2 rounded-md text-md font-semibold no-drag"
       >
         <BrandMark />
-        <span className="truncate">{m.product}</span>
+        <span className="truncate" title={m.product}>
+          {m.product}
+        </span>
       </Link>
       <div className="flex-1" />
       {!minimal && <ServiceChip />}
@@ -251,7 +262,7 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
           </HeaderAction>
         )}
       </div>
-      {isDesktop && <WindowControls />}
+      {isDesktop && !nativeTitleBar && <WindowControls />}
     </header>
   )
 }

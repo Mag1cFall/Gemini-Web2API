@@ -8,6 +8,7 @@ const serviceTarget = 'http://127.0.0.1:8007'
 
 // defineConfig 定义前端构建、本地联调与单元测试入口
 export default defineConfig({
+  base: './',
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

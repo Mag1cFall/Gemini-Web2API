@@ -13,6 +13,7 @@ import { useStatus } from '@/features/service/queries'
 import { firstApiKey } from '@/features/settings/apiKeys'
 import { useConfig } from '@/features/settings/queries'
 import { useUsage } from '@/features/usage/queries'
+import { serviceURL } from '@/lib/api'
 import { formatCompact, formatDuration, formatNumber, formatPercent, formatUsd } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
@@ -109,7 +110,7 @@ export function DashboardPage() {
   const [revealed, setRevealed] = useState(false)
   const now = useNow(30_000)
   if (status.isPending) return <Loading label={m.title} />
-  const base = window.location.origin
+  const base = serviceURL
   const apiKey = firstApiKey(config.data?.proxy_api_key ?? '')
   const totals = usage.data?.totals
   const accounts = status.data?.accounts
@@ -134,6 +135,8 @@ export function DashboardPage() {
   ]
   const ready = status.data?.ready ?? false
   const started = status.data ? Date.parse(status.data.started_at) : Number.NaN
+  const listen = status.data?.listen_addr ?? ''
+  const port = listen.lastIndexOf(':')
   const requests = totals?.requests ?? 0
   return (
     <>
@@ -218,7 +221,11 @@ export function DashboardPage() {
             </span>
           </Field>
           <Field label={m.listen}>
-            <span className="font-mono">{status.data?.listen_addr}</span>
+            <span className="font-mono">
+              {listen.slice(0, port)}
+              <wbr />
+              {listen.slice(port)}
+            </span>
           </Field>
           <Field label={m.uptime}>
             {Number.isNaN(started) ? '—' : formatDuration(now.getTime() - started, locale)}

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { LoaderCircle } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -10,10 +11,11 @@ import { Input, Textarea } from '@/components/ui/input'
 import { PageHeader, Section } from '@/components/ui/page'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { toast } from '@/components/ui/toast'
+import { AccountTasks } from '@/features/accounts/AccountTasks'
 import { importMessages } from '@/features/accounts/messages'
-import { accountsKey } from '@/features/accounts/queries'
-import type { ChromeProfiles, PairingToken } from '@/features/accounts/types'
-import { api } from '@/lib/api'
+import { chromeProfilesKey, tasksKey } from '@/features/accounts/queries'
+import type { ChromeProfiles, CookieAccount, PairingToken } from '@/features/accounts/types'
+import { api, serviceURL } from '@/lib/api'
 import { formatDateTime } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 
@@ -24,16 +26,15 @@ function ChromeImport() {
   const [selected, setSelected] = useState<string[]>([])
   const [proxy, setProxy] = useState('')
   const profiles = useQuery({
-    queryKey: ['chrome-profiles'],
+    queryKey: chromeProfilesKey,
     queryFn: () => api<ChromeProfiles>('/api/accounts/import/chrome'),
   })
   const run = useMutation({
     mutationFn: () =>
       api('/api/accounts/import/chrome', { method: 'POST', json: { emails: selected, proxy } }),
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: accountsKey })
-      void profiles.refetch()
-      toast({ tone: 'success', title: m.importDone })
+      void client.invalidateQueries({ queryKey: tasksKey })
+      toast({ tone: 'success', title: m.importStarted })
       setSelected([])
     },
     onError: (error) => {
@@ -130,24 +131,59 @@ function ChromeImport() {
   )
 }
 
-// CookieImport 是从 Cookie 导入
+// discoverDelay 是输入停止后开始识别 Cookie 账号的等待毫秒数
+const discoverDelay = 600
+
+// CookieImport 是从 Cookie 导入：粘贴后自动识别其中登录的账号，选中的账号在后台导入，输入变化后旧的识别结果立即失效
 function CookieImport() {
   const m = useMessages(importMessages)
   const client = useQueryClient()
-  const [id, setId] = useState('')
   const [cookies, setCookies] = useState('')
-  const [authUser, setAuthUser] = useState('0')
   const [proxy, setProxy] = useState('')
+  const [input, setInput] = useState({ cookies: '', proxy: '' })
+  const [flipped, setFlipped] = useState<ReadonlySet<number>>(new Set())
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setInput({ cookies: cookies.trim(), proxy })
+    }, discoverDelay)
+    return () => {
+      clearTimeout(timer)
+    }
+  }, [cookies, proxy])
+  const discover = useQuery({
+    queryKey: ['cookie-accounts', input],
+    queryFn: async ({ signal }) =>
+      (
+        await api<{ accounts: CookieAccount[] }>('/api/accounts/import/cookie/discover', {
+          method: 'POST',
+          json: input,
+          signal,
+        })
+      ).accounts,
+    enabled: input.cookies !== '',
+    retry: false,
+    staleTime: Infinity,
+    gcTime: 0,
+  })
+  const current = input.cookies !== '' && input.cookies === cookies.trim() && input.proxy === proxy
+  const found = current ? (discover.data ?? []) : []
+  const checked = (account: CookieAccount) => account.imported === flipped.has(account.auth_user)
+  const selected = found.filter(checked)
   const run = useMutation({
     mutationFn: () =>
       api('/api/accounts/import/cookie', {
         method: 'POST',
-        json: { id, cookies, proxy, authuser: Number(authUser) },
+        json: {
+          ...input,
+          accounts: selected.map(({ email, auth_user }) => ({ email, auth_user })),
+        },
       }),
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: accountsKey })
-      toast({ tone: 'success', title: m.importDone })
+      void client.invalidateQueries({ queryKey: tasksKey })
+      toast({ tone: 'success', title: m.importStarted })
       setCookies('')
+      setInput({ cookies: '', proxy })
+      setFlipped(new Set())
     },
     onError: (error) => {
       toast({ tone: 'error', title: error.message })
@@ -155,16 +191,6 @@ function CookieImport() {
   })
   return (
     <Section title={m.cookieTitle} description={m.cookieHint}>
-      <Field id="cookie-id" label={m.cookieId} description={m.cookieIdHint}>
-        <Input
-          id="cookie-id"
-          value={id}
-          placeholder="name@gmail.com"
-          onChange={(event) => {
-            setId(event.target.value)
-          }}
-        />
-      </Field>
       <Field id="cookie-value" label={m.cookieValue}>
         <Textarea
           id="cookie-value"
@@ -172,21 +198,48 @@ function CookieImport() {
           value={cookies}
           onChange={(event) => {
             setCookies(event.target.value)
+            setFlipped(new Set())
           }}
         />
       </Field>
-      <Field id="cookie-authuser" label={m.authUser} description={m.authUserHint}>
-        <Input
-          id="cookie-authuser"
-          type="number"
-          min={0}
-          step={1}
-          value={authUser}
-          onChange={(event) => {
-            setAuthUser(event.target.value)
-          }}
-        />
-      </Field>
+      {discover.isFetching && (
+        <p role="status" className="flex items-center gap-2 text-sm text-foreground-muted">
+          <LoaderCircle size={14} aria-hidden className="animate-spin" />
+          {m.discovering}
+        </p>
+      )}
+      {discover.isError && current && (
+        <Callout tone="error" role="alert">
+          {discover.error.message}
+        </Callout>
+      )}
+      {found.length > 0 && (
+        <fieldset className="flex flex-col">
+          <legend className="mb-2 text-sm font-medium">{m.accountsFound}</legend>
+          <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
+            {found.map((account) => (
+              <li key={account.auth_user}>
+                <label className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-hover">
+                  <input
+                    type="checkbox"
+                    className="size-4 accent-primary"
+                    checked={checked(account)}
+                    onChange={() => {
+                      const next = new Set(flipped)
+                      if (!next.delete(account.auth_user)) next.add(account.auth_user)
+                      setFlipped(next)
+                    }}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-base" title={account.email}>
+                    {account.email}
+                  </span>
+                  {account.imported && <Badge tone="neutral">{m.imported}</Badge>}
+                </label>
+              </li>
+            ))}
+          </ul>
+        </fieldset>
+      )}
       <Field id="cookie-proxy" label={m.proxy} description={m.proxyHint}>
         <Input
           id="cookie-proxy"
@@ -199,13 +252,13 @@ function CookieImport() {
       </Field>
       <div>
         <Button
-          disabled={!id.trim() || !cookies.trim() || !/^\d+$/.test(authUser)}
+          disabled={selected.length === 0}
           loading={run.isPending}
           onClick={() => {
             run.mutate()
           }}
         >
-          {m.importCookie}
+          {m.importSelected}
         </Button>
       </div>
     </Section>
@@ -216,7 +269,7 @@ function CookieImport() {
 const pairingCommand =
   (navigator.userAgent.includes('Windows') ? '.\\gemini-web2api.exe' : './gemini-web2api') +
   ' setup --remote ' +
-  window.location.origin
+  serviceURL
 
 // pairingInsecure 表示当前页面经 HTTP 访问非本机地址，setup --remote 不接受这种地址
 const pairingInsecure =
@@ -282,6 +335,7 @@ export function ImportPage() {
   return (
     <>
       <PageHeader title={m.title} description={m.description} />
+      <AccountTasks />
       <div className="flex w-full flex-col gap-3">
         <ChromeImport />
         <CookieImport />

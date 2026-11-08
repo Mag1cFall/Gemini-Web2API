@@ -5,6 +5,7 @@ import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Dialog, DialogClose, DialogContent, DialogTrigger } from '@/components/ui/dialog'
+import { Meter } from '@/components/ui/meter'
 import { Card, CardHeader, CardRow } from '@/components/ui/page'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { toast } from '@/components/ui/toast'
@@ -12,10 +13,11 @@ import {
   useApplyUpdate,
   useCheckUpdate,
   useRestartedVersion,
+  useUpdateProgress,
   useUpdateStatus,
 } from '@/features/about/queries'
 import { renderMarkdown } from '@/features/playground/markdown'
-import { formatFullDateTime } from '@/lib/format'
+import { formatBytes, formatFullDateTime } from '@/lib/format'
 import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
 
 // updateMessages 是在线更新卡片的文案
@@ -39,6 +41,10 @@ const updateMessages = defineMessages({
     checkFailed: '无法读取最新版本：{error}',
     viewRelease: '查看发布页',
     loadFailed: '无法读取更新状态',
+    downloading: '正在下载新版本',
+    verifying: '正在校验发行包',
+    installing: '正在安装新版本',
+    progress: '下载进度',
   },
   'zh-TW': {
     title: '線上更新',
@@ -59,6 +65,10 @@ const updateMessages = defineMessages({
     checkFailed: '無法讀取最新版本：{error}',
     viewRelease: '查看發布頁面',
     loadFailed: '無法讀取更新狀態',
+    downloading: '正在下載新版本',
+    verifying: '正在驗證發行套件',
+    installing: '正在安裝新版本',
+    progress: '下載進度',
   },
   en: {
     title: 'Online update',
@@ -81,6 +91,10 @@ const updateMessages = defineMessages({
     checkFailed: 'Could not read the latest version: {error}',
     viewRelease: 'View release',
     loadFailed: 'Could not read the update status',
+    downloading: 'Downloading the new version',
+    verifying: 'Verifying the release package',
+    installing: 'Installing the new version',
+    progress: 'Download progress',
   },
   ja: {
     title: 'オンライン更新',
@@ -104,6 +118,10 @@ const updateMessages = defineMessages({
     checkFailed: '最新バージョンを読み込めません：{error}',
     viewRelease: 'リリースを表示',
     loadFailed: '更新状態を読み込めません',
+    downloading: '新しいバージョンをダウンロードしています',
+    verifying: 'リリースパッケージを検証しています',
+    installing: '新しいバージョンをインストールしています',
+    progress: 'ダウンロードの進行状況',
   },
   ko: {
     title: '온라인 업데이트',
@@ -127,6 +145,10 @@ const updateMessages = defineMessages({
     checkFailed: '최신 버전을 불러올 수 없습니다: {error}',
     viewRelease: '릴리스 보기',
     loadFailed: '업데이트 상태를 불러올 수 없습니다',
+    downloading: '새 버전을 다운로드하는 중',
+    verifying: '릴리스 패키지를 확인하는 중',
+    installing: '새 버전을 설치하는 중',
+    progress: '다운로드 진행률',
   },
   fr: {
     title: 'Mise à jour en ligne',
@@ -150,6 +172,10 @@ const updateMessages = defineMessages({
     checkFailed: 'Impossible de lire la dernière version : {error}',
     viewRelease: 'Voir la version',
     loadFailed: 'Impossible de lire l’état de mise à jour',
+    downloading: 'Téléchargement de la nouvelle version',
+    verifying: 'Vérification du paquet téléchargé',
+    installing: 'Installation de la nouvelle version',
+    progress: 'Progression du téléchargement',
   },
   de: {
     title: 'Online-Update',
@@ -173,6 +199,10 @@ const updateMessages = defineMessages({
     checkFailed: 'Neueste Version konnte nicht gelesen werden: {error}',
     viewRelease: 'Release ansehen',
     loadFailed: 'Update-Status konnte nicht gelesen werden',
+    downloading: 'Neue Version wird heruntergeladen',
+    verifying: 'Heruntergeladenes Paket wird geprüft',
+    installing: 'Neue Version wird installiert',
+    progress: 'Download-Fortschritt',
   },
 })
 
@@ -188,6 +218,7 @@ export function UpdateCard() {
   const status = useUpdateStatus()
   const check = useCheckUpdate()
   const apply = useApplyUpdate()
+  const progress = useUpdateProgress(apply.isPending)
   const [confirming, setConfirming] = useState(false)
   const [restartFrom, setRestartFrom] = useState('')
   const restarted = useRestartedVersion(restartFrom !== '')
@@ -208,7 +239,7 @@ export function UpdateCard() {
   }
   const data = status.data
   const latest = data.latest ?? ''
-  const restarting = restartFrom !== '' || data.updating
+  const restarting = restartFrom !== '' || data.updating || apply.isPending
   const card = (
     <Card>
       <CardHeader
@@ -283,11 +314,10 @@ export function UpdateCard() {
                       </DialogClose>
                       <Button
                         variant="primary"
-                        loading={apply.isPending}
                         onClick={() => {
+                          setConfirming(false)
                           apply.mutate(undefined, {
                             onSuccess: (next) => {
-                              setConfirming(false)
                               setRestartFrom(next.current)
                             },
                             onError: (error) => {
@@ -306,7 +336,37 @@ export function UpdateCard() {
               </Dialog>
             )}
           </CardRow>
-          {restarting && (
+          {apply.isPending && progress && progress.stage !== 'restart' && (
+            <div role="status" className="flex flex-col gap-2 px-5 py-4">
+              <div className="flex justify-between gap-3 text-sm">
+                <span>
+                  {
+                    { download: m.downloading, verify: m.verifying, install: m.installing }[
+                      progress.stage
+                    ]
+                  }
+                </span>
+                {progress.stage === 'download' && progress.downloaded > 0 && (
+                  <span className="text-foreground-muted tabular-nums">
+                    {formatBytes(progress.downloaded, locale)}
+                    {progress.total > 0 && ' / ' + formatBytes(progress.total, locale)}
+                  </span>
+                )}
+              </div>
+              <Meter
+                tone="info"
+                label={m.progress}
+                value={
+                  progress.stage === 'download'
+                    ? progress.total > 0
+                      ? progress.downloaded / progress.total
+                      : 0
+                    : 1
+                }
+              />
+            </div>
+          )}
+          {(restartFrom !== '' || (data.updating && !apply.isPending)) && (
             <div className="px-5 py-4">
               <Callout tone="muted" role="status">
                 {fill(m.restarting, { version: latest })}

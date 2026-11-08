@@ -259,8 +259,14 @@ func FileUploadHandler(store *requestdb.Store) gin.HandlerFunc {
 			return
 		}
 		saved.Purpose = purpose
-		if seconds, err := strconv.Atoi(strings.TrimSpace(fields["expires_after[seconds]"])); err == nil && seconds > 0 {
-			saved.ExpiresAt = saved.CreatedAt.Add(time.Duration(seconds) * time.Second)
+		retention, err := openAIFileRetention(purpose, strings.TrimSpace(fields["expires_after[anchor]"]), strings.TrimSpace(fields["expires_after[seconds]"]))
+		if err != nil {
+			_, _ = store.DeleteFile(c.Request.Context(), saved.ID)
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if retention > 0 {
+			saved.ExpiresAt = saved.CreatedAt.Add(retention)
 		}
 		if err := store.UpdateFile(c.Request.Context(), *saved); err != nil {
 			writeStoreError(c, err)
@@ -268,6 +274,27 @@ func FileUploadHandler(store *requestdb.Store) gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, openAIFileObject(*saved))
 	}
+}
+
+// openAIBatchFileRetention 是 purpose 为 batch 且没有 expires_after 的文件的保留时长
+const openAIBatchFileRetention = 30 * 24 * time.Hour
+
+// openAIFileRetention 按 OpenAI 规则返回上传文件的保留时长：expires_after 的锚点为 created_at、秒数在 3600 至 2592000 之间，purpose 为 batch 且没有 expires_after 时为 30 天，其余文件不过期返回 0
+func openAIFileRetention(purpose, anchor, seconds string) (time.Duration, error) {
+	if anchor == "" && seconds == "" {
+		if purpose == "batch" {
+			return openAIBatchFileRetention, nil
+		}
+		return 0, nil
+	}
+	if anchor != "created_at" {
+		return 0, fmt.Errorf("Invalid value for 'expires_after[anchor]': expected 'created_at'.")
+	}
+	value, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil || value < 3600 || value > 2592000 {
+		return 0, fmt.Errorf("Invalid value for 'expires_after[seconds]': must be an integer between 3600 and 2592000.")
+	}
+	return time.Duration(value) * time.Second, nil
 }
 
 // writeFileRequestError 按协议返回上传请求错误

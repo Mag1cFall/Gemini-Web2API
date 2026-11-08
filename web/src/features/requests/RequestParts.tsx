@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react'
 
+import { Tag } from '@/components/ui/badge'
 import { CopyButton } from '@/components/ui/copy-button'
 import { useAccountLabel } from '@/features/accounts/queries'
-import { bodyMessages } from '@/features/requests/messages'
+import { bodyMessages, requestsMessages } from '@/features/requests/messages'
 import { useRequestBody } from '@/features/requests/queries'
 import type { Attempt } from '@/features/requests/types'
 import { ApiError } from '@/lib/api'
@@ -46,6 +47,7 @@ export function DetailSection({ title, children }: { title: string; children: Re
 
 // AttemptList 是失败的上游尝试时间线，empty 为没有失败尝试时的说明
 export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: string }) {
+  const m = useMessages(requestsMessages)
   const { locale } = useI18n()
   const accountLabel = useAccountLabel()
   if (attempts.length === 0) return <p className="text-sm text-foreground-muted">{empty}</p>
@@ -65,6 +67,8 @@ export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: s
             <span className="text-foreground-muted tabular-nums">
               {formatDuration(attempt.duration_ms, locale)}
             </span>
+            {attempt.hedge && <Tag>{m.attemptHedge}</Tag>}
+            {attempt.superseded && <Tag>{m.attemptSuperseded}</Tag>}
           </div>
           <p className="font-mono text-xs break-words text-error-text">{attempt.error}</p>
         </li>

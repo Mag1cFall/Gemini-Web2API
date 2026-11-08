@@ -47,6 +47,8 @@ type AccountInfo struct {
 type cooldown struct {
 	until  time.Time
 	reason string
+	// cause 是触发冷却的上游错误
+	cause string
 }
 
 type accountEntry struct {
@@ -160,6 +162,8 @@ type AccountPool struct {
 	saveCooldowns func([]Cooldown)
 	// persistMu 串行化从取冷却快照到保存完成的过程
 	persistMu sync.Mutex
+	// apiKeyAccounts 为各 API key 可用的账号 ID，未列出的 key 可用全部账号
+	apiKeyAccounts map[string][]string
 }
 
 // Cooldown 是一个账号或其某个模型的冷却，Model 为空表示整个账号
@@ -419,6 +423,7 @@ func (p *AccountPool) Client(accountID string) *gemini.Client {
 
 // AcquireForModel 选择可调度该模型的账号并占用一个请求槽，返回客户端、账号与释放函数；同一排队键的请求按到达顺序排队，队首在任一账号空出、就绪或状态变化后重新选择，没有可调度账号时客户端为空
 func (p *AccountPool) AcquireForModel(ctx context.Context, sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (*gemini.Client, string, func(), error) {
+	excludedAccountIDs = p.keyExcluded(ctx, excludedAccountIDs)
 	key, wake := p.joinQueue(sessionKey, modelID, excludedAccountIDs)
 	defer p.leaveQueue(key, wake)
 	accountID := ""
@@ -503,7 +508,7 @@ func (p *AccountPool) notifyLocked() {
 	}
 }
 
-// NextForModelExcluding 为无会话重试选择未排除的同能力账号
+// NextForModelExcluding 选择会话绑定的账号或未排除的同能力账号，会话绑定的账号被排除或不可调度时客户端为空并返回该账号
 func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (*gemini.Client, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -514,7 +519,8 @@ func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, e
 	if sessionKey != "" {
 		if binding, ok := p.sessions[sessionKey]; ok && now.Before(binding.ExpiresAt) {
 			entry := p.entry(binding.AccountID)
-			if entry != nil && entry.schedulable(now, modelID) {
+			_, excluded := excludedAccountIDs[binding.AccountID]
+			if entry != nil && !excluded && entry.schedulable(now, modelID) {
 				entry.LastUsed = now
 				p.sessions[sessionKey] = sessionBinding{AccountID: entry.AccountID, ExpiresAt: now.Add(p.sessionTTL)}
 				return entry.Client, entry.AccountID
@@ -548,14 +554,15 @@ func (p *AccountPool) SessionIdle(sessionKey string, modelID string) bool {
 	return entry != nil && entry.schedulable(now, modelID) && !entry.Client.Busy()
 }
 
-// RetryAfter 返回目标模型最早结束冷却的时间，没有冷却中的账号时为零值
-func (p *AccountPool) RetryAfter(modelID string) time.Time {
+// RetryAfter 返回请求 API key 可用账号中目标模型最早结束冷却的时间，没有冷却中的账号时为零值
+func (p *AccountPool) RetryAfter(ctx context.Context, modelID string) time.Time {
+	excluded := p.keyExcluded(ctx, nil)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 	var earliest time.Time
 	for _, entry := range p.entries {
-		if entry.Client == nil || entry.State != StateReady || !entry.supportsModel(modelID) {
+		if _, skip := excluded[entry.AccountID]; skip || entry.Client == nil || entry.State != StateReady || !entry.supportsModel(modelID) {
 			continue
 		}
 		until := entry.blockedUntil(now, modelID)
@@ -613,6 +620,10 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 		p.reportTransport(err)
 		return
 	}
+	if gemini.TransientError(err) {
+		logging.Warn(accountID, "上游临时失败，账号不冷却", "原因", err)
+		return
+	}
 	entry.ConsecutiveFails++
 	if gemini.IsAuthenticationError(err) {
 		entry.State = StateAuthRequired
@@ -621,10 +632,13 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	}
 	modelScope, reason := failureScope(err)
 	until := now.Add(p.cooldown)
+	if reason == "rate_limited" {
+		until = now.Add(min(p.cooldown, rateLimitCooldown))
+	}
 	if reset := usageReset(entry.Client, err); !reset.IsZero() {
 		until = reset
 	}
-	value := cooldown{until: until, reason: reason}
+	value := cooldown{until: until, reason: reason, cause: entry.LastError}
 	cooled = true
 	if modelScope && modelID != "" {
 		entry.ModelCooldowns[modelID] = value
@@ -634,6 +648,9 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	entry.Cooldown = value
 	logging.Warn(accountID, "账号冷却", "至", until, "原因", reason)
 }
+
+// rateLimitCooldown 是上游频率限制的模型冷却时长上限，这类限制约一分钟后恢复
+const rateLimitCooldown = time.Minute
 
 // failureScope 返回错误是否只影响当前模型与冷却原因 code
 func failureScope(err error) (bool, string) {
@@ -765,14 +782,18 @@ type ModelAvailability struct {
 	Pending []string
 }
 
-// ModelAvailability 按全部账号的模型目录返回目标模型的调度情况
-func (p *AccountPool) ModelAvailability(modelID string) ModelAvailability {
+// ModelAvailability 按请求 API key 可用账号的模型目录返回目标模型的调度情况
+func (p *AccountPool) ModelAvailability(ctx context.Context, modelID string) ModelAvailability {
+	excluded := p.keyExcluded(ctx, nil)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := time.Now()
 	var availability ModelAvailability
 	for _, entry := range p.entries {
+		if _, skip := excluded[entry.AccountID]; skip {
+			continue
+		}
 		if entry.Client == nil || entry.State != StateReady && len(entry.Client.Models()) == 0 {
 			if entry.State != StateDisabled {
 				availability.Pending = append(availability.Pending, entry.unavailableReason(now, modelID))
@@ -796,8 +817,11 @@ func (p *AccountPool) ModelAvailability(modelID string) ModelAvailability {
 	return availability
 }
 
-// AccountReason 返回账号不能调度该模型的原因：冷却截止时间或账号状态
-func (p *AccountPool) AccountReason(accountID string, modelID string) string {
+// AccountReason 返回账号不能调度该模型的原因：不在请求 API key 的绑定账号中、冷却截止时间或账号状态
+func (p *AccountPool) AccountReason(ctx context.Context, accountID string, modelID string) string {
+	if _, outside := p.keyExcluded(ctx, nil)[accountID]; outside {
+		return accountID + " 不在当前 API key 的绑定账号中"
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry := p.entry(accountID); entry != nil {
@@ -809,9 +833,23 @@ func (p *AccountPool) AccountReason(accountID string, modelID string) string {
 // unavailableReason 返回账号不能调度该模型的原因，调用方持有 p.mu
 func (e *accountEntry) unavailableReason(now time.Time, modelID string) string {
 	if until := e.blockedUntil(now, modelID); e.State == StateReady && !until.IsZero() {
-		return fmt.Sprintf("%s 冷却至 %s", e.AccountID, until.Local().Format(time.TimeOnly))
+		value := e.Cooldown
+		if model, ok := e.ModelCooldowns[modelID]; ok && !model.until.Before(value.until) {
+			value = model
+		}
+		reason := fmt.Sprintf("%s 冷却至 %s（%s", e.AccountID, until.Local().Format(time.TimeOnly), cooldownNames[value.reason])
+		if value.cause != "" {
+			reason += "：" + value.cause
+		}
+		return reason + "）"
 	}
 	return e.AccountID + " " + string(e.State)
+}
+
+// cooldownNames 是冷却原因 code 的说明
+var cooldownNames = map[string]string{
+	"usage_limit": "模型用量已达上限", "rate_limited": "请求频率受限", "ip_restricted": "出口 IP 受限",
+	"captcha": "人机验证拦截", "model_mismatch": "模型被降级", "upstream_error": "上游错误",
 }
 
 // Changed 返回账号状态下一次变化或请求槽释放时关闭的通道

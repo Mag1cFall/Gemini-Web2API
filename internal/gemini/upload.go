@@ -2,12 +2,14 @@ package gemini
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	http "github.com/bogdanfinn/fhttp"
 )
@@ -81,11 +83,7 @@ func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, mod
 // uploadFile 按官网断点续传协议上传附件内容，返回带上传路径与 MIME 类型的附件
 func (c *Client) uploadFile(ctx context.Context, bootstrap Bootstrap, file FileData) (FileData, error) {
 	data, filename := file.Data, file.FileName
-	mimeType := file.MimeType
-	if mimeType == "" {
-		mimeType = http.DetectContentType(data)
-	}
-	mimeType, _, _ = strings.Cut(mimeType, ";")
+	mimeType := uploadMIME(file.MimeType, data)
 
 	startURL := bootstrap.UploadURL
 	if c.authUser > 0 {
@@ -128,6 +126,25 @@ func (c *Client) uploadFile(ctx context.Context, bootstrap Bootstrap, file FileD
 		return FileData{}, retryableProtocolError("read upload response", err)
 	}
 	return FileData{URL: strings.TrimSpace(string(path)), FileName: filename, MimeType: mimeType}, nil
+}
+
+// uploadMIME 返回登记附件用的 MIME：未声明时按内容嗅探，内容为文本而类型不是 text/* 与 application/json 时为 text/plain
+func uploadMIME(declared string, data []byte) string {
+	mimeType, _, _ := strings.Cut(cmp.Or(declared, http.DetectContentType(data)), ";")
+	if strings.HasPrefix(mimeType, "text/") || mimeType == "application/json" || !textContent(data) {
+		return mimeType
+	}
+	return "text/plain"
+}
+
+// textContent 报告内容开头 512 字节是否为不含二进制控制字符的 UTF-8 文本，截断处不完整的字符不计
+func textContent(data []byte) bool {
+	head := data[:min(len(data), 512)]
+	valid := utf8.Valid(head)
+	for cut := 1; !valid && len(head) == 512 && cut < utf8.UTFMax; cut++ {
+		valid = utf8.Valid(head[:len(head)-cut])
+	}
+	return valid && strings.HasPrefix(http.DetectContentType(head), "text/")
 }
 
 // applyUploadHeaders 写入页面向上传服务发起跨站 XHR 的请求头与上传租户标识

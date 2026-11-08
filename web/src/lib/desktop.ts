@@ -12,8 +12,11 @@ function readShell(): string | null {
   }
 }
 
-// isDesktop 表示页面运行在桌面壳的无边框窗口中
+// isDesktop 表示页面运行在桌面壳的窗口中
 export const isDesktop = readShell() === 'desktop'
+
+// nativeTitleBar 表示桌面窗口使用 macOS 的红绿灯按钮，页面不画窗口按钮并为其让出左侧位置
+export const nativeTitleBar = isDesktop && navigator.userAgent.includes('Mac OS X')
 
 // WindowAction 是标题栏窗口按钮发给桌面壳的动作
 export type WindowAction = 'minimise' | 'toggle-maximise' | 'close'

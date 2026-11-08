@@ -17,6 +17,8 @@ export interface ServiceStatus {
   ready: boolean
   started_at: string
   listen_addr: string
+  // reserved_listen 是被 Windows 保留而改用 listen_addr 的配置地址
+  reserved_listen?: string
   base_url: string
   api_key_required: boolean
   active_requests: number

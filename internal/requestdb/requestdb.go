@@ -27,6 +27,15 @@ const usageRetention = 90 * 24 * time.Hour
 // bodyRetention 是保留的最近正文条数
 const bodyRetention = 1000
 
+// responseRetention 是保存的 Responses 的保留时长，与 OpenAI 保存 Response 对象的 30 天一致
+const responseRetention = 30 * 24 * time.Hour
+
+// GeneratedRetention 是生成视频与缩略图自生成起的保留时长，与 Gemini API 生成视频在服务端保存的 2 天一致
+const GeneratedRetention = 48 * time.Hour
+
+// pruneInterval 是清理过期数据并交还空闲页的间隔
+const pruneInterval = time.Hour
+
 // batchLimit 是单个写事务合并的最大记录数
 const batchLimit = 256
 
@@ -71,7 +80,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS files_created ON files(created_at);
 CREATE TABLE IF NOT EXISTS videos (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, protocol TEXT NOT NULL, status TEXT NOT NULL,
- object TEXT NOT NULL, file_id TEXT NOT NULL);
+ object TEXT NOT NULL, file_id TEXT NOT NULL, session TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS videos_created ON videos(created_at);
 CREATE TABLE IF NOT EXISTS sessions (
  key TEXT PRIMARY KEY, cid TEXT NOT NULL, rid TEXT NOT NULL, rcid TEXT NOT NULL, token TEXT NOT NULL,
@@ -110,16 +119,16 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	options := url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)"}}
+	options := url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "journal_size_limit(524288)"}}
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?"+options.Encode())
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
-	if _, err := db.Exec(schema); err != nil {
+	if err := useIncrementalVacuum(db); err != nil {
 		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
 	}
-	if err := addThinking(db); err != nil {
+	if err := applySchema(db); err != nil {
 		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
 	}
 	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{})}
@@ -128,16 +137,6 @@ func Open(path string) (*Store, error) {
 	}
 	go store.run()
 	return store, nil
-}
-
-// addThinking 为没有思考强度列的请求表追加该列，已有记录为空
-func addThinking(db *sql.DB) error {
-	var exists bool
-	if err := db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('requests') WHERE name = 'thinking'`).Scan(&exists); err != nil || exists {
-		return err
-	}
-	_, err := db.Exec(`ALTER TABLE requests ADD COLUMN thinking TEXT NOT NULL DEFAULT ''`)
-	return err
 }
 
 // Close 写完已排队的记录后关闭数据库
@@ -216,11 +215,11 @@ func (store *Store) enqueue(item write) {
 	}
 }
 
-// run 合并连续到达的记录为单个事务，并每天清理过期用量
+// run 合并连续到达的记录为单个事务，并每隔 pruneInterval 清理过期数据
 func (store *Store) run() {
 	defer close(store.done)
 	store.prune()
-	prune := time.NewTicker(24 * time.Hour)
+	prune := time.NewTicker(pruneInterval)
 	defer prune.Stop()
 	for {
 		select {
@@ -384,15 +383,19 @@ func mergeRollup(tx *sql.Tx, table string, key rollupKey, value *entry) error {
 	return err
 }
 
-// prune 删除超过保留期的请求记录、汇总与保存的 Responses，都从截止时间所在本地日的起点开始保留，使各层数据覆盖同一范围
+// prune 删除超过保留期的数据并交还空闲页：请求记录与汇总从截止时间所在本地日的起点开始保留，使各层数据覆盖同一范围；Responses、视频任务与文件按各自的保留期删除
 func (store *Store) prune() {
-	day, _ := localDay(time.Now().Add(-usageRetention).UnixMilli())
+	now := time.Now()
+	day, _ := localDay(now.Add(-usageRetention).UnixMilli())
 	hour := floorDiv(day, hourMS) * hourMS
 	_, requestsErr := store.db.Exec(`DELETE FROM requests WHERE time < ?`, hour)
 	_, hoursErr := store.db.Exec(`DELETE FROM hours WHERE start < ?`, hour)
 	_, daysErr := store.db.Exec(`DELETE FROM days WHERE start < ?`, day)
-	_, responsesErr := store.db.Exec(`DELETE FROM responses WHERE created_at < ?`, hour)
-	if err := errors.Join(requestsErr, hoursErr, daysErr, responsesErr); err != nil {
+	_, responsesErr := store.db.Exec(`DELETE FROM responses WHERE created_at < ?`, now.Add(-responseRetention).UnixMilli())
+	_, videosErr := store.db.Exec(`DELETE FROM videos WHERE created_at < ?`, now.Add(-GeneratedRetention).UnixMilli())
+	store.purgeExpiredFiles(context.Background())
+	reclaimErr := reclaim(context.Background(), store.db)
+	if err := errors.Join(requestsErr, hoursErr, daysErr, responsesErr, videosErr, reclaimErr); err != nil {
 		logging.Error(logging.SourceService, "请求账本清理失败", "错误", err)
 	}
 }

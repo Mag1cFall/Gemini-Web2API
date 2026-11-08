@@ -396,6 +396,9 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 		detail, _ := stringPath(notice, 1, 0)
 		next.LimitNotice = strings.TrimSpace(title + " " + detail)
 	}
+	if flag, ok := jspbField(payload, 31); ok {
+		next.FailureReply = flag == true || flag == float64(1)
+	}
 	if next == d.metadata {
 		return nil
 	}
@@ -456,7 +459,7 @@ func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit f
 
 // visibleContent 把候选正文原文 raw 转为输出的正文与代码块，返回正文、代码块与引用标记指向的网页来源，代码块偏移为它在正文中的 rune 位置
 func visibleContent(candidate []any, raw string) (string, []codeSnapshot, []Citation) {
-	raw = stripFollowUps(expandImageResults(candidate, stripContentCards(candidate, raw)))
+	raw = stripFollowUps(expandImageResults(candidate, renderWidgets(candidate, stripContentCards(candidate, raw))))
 	tables := citationTables(candidate)
 	text, codes := parseStructuredContent(markCitations(restoreAutolinks(expandDocuments(candidate, stripChameleon(raw))), tables))
 	for index, code := range codes {

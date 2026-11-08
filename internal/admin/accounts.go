@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -124,6 +125,7 @@ func (h *handler) chromeProfiles(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"profiles": profiles})
 }
 
+// importChrome 在后台任务中逐个导入选中的本机 Chrome 账号，返回 202 与任务
 func (h *handler) importChrome(c *gin.Context) {
 	var input struct {
 		Emails []string `json:"emails"`
@@ -136,42 +138,57 @@ func (h *handler) importChrome(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request", "emails 不能为空")
 		return
 	}
-	ids, err := h.Accounts.ImportChrome(c.Request.Context(), input.Emails, trimmed(input.Proxy))
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "account_import_failed", err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"accounts": h.accountsByID(ids)})
+	proxy := trimmed(input.Proxy)
+	task := h.tasks.start(c.Request.Context(), "chrome", input.Emails, func(ctx context.Context, index int) error {
+		_, err := h.Accounts.ImportChrome(ctx, input.Emails[index:index+1], proxy)
+		return err
+	})
+	c.JSON(http.StatusAccepted, gin.H{"task": task})
 }
 
-func (h *handler) importCookie(c *gin.Context) {
+// discoverCookie 识别 Cookie 中各会话登录的账号
+func (h *handler) discoverCookie(c *gin.Context) {
 	var input struct {
-		ID       string `json:"id"`
-		Cookies  string `json:"cookies"`
-		Proxy    string `json:"proxy"`
-		AuthUser int    `json:"authuser"`
+		Cookies string `json:"cookies"`
+		Proxy   string `json:"proxy"`
 	}
 	if !bindJSON(c, &input) {
 		return
 	}
-	id, err := h.Accounts.ImportCookie(c.Request.Context(), input.Cookies, trimmed(input.ID), trimmed(input.Proxy), input.AuthUser)
+	found, err := h.Accounts.DiscoverCookie(c.Request.Context(), input.Cookies, trimmed(input.Proxy))
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "account_import_failed", err.Error())
+		writeError(c, http.StatusBadRequest, "cookie_discover_failed", err.Error())
 		return
 	}
-	h.respondAccount(c, id, nil)
+	c.JSON(http.StatusOK, gin.H{"accounts": found})
 }
 
-func (h *handler) accountsByID(ids []string) []accountView {
-	wanted := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		wanted[id] = true
+// importCookie 在后台任务中逐个导入 Cookie 中选中会话的账号，账号 ID 取自邮箱，返回 202 与任务
+func (h *handler) importCookie(c *gin.Context) {
+	var input struct {
+		Cookies  string `json:"cookies"`
+		Proxy    string `json:"proxy"`
+		Accounts []struct {
+			Email    string `json:"email"`
+			AuthUser int    `json:"auth_user"`
+		} `json:"accounts"`
 	}
-	result := []accountView{}
-	for _, account := range h.accountViews() {
-		if wanted[account.AccountID] {
-			result = append(result, account)
-		}
+	if !bindJSON(c, &input) {
+		return
 	}
-	return result
+	if len(input.Accounts) == 0 {
+		writeError(c, http.StatusBadRequest, "invalid_request", "accounts 不能为空")
+		return
+	}
+	labels := make([]string, len(input.Accounts))
+	for index, account := range input.Accounts {
+		labels[index] = account.Email
+	}
+	proxy := trimmed(input.Proxy)
+	task := h.tasks.start(c.Request.Context(), "cookie", labels, func(ctx context.Context, index int) error {
+		account := input.Accounts[index]
+		_, err := h.Accounts.ImportCookie(ctx, input.Cookies, account.Email, proxy, account.AuthUser)
+		return err
+	})
+	c.JSON(http.StatusAccepted, gin.H{"task": task})
 }

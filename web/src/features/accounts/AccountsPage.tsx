@@ -10,6 +10,7 @@ import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { Table, Td, Th } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
+import { AccountTasks } from '@/features/accounts/AccountTasks'
 import { runBatch } from '@/features/accounts/batch'
 import { accountsMessages, accountStateMessages } from '@/features/accounts/messages'
 import { fixedProxy } from '@/features/accounts/proxy'
@@ -18,6 +19,7 @@ import { ProxyValue } from '@/features/accounts/ProxyValue'
 import { accountsKey, useAccounts } from '@/features/accounts/queries'
 import type { Account } from '@/features/accounts/types'
 import { stateTone } from '@/features/accounts/usage'
+import { WarmupDialog } from '@/features/accounts/WarmupDialog'
 import { api } from '@/lib/api'
 import { formatDateTime, formatPercent } from '@/lib/format'
 import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
@@ -120,11 +122,18 @@ export function AccountsPage() {
         title={m.title}
         description={m.description}
         actions={
-          <Button asChild>
-            <Link to="/accounts/import">{m.import}</Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            <WarmupDialog
+              accounts={rows}
+              selected={selected.map((account) => account.account_id)}
+            />
+            <Button asChild>
+              <Link to="/accounts/import">{m.import}</Link>
+            </Button>
+          </div>
         }
       />
+      <AccountTasks />
       {rows.length === 0 ? (
         <EmptyState
           icon={<Users size={20} aria-hidden />}

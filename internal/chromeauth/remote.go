@@ -15,19 +15,18 @@ import (
 	"time"
 )
 
-// RemoteOrigin 校验远程实例地址只含协议与主机，非本机地址必须使用 HTTPS
+// RemoteOrigin 校验远程实例地址只含协议、主机与反向代理的子路径，非本机地址必须使用 HTTPS
 func RemoteOrigin(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Host == "" || parsed.User != nil ||
-		parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", fmt.Errorf("--remote 必须是远程实例的 origin，例如 https://example.com")
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("--remote 必须是远程实例的地址，例如 https://example.com 或 https://example.com/gemini")
 	}
 	ip := net.ParseIP(parsed.Hostname())
 	loopback := strings.EqualFold(parsed.Hostname(), "localhost") || ip != nil && ip.IsLoopback()
 	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !loopback) {
 		return "", fmt.Errorf("--remote 必须使用 HTTPS；只有本机地址（例如 SSH 隧道）可以使用 HTTP")
 	}
-	return parsed.Scheme + "://" + parsed.Host, nil
+	return parsed.Scheme + "://" + parsed.Host + strings.TrimSuffix(parsed.Path, "/"), nil
 }
 
 // readPairingToken 从标准输入读取配对令牌，令牌不进入命令历史

@@ -23,7 +23,7 @@ func Files() fs.FS {
 	return files
 }
 
-// Handler 返回管理端静态资源处理器：assets 下带哈希的文件长期缓存，未知页面路径回落到入口页
+// Handler 返回管理端静态资源处理器：assets 下带哈希的文件长期缓存，未知页面路径回落到入口页，入口页的 <base> 指向管理端根目录
 func Handler() http.Handler {
 	files := Files()
 	index, err := fs.ReadFile(files, "index.html")
@@ -53,6 +53,15 @@ func Handler() http.Handler {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-cache")
-		http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(index))
+		page := bytes.Replace(index, []byte(`<base href="/" />`), []byte(`<base href="`+relativeRoot(r.URL.Path)+`" />`), 1)
+		http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(page))
 	})
+}
+
+// relativeRoot 返回从页面路径回到管理端根目录的相对地址，反向代理把管理端挂在子路径下时资源、接口与路由仍以该子路径为根
+func relativeRoot(page string) string {
+	if depth := strings.Count(page, "/") - 1; depth > 0 {
+		return strings.Repeat("../", depth)
+	}
+	return "./"
 }
