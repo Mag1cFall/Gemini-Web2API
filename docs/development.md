@@ -127,14 +127,14 @@ Release 的 Windows 包是只含桌面版 `gemini-web2api.exe` 的 zip，`setup`
 | 加载 | `internal/auth` | 读取 `auth/<账号>/storage-state.json` |
 | 初始化 | `accounts.Manager.Start` | 执行初始化链路，失败按间隔重试 |
 | 轮换 | `internal/accounts`、`gemini/rotate.go` | 按官网周期轮换 Cookie 并重读目录 |
-| 续签 | `internal/chromeauth` | Chrome 导入的账号在登录态失效时续签 |
+| 续签 | `internal/chromeauth` | Chrome 导入的账号在登录态失效时续签，带设备绑定密钥的材料在原 Windows 设备上签发，其余材料在任何系统上签发 |
 | 冷却 | `AccountPool.ReportFailure` | 按模型或整个账号移出调度 |
-| 运行期变更 | `Manager.Add`、`Remove`、`SetEnabled`、`SetProxy`、`Verify` | 导入、删除、停用、改代理、重新连接 |
+| 运行期变更 | `Manager.Add`、`Remove`、`SetEnabled`、`SetProxy`、`Verify` | 导入、删除、停用、改代理、重新连接；账号每次启动都取认证文件当前的 Cookie、续签材料与设置 |
 | 代理 | `internal/accounts/proxies.go`、`internal/proxypool` | 分配代理，定时检测，故障时改绑 |
 | 写回 | `internal/auth` | 变化的 Cookie 原子写回认证文件 |
 
 - **启动**：`internal/app` 读取配置后创建 `AccountPool` 与 `accounts.Manager`，`Start` 为每个账号启动独立的初始化与轮换循环，并另建访客会话
-- **管理端操作**：`internal/admin` 的账号接口调用 `Manager` 的对应方法，Chrome 导入、Cookie 导入与远程配对分别经 `ImportChrome`、`ImportCookie`、`ImportState` 写入认证目录后加入调度；Chrome 与 Cookie 导入是 `internal/admin/tasks.go` 的后台任务，发起请求结束后逐个账号继续，进度由 `GET /api/accounts/tasks` 读取；粘贴的 Cookie 由 `DiscoverCookie` 按 authuser 读出登录邮箱
+- **管理端操作**：`internal/admin` 的账号接口调用 `Manager` 的对应方法，Chrome 导入、Cookie 导入与远程配对分别经 `ChromeImporter`、`ImportCookie`、`ImportState` 写入认证目录后加入调度；一次 Chrome 导入任务的各账号共用 `chromeauth.OpenChrome` 的账号发现结果与主密钥；三种导入写入已导入的账号时都经 `auth.Inherit` 沿用原有的停用标记与未重新填写的固定代理；Chrome 与 Cookie 导入是 `internal/admin/tasks.go` 的后台任务，发起请求结束后逐个账号继续，进度由 `GET /api/accounts/tasks` 读取；粘贴的 Cookie 由 `DiscoverCookie` 按 authuser 读出登录邮箱
 - **预热**：`POST /api/warmup`（`internal/admin/warmup.go`）占用选定账号的请求槽，对选定模型发一条最小生成请求，结果写入请求账本，协议记为 `warmup`
 - **状态读取**：管理端读取 `AccountPool.Status` 并附上各账号首页 `oPEP7c` 的登录邮箱，账号用量读取 `AccountPool.Usage`
 - **冷却原因**：以代码记录，取值为 `usage_limit`、`rate_limited`、`model_mismatch`、`ip_restricted`、`captcha` 与 `upstream_error`，管理端按代码显示当前语言的文案

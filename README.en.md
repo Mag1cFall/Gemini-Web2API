@@ -132,13 +132,13 @@ When the service runs on a server without Chrome, generate a pairing token on th
 .\gemini-web2api.exe setup --email "name@example.com" --remote https://example.com
 ```
 
-Setup creates `auth/<account>/storage-state.json` and verifies the live model catalog. Chrome import also saves the OAuth renewal material needed to renew cookies after Chrome exits. Daily startup is:
+Setup creates `auth/<account>/storage-state.json` and verifies the live model catalog. Chrome import also saves the OAuth renewal material needed to renew cookies after Chrome exits. While the service is running, import accounts on the console's Import account page; when the `auth` directory that setup would write to is in use by a running service, setup exits with a message. Daily startup is:
 
 ```powershell
 .\gemini-web2api.exe
 ```
 
-The default auth directory is `auth`, and the default listener is `127.0.0.1:8007`. Linux and macOS can use existing cookies copied in an `auth` directory; renewal requires setup on the original Windows device.
+The default auth directory is `auth`, and the default listener is `127.0.0.1:8007`. Linux and macOS can use a copied `auth` directory: accounts whose `storage-state.json` has `wrappedBindingKey` (renewal material bound to the original device) work until their cookies expire and are renewed on the original Windows device; other Chrome-imported accounts renew automatically on any system.
 
 While running, the service rotates each account's sign-in cookies every 10 minutes, as the Gemini website does. Cookies that change in a response are written back to `auth/<account>/storage-state.json` and reused after a restart. Chrome-imported accounts renew automatically when their session expires.
 
@@ -282,11 +282,11 @@ Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, `x-goog-api-key`
 Open `http://127.0.0.1:8007/` in a browser for the console, which uses the `/api/*` endpoints.
 
 - **Connect**: the Connect page lists the base URLs of the three protocols and ready-made configuration for Claude Code, Codex, OpenCode, OpenClaw, omp, Magpie, Cherry Studio, SillyTavern, and curl with the selected model; Connection test lists models with the selected API key and sends the shortest request to the selected model, showing the result, duration, and error reason per request
-- **Import accounts**: pasting cookies lists the accounts signed in to them; the import of the selected accounts runs in the background on the service and continues after you leave the page, which shows the progress and failure reason of each account
+- **Import accounts**: pasting cookies lists the accounts signed in to them; the import of the selected accounts runs in the background on the service and continues after you leave the page, which shows the progress and failure reason of each account; re-importing an account that is already imported keeps its disabled state, and keeps its fixed proxy when the proxy field is left empty
 - **Warm up**: Warm up on the All accounts page sends one minimal generation request for each selected account and model and lists the result, duration, and failure reason per row; the requests appear in the request records
 - **Listen port**: when the configured port falls inside a range reserved by Windows (Hyper-V, WSL2, Docker), the service listens on the next available port and the console shows the actual address at the top
-- **Remote access**: only local connections are accepted by default; with `ADMIN_AUTH_ENABLED=true`, `ADMIN_PASSWORD`, and `LISTEN_ADDR` on an externally reachable address, other devices can sign in; after 5 consecutive failed sign-ins, sign-in returns 429 with `Retry-After` for 60 seconds
-- **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service; in nginx, use `proxy_set_header Host $http_host;`. The service also works under a subpath, for example nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_buffering off; }`; open the console at `/gemini/` and add the same prefix to client base URLs
+- **Remote access**: only local connections are accepted by default; with `ADMIN_AUTH_ENABLED=true`, `ADMIN_PASSWORD`, and `LISTEN_ADDR` on an externally reachable address, other devices can sign in; after 5 consecutive failed sign-ins from one client, sign-in from that client returns 429 with `Retry-After` for 60 seconds
+- **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service and forward the client address in `X-Forwarded-For`; in nginx, use `proxy_set_header Host $http_host;` and `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. The client address forwarded by a reverse proxy on the same machine is used for the local-access check, sign-in rate limiting, and request records. The service also works under a subpath, for example nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_buffering off; }`; open the console at `/gemini/` and add the same prefix to client base URLs
 - **Applying settings**: settings saved in the console are written back to `.env`, and values equal to the default are removed from it; the listen address, auth paths, and log format take effect after a restart, and everything else applies immediately; invalid values in `.env` run with the default and are listed at the top of the settings page; settings set by process environment variables or `--auth` and `--listen` show their source and are read-only
 - **Online update**: the About page shows the latest GitHub release and its notes; after confirmation the command-line and desktop builds download the package for the current platform, verify its SHA-256, replace the executable, and restart into the new version, showing download progress meanwhile; the new version deletes the replaced files when it starts; downloads go through the first proxy in `PROXY`, or the system proxy when it is unset; Docker deployments update with the image
 

@@ -27,10 +27,6 @@ func DefaultChromeRoot() (string, error) {
 	return filepath.Join(localAppData, "Google", "Chrome", "User Data"), nil
 }
 
-func ensurePlatformImport() error {
-	return nil
-}
-
 func discoverPlatform(chromeRoot string) ([]Account, error) {
 	data, err := os.ReadFile(filepath.Join(chromeRoot, "Local State"))
 	if err != nil {
@@ -81,7 +77,7 @@ func discoverPlatform(chromeRoot string) ([]Account, error) {
 			case found && !strings.HasPrefix(string(record.encryptedToken), "v20"):
 				account.Reason = ReasonNeedsReauth
 			default:
-				account.Importable = found
+				account.Importable, account.token = found, record
 			}
 			accounts = append(accounts, account)
 		}
@@ -156,12 +152,6 @@ func openWebData(chromeRoot string, profile string) (database *sql.DB, closeData
 	}, nil
 }
 
-// tokenRecord 是 token_service 中一个账号的加密 refresh token 与 wrapped binding key
-type tokenRecord struct {
-	encryptedToken []byte
-	bindingKey     []byte
-}
-
 // readTokenServices 读取 Profile 中全部 Google 账号的 token_service 记录，键为 Gaia ID
 func readTokenServices(chromeRoot string, profile string) (map[string]tokenRecord, error) {
 	database, closeDatabase, err := openWebData(chromeRoot, profile)
@@ -187,22 +177,6 @@ func readTokenServices(chromeRoot string, profile string) (map[string]tokenRecor
 		return nil, fmt.Errorf("读取 %s token_service: %w", profile, err)
 	}
 	return records, nil
-}
-
-// readTokenService 返回一个账号的 Gaia ID、加密 refresh token 与 wrapped binding key
-func readTokenService(chromeRoot string, profile string, gaiaID string) (string, []byte, []byte, error) {
-	records, err := readTokenServices(chromeRoot, profile)
-	if err != nil {
-		return "", nil, nil, err
-	}
-	record, found := records[gaiaID]
-	if !found {
-		return "", nil, nil, fmt.Errorf("%s 的 token_service 没有账号 %s", profile, gaiaID)
-	}
-	if len(record.encryptedToken) == 0 {
-		return "", nil, nil, fmt.Errorf("%s 的 token_service 缺少认证材料", profile)
-	}
-	return gaiaID, record.encryptedToken, record.bindingKey, nil
 }
 
 func readProfileLanguage(chromeRoot string, profile string) (string, error) {

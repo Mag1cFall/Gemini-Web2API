@@ -39,6 +39,8 @@ export interface Account {
   profile?: string
   proxy?: string
   proxy_source?: 'fixed' | 'direct' | 'pool' | 'system'
+  // fixed_proxy 是账号固定代理的原文，direct 表示直连，从代理池或系统代理分配时没有
+  fixed_proxy?: string
   tier?: string
   context_window?: number
   models: string[]

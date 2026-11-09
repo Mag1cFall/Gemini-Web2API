@@ -23,7 +23,6 @@ import {
   cooldownReason,
   cooldownReasonMessages,
 } from '@/features/accounts/messages'
-import { fixedProxy } from '@/features/accounts/proxy'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { ProxyValue } from '@/features/accounts/ProxyValue'
 import { accountsKey, useAccounts, useClearCooldown } from '@/features/accounts/queries'
@@ -404,10 +403,10 @@ export function AccountPage() {
       {proxyOpen && (
         <ProxyDialog
           title={m.proxyTitle}
-          initial={fixedProxy(account)}
+          initial={account.fixed_proxy ?? ''}
           pending={saveProxy.isPending}
           onSave={(proxy) => {
-            saveProxy.mutate({ proxy, current: fixedProxy(account) })
+            saveProxy.mutate({ proxy, current: account.fixed_proxy ?? '' })
           }}
           onClose={() => {
             setProxyOpen(false)

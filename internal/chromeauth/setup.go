@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,8 +32,8 @@ func (values *stringList) Set(value string) error {
 	return nil
 }
 
-// RunSetup 执行首次账号配置
-func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, interactive bool) error {
+// RunSetup 执行账号配置，servedAuth 是同一数据目录中运行的服务使用的认证路径，没有服务在运行时为空
+func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, interactive bool, servedAuth []string) error {
 	stdin = bufio.NewReader(stdin)
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -73,6 +74,8 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 			return fmt.Errorf("创建临时目录: %w", err)
 		}
 		defer os.RemoveAll(outputPath)
+	} else if slices.ContainsFunc(servedAuth, func(served string) bool { return sameDirectory(outputPath, served) }) {
+		return fmt.Errorf("服务正在运行并使用认证目录 %s：在管理端“导入账号”页导入，或停止服务后再运行 setup", outputPath)
 	}
 	finish := func(paths []string, modelCount int) error {
 		if origin == "" {
@@ -103,52 +106,49 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 		if len(profiles) != 0 || len(emails) != 0 || strings.TrimSpace(*chromeRoot) != "" {
 			return fmt.Errorf("--cookie、--cookie-file 不能与 Chrome 账号选择参数同时使用")
 		}
-		result, modelCount, err := ImportCookies(ctx, CookieImportOptions{
+		path, modelCount, err := ImportCookies(ctx, CookieImportOptions{
 			Cookies: cookies, ID: *accountID, Output: outputPath, Proxy: proxyURL, RequestProxy: requestProxy, AuthUser: *authUser,
 		})
 		if err != nil {
 			return err
 		}
-		return finish([]string{result.Path}, modelCount)
+		return finish([]string{path}, modelCount)
 	}
 	if strings.TrimSpace(*accountID) != "" || *authUser != 0 {
 		return fmt.Errorf("--id、--authuser 只与 --cookie、--cookie-file 一起使用")
 	}
 
+	selecting := len(profiles) == 0 && len(emails) == 0
+	if selecting && !interactive {
+		return fmt.Errorf("非交互模式请通过 --profile 或 --email 选择账号")
+	}
 	root, err := resolveChromeRoot(*chromeRoot)
 	if err != nil {
 		return err
 	}
-	if len(profiles) == 0 && len(emails) == 0 {
-		if !interactive {
-			return fmt.Errorf("非交互模式请通过 --profile 或 --email 选择账号")
-		}
-		accounts, err := Discover(root)
-		if err != nil {
-			return err
-		}
-		emails, err = promptAccounts(accounts, stdin, stderr)
-		if err != nil {
+	chrome, err := OpenChrome(root)
+	if err != nil {
+		return err
+	}
+	if selecting {
+		if emails, err = promptAccounts(chrome.Accounts(), stdin, stderr); err != nil {
 			return err
 		}
 	}
-
-	results, modelCount, err := Import(ctx, ImportOptions{
-		ChromeRoot:   root,
-		Output:       outputPath,
-		Proxy:        proxyURL,
-		RequestProxy: requestProxy,
-		Profiles:     profiles,
-		Emails:       emails,
+	paths, modelCount, err := chrome.Import(ctx, ImportOptions{
+		Output: outputPath, Proxy: proxyURL, RequestProxy: requestProxy, Profiles: profiles, Emails: emails,
 	})
 	if err != nil {
 		return err
 	}
-	paths := make([]string, 0, len(results))
-	for _, result := range results {
-		paths = append(paths, result.Path)
-	}
 	return finish(paths, modelCount)
+}
+
+// sameDirectory 报告两个路径是否为同一个已存在的目录
+func sameDirectory(left string, right string) bool {
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
 
 // promptAccounts 列出可导入账号并按输入的编号返回选中账号的邮箱

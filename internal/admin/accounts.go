@@ -138,10 +138,9 @@ func (h *handler) importChrome(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request", "emails 不能为空")
 		return
 	}
-	proxy := trimmed(input.Proxy)
+	importAccount := h.Accounts.ChromeImporter(trimmed(input.Proxy))
 	task := h.tasks.start(c.Request.Context(), "chrome", input.Emails, func(ctx context.Context, index int) error {
-		_, err := h.Accounts.ImportChrome(ctx, input.Emails[index:index+1], proxy)
-		return err
+		return importAccount(ctx, input.Emails[index])
 	})
 	c.JSON(http.StatusAccepted, gin.H{"task": task})
 }

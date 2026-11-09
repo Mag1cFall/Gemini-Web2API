@@ -5,13 +5,13 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
@@ -36,6 +36,14 @@ type Account struct {
 	Importable  bool   `json:"importable"`
 	// Reason 是账号不可导入的原因，不可导入且为空时表示该账号未在 Chrome 登录
 	Reason string `json:"reason,omitempty"`
+	// token 是 token_service 中该账号的续签材料
+	token tokenRecord
+}
+
+// tokenRecord 是 token_service 中一个账号的加密 refresh token 与 wrapped binding key
+type tokenRecord struct {
+	encryptedToken []byte
+	bindingKey     []byte
 }
 
 const (
@@ -47,8 +55,7 @@ const (
 
 // ImportOptions 保存批量导入参数
 type ImportOptions struct {
-	ChromeRoot string
-	Output     string
+	Output string
 	// Proxy 是写入账号的固定代理，RequestProxy 是没有固定代理时导入请求使用的代理
 	Proxy        string
 	RequestProxy string
@@ -56,20 +63,10 @@ type ImportOptions struct {
 	Emails       []string
 }
 
-// ImportResult 描述单个账号导入结果
-type ImportResult struct {
-	Profile     string `json:"profile"`
-	Email       string `json:"email"`
-	Imported    bool   `json:"imported"`
-	CookieCount int    `json:"cookieCount"`
-	Path        string `json:"path"`
-	CompletedAt string `json:"completedAt"`
-}
-
+// pendingImport 是通过验证后写入 path 的认证状态与验证请求使用的代理
 type pendingImport struct {
-	state  auth.StorageState
-	result ImportResult
-	// requestProxy 是验证请求使用的代理
+	state        auth.StorageState
+	path         string
 	requestProxy string
 }
 
@@ -85,105 +82,90 @@ type CookieImportOptions struct {
 	AuthUser int
 }
 
+// Chrome 是一次读取的本机 Chrome 账号，多次导入共用账号发现结果与 App-Bound 主密钥
+type Chrome struct {
+	root     string
+	accounts []Account
+	// masterKey 在首次导入时读取 App-Bound v20 主密钥
+	masterKey func() ([]byte, error)
+}
+
 // Discover 只读列出本机 Chrome Google 账号
 func Discover(chromeRoot string) ([]Account, error) {
 	return discoverPlatform(chromeRoot)
 }
 
-// Refresh 使用已保存的 OAuth 续签材料重新签发 Google Cookie
-func Refresh(ctx context.Context, material auth.OAuthMaterial, proxy string) ([]gemini.Cookie, error) {
-	if err := ensurePlatformImport(); err != nil {
-		return nil, err
-	}
-	proxyURL, err := ValidateProxy(proxy)
+// OpenChrome 发现 chromeRoot 中的 Google 账号
+func OpenChrome(chromeRoot string) (*Chrome, error) {
+	accounts, err := Discover(chromeRoot)
 	if err != nil {
 		return nil, err
 	}
-	cookies, err := fetchGoogleCookies(ctx, material.GaiaID, material.RefreshToken, material.WrappedBindingKey, proxyURL)
-	if err != nil {
-		return nil, err
-	}
-	return toGeminiCookies(cookies), nil
+	return &Chrome{
+		root: chromeRoot, accounts: accounts,
+		masterKey: sync.OnceValues(func() ([]byte, error) { return retrieveV20Key(chromeRoot) }),
+	}, nil
 }
 
-// ImportCookies 从 Cookie 文本生成短期账号状态
-func ImportCookies(ctx context.Context, options CookieImportOptions) (ImportResult, int, error) {
-	proxyURL, requestProxy, err := importProxies(options.Proxy, options.RequestProxy)
+// Accounts 返回发现的账号
+func (c *Chrome) Accounts() []Account {
+	return c.accounts
+}
+
+// Refresh 使用已保存的 OAuth 续签材料重新签发 Google Cookie
+func Refresh(ctx context.Context, material auth.OAuthMaterial, proxy string) ([]gemini.Cookie, error) {
+	cookies, err := fetchGoogleCookies(ctx, material.GaiaID, material.RefreshToken, material.WrappedBindingKey, proxy)
 	if err != nil {
-		return ImportResult{}, 0, err
+		return nil, err
 	}
+	return auth.GeminiCookies(toStorageCookies(cookies)), nil
+}
+
+// ImportCookies 从 Cookie 文本生成账号状态，返回状态文件路径与模型数
+func ImportCookies(ctx context.Context, options CookieImportOptions) (string, int, error) {
 	id := AccountID(options.ID)
 	if id == "" {
-		return ImportResult{}, 0, fmt.Errorf("id 必须包含英文字母或数字")
+		return "", 0, fmt.Errorf("id 必须包含英文字母或数字")
 	}
 	if options.AuthUser < 0 {
-		return ImportResult{}, 0, fmt.Errorf("authuser 不能为负数")
+		return "", 0, fmt.Errorf("authuser 不能为负数")
 	}
 	cookies, err := parseCookies(options.Cookies)
 	if err != nil {
-		return ImportResult{}, 0, err
+		return "", 0, err
 	}
 	path := filepath.Join(options.Output, id, storageFileName)
-	state := auth.StorageState{
-		Cookies: cookies,
-		Origins: []json.RawMessage{},
-		Metadata: auth.Metadata{
-			ID: id, Proxy: proxyURL,
-			Source:   auth.ImportSource{Browser: "cookie-header"},
-			Language: defaultImportLanguage,
-			AuthUser: options.AuthUser,
-		},
-	}
-	absPath, err := filepath.Abs(path)
+	metadata, requestProxy, err := importIdentity(path, auth.Metadata{
+		ID: id, Proxy: options.Proxy, Source: auth.ImportSource{Browser: "cookie-header"},
+		Language: defaultImportLanguage, AuthUser: options.AuthUser,
+	}, options.RequestProxy)
 	if err != nil {
-		return ImportResult{}, 0, fmt.Errorf("解析认证状态路径: %w", err)
+		return "", 0, err
 	}
-	pending := pendingImport{
-		state: state,
-		result: ImportResult{
-			Profile: "cookie-header", Imported: true, CookieCount: len(cookies), Path: absPath,
-		},
-		requestProxy: requestProxy,
-	}
-	results, modelCount, err := validateAndWriteImports(ctx, []pendingImport{pending})
+	pending := pendingImport{state: auth.StorageState{Cookies: cookies, Metadata: metadata}, path: path, requestProxy: requestProxy}
+	paths, modelCount, err := validateAndWriteImports(ctx, []pendingImport{pending})
 	if err != nil {
-		return ImportResult{}, 0, err
+		return "", 0, err
 	}
-	return results[0], modelCount, nil
+	return paths[0], modelCount, nil
 }
 
-// Import 用本机 Chrome 的 OAuth 续签材料生成协议账号状态
-func Import(ctx context.Context, options ImportOptions) ([]ImportResult, int, error) {
-	if err := ensurePlatformImport(); err != nil {
-		return nil, 0, err
-	}
-	proxyURL, requestProxy, err := importProxies(options.Proxy, options.RequestProxy)
+// Import 用 OAuth 续签材料为选中的账号生成协议账号状态，返回各状态文件的路径与模型数
+func (c *Chrome) Import(ctx context.Context, options ImportOptions) ([]string, int, error) {
+	selected, err := selectAccounts(c.accounts, options.Profiles, options.Emails)
 	if err != nil {
 		return nil, 0, err
 	}
-	accounts, err := Discover(options.ChromeRoot)
-	if err != nil {
-		return nil, 0, err
+	if len(selected) == 0 {
+		return nil, 0, fmt.Errorf("没有选择要导入的账号")
 	}
-	selected, err := selectAccounts(accounts, options.Profiles, options.Emails)
-	if err != nil {
-		return nil, 0, err
-	}
-	masterKey, err := retrieveV20Key(options.ChromeRoot)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(masterKey) != 32 {
-		return nil, 0, fmt.Errorf("Chrome v20 主密钥长度异常")
-	}
-
 	pending := make([]pendingImport, 0, len(selected))
 	for _, account := range selected {
-		result, err := importAccount(ctx, account, options, proxyURL, requestProxy, masterKey)
+		item, err := c.importAccount(ctx, account, options)
 		if err != nil {
 			return nil, 0, fmt.Errorf("导入 %s: %w", account.Email, err)
 		}
-		pending = append(pending, result)
+		pending = append(pending, item)
 	}
 	return validateAndWriteImports(ctx, pending)
 }
@@ -246,6 +228,15 @@ func missingValues(requested map[string]struct{}, found map[string]struct{}) []s
 	return missing
 }
 
+// importIdentity 返回写入 path 的账号身份与导入请求使用的代理：账号已导入过时沿用它的停用标记与未重新填写的固定代理
+func importIdentity(path string, metadata auth.Metadata, fallback string) (auth.Metadata, string, error) {
+	metadata.Proxy = strings.TrimSpace(metadata.Proxy)
+	metadata = auth.Inherit(path, metadata)
+	fixed, requestProxy, err := importProxies(metadata.Proxy, fallback)
+	metadata.Proxy = fixed
+	return metadata, requestProxy, err
+}
+
 // importProxies 校验导入时填写的账号代理，返回写入账号的固定代理与导入请求使用的代理：direct 为直连，未填写时使用 fallback
 func importProxies(proxy string, fallback string) (string, string, error) {
 	proxy = strings.TrimSpace(proxy)
@@ -293,71 +284,51 @@ func decryptV20Token(masterKey []byte, encrypted []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("refresh token 解密失败")
 	}
-	token := string(plaintext)
-	if len(token) != 103 || !strings.HasPrefix(token, "1//0") {
-		return "", fmt.Errorf("refresh token 解密结果格式异常")
-	}
-	return token, nil
+	return string(plaintext), nil
 }
 
-func importAccount(ctx context.Context, account Account, options ImportOptions, proxyURL string, requestProxy string, masterKey []byte) (pendingImport, error) {
-	gaiaID, encryptedToken, wrappedKey, err := readTokenService(options.ChromeRoot, account.Profile, account.GaiaID)
+// importAccount 为一个账号签发 Cookie 并组成待验证的认证状态
+func (c *Chrome) importAccount(ctx context.Context, account Account, options ImportOptions) (pendingImport, error) {
+	id := AccountID(account.Email)
+	path := filepath.Join(options.Output, id, storageFileName)
+	metadata, requestProxy, err := importIdentity(path, auth.Metadata{
+		ID: id, Proxy: options.Proxy, Source: auth.ImportSource{Browser: "chrome", Profile: account.Profile},
+	}, options.RequestProxy)
 	if err != nil {
 		return pendingImport{}, err
 	}
-	token, err := decryptV20Token(masterKey, encryptedToken)
+	masterKey, err := c.masterKey()
 	if err != nil {
 		return pendingImport{}, err
 	}
-	cookies, err := fetchGoogleCookies(ctx, gaiaID, token, wrappedKey, requestProxy)
+	token, err := decryptV20Token(masterKey, account.token.encryptedToken)
 	if err != nil {
 		return pendingImport{}, err
 	}
-	language, err := readProfileLanguage(options.ChromeRoot, account.Profile)
+	cookies, err := fetchGoogleCookies(ctx, account.GaiaID, token, account.token.bindingKey, requestProxy)
 	if err != nil {
 		return pendingImport{}, err
 	}
-
-	email := strings.ToLower(strings.TrimSpace(account.Email))
-	path := filepath.Join(options.Output, AccountID(email), storageFileName)
-	state := auth.StorageState{
-		Cookies: toStorageCookies(cookies),
-		Origins: []json.RawMessage{},
-		Metadata: auth.Metadata{
-			ID:     AccountID(email),
-			Proxy:  proxyURL,
-			Source: auth.ImportSource{Browser: "chrome", Profile: account.Profile},
-			OAuth: &auth.OAuthMaterial{
-				GaiaID: gaiaID, RefreshToken: token, WrappedBindingKey: wrappedKey,
-			},
-			Language: language,
-		},
+	if metadata.Language, err = readProfileLanguage(c.root, account.Profile); err != nil {
+		return pendingImport{}, err
 	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return pendingImport{}, fmt.Errorf("解析认证状态路径: %w", err)
-	}
-	return pendingImport{
-		state: state,
-		result: ImportResult{
-			Profile: account.Profile, Email: email, Imported: true,
-			CookieCount: len(cookies), Path: absPath,
-		},
-		requestProxy: requestProxy,
-	}, nil
+	metadata.OAuth = &auth.OAuthMaterial{GaiaID: account.GaiaID, RefreshToken: token, WrappedBindingKey: account.token.bindingKey}
+	state := auth.StorageState{Cookies: toStorageCookies(cookies), Metadata: metadata}
+	return pendingImport{state: state, path: path, requestProxy: requestProxy}, nil
 }
 
-func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]ImportResult, int, error) {
+// validateAndWriteImports 以首页、模型目录与用量请求验证每个账号，全部通过后写入认证状态，返回各状态文件的路径与模型数
+func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]string, int, error) {
 	models := make(map[string]struct{})
 	for index := range pending {
 		item := &pending[index]
 		source := gemini.AccountSource{
-			ID: item.state.Metadata.ID, Cookies: stateCookiesToGemini(item.state.Cookies),
+			ID: item.state.Metadata.ID, Cookies: auth.GeminiCookies(item.state.Cookies),
 			Language: item.state.Metadata.Language, AuthUser: item.state.Metadata.AuthUser,
-		}
-		source.Save = func(cookies []gemini.Cookie) error {
-			item.state.Cookies = geminiCookiesToState(cookies)
-			return nil
+			Save: func(cookies []gemini.Cookie) error {
+				item.state.Cookies = auth.StateCookies(cookies)
+				return nil
+			},
 		}
 		client, err := gemini.NewClient(source, item.requestProxy, false)
 		if err != nil {
@@ -377,20 +348,18 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]Im
 			models[model.ID] = struct{}{}
 		}
 	}
-	results := make([]ImportResult, len(pending))
-	completedAt := time.Now().UTC().Format(time.RFC3339Nano)
-	for index := range pending {
-		file, err := auth.New(pending[index].result.Path, pending[index].state)
+	paths := make([]string, len(pending))
+	for index, item := range pending {
+		file, err := auth.New(item.path, item.state)
 		if err != nil {
 			return nil, 0, err
 		}
 		if err := file.Write(); err != nil {
 			return nil, 0, err
 		}
-		pending[index].result.CompletedAt = completedAt
-		results[index] = pending[index].result
+		paths[index] = file.Path()
 	}
-	return results, len(models), nil
+	return paths, len(models), nil
 }
 
 // AccountID 返回邮箱对应的账号 ID
@@ -430,65 +399,4 @@ func toStorageCookies(cookies []multiloginCookie) []auth.StateCookie {
 		})
 	}
 	return result
-}
-
-func toGeminiCookies(cookies []multiloginCookie) []gemini.Cookie {
-	return stateCookiesToGemini(toStorageCookies(cookies))
-}
-
-func stateCookiesToGemini(cookies []auth.StateCookie) []gemini.Cookie {
-	result := make([]gemini.Cookie, 0, len(cookies))
-	for _, cookie := range cookies {
-		result = append(result, gemini.Cookie{
-			Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: cookie.Path,
-			Expires: int64(cookie.Expires), HTTPOnly: cookie.HTTPOnly, Secure: cookie.Secure, SameSite: cookie.SameSite,
-		})
-	}
-	return result
-}
-
-func geminiCookiesToState(cookies []gemini.Cookie) []auth.StateCookie {
-	result := make([]auth.StateCookie, 0, len(cookies))
-	for _, cookie := range cookies {
-		result = append(result, auth.StateCookie{
-			Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: cookie.Path,
-			Expires: float64(cookie.Expires), HTTPOnly: cookie.HTTPOnly, Secure: cookie.Secure, SameSite: cookie.SameSite,
-		})
-	}
-	return result
-}
-
-func parseCookieHeader(header string) ([]auth.StateCookie, error) {
-	header = strings.TrimSpace(header)
-	if len(header) >= len("Cookie:") && strings.EqualFold(header[:len("Cookie:")], "Cookie:") {
-		header = strings.TrimSpace(header[len("Cookie:"):])
-	}
-	if header == "" || strings.ContainsAny(header, "\r\n") {
-		return nil, fmt.Errorf("cookie 必须是一行 Cookie Header")
-	}
-	cookies := make([]auth.StateCookie, 0)
-	names := make(map[string]struct{})
-	for _, item := range strings.Split(header, ";") {
-		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
-		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
-			return nil, fmt.Errorf("Cookie Header 项 %q 格式无效", strings.TrimSpace(item))
-		}
-		name := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		if value == "" {
-			return nil, fmt.Errorf("Cookie %s 的值为空", name)
-		}
-		if _, exists := names[name]; exists {
-			continue
-		}
-		names[name] = struct{}{}
-		domain := ".google.com"
-		if strings.HasPrefix(name, "__Host-") {
-			domain = "gemini.google.com"
-		}
-		cookies = append(cookies, auth.StateCookie{
-			Name: name, Value: value, Domain: domain, Path: "/", Secure: true,
-		})
-	}
-	return cookies, nil
 }
