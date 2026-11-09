@@ -554,7 +554,7 @@ func (p *AccountPool) SessionIdle(sessionKey string, modelID string) bool {
 	return entry != nil && entry.schedulable(now, modelID) && !entry.Client.Busy()
 }
 
-// RetryAfter 返回请求 API key 可用账号中目标模型最早结束冷却的时间，没有冷却中的账号时为零值
+// RetryAfter 返回请求 API key 可用账号中目标模型最早结束冷却的时间，有未冷却的登录账号或没有冷却中的账号时为零值
 func (p *AccountPool) RetryAfter(ctx context.Context, modelID string) time.Time {
 	excluded := p.keyExcluded(ctx, nil)
 	p.mu.Lock()
@@ -567,6 +567,9 @@ func (p *AccountPool) RetryAfter(ctx context.Context, modelID string) time.Time 
 		}
 		until := entry.blockedUntil(now, modelID)
 		if until.IsZero() {
+			if entry.guest() {
+				continue
+			}
 			return time.Time{}
 		}
 		if earliest.IsZero() || until.Before(earliest) {
@@ -633,7 +636,7 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	modelScope, reason := failureScope(err)
 	until := now.Add(p.cooldown)
 	if reason == "rate_limited" {
-		until = now.Add(min(p.cooldown, rateLimitCooldown))
+		until = now.Add(rateLimitBackoff(min(p.cooldown, rateLimitCooldown), entry.ConsecutiveFails))
 	}
 	if reset := usageReset(entry.Client, err); !reset.IsZero() {
 		until = reset
@@ -649,8 +652,16 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	logging.Warn(accountID, "账号冷却", "至", until, "原因", reason)
 }
 
-// rateLimitCooldown 是上游频率限制的模型冷却时长上限，这类限制约一分钟后恢复
+// rateLimitCooldown 是上游频率限制的首次冷却时长
 const rateLimitCooldown = time.Minute
+
+// rateLimitMaxCooldown 是连续频率限制的冷却时长上限
+const rateLimitMaxCooldown = 10 * time.Minute
+
+// rateLimitBackoff 返回账号连续第 fails 次失败时的冷却时长，从 base 起逐次翻倍
+func rateLimitBackoff(base time.Duration, fails int) time.Duration {
+	return min(base<<min(fails-1, 4), rateLimitMaxCooldown)
+}
 
 // failureScope 返回错误是否只影响当前模型与冷却原因 code
 func failureScope(err error) (bool, string) {
@@ -660,7 +671,7 @@ func failureScope(err error) (bool, string) {
 		case 1037:
 			return true, "usage_limit"
 		case 1095:
-			return true, "rate_limited"
+			return false, "rate_limited"
 		case 1060:
 			return false, "ip_restricted"
 		}
@@ -1018,7 +1029,7 @@ func (p *AccountPool) nextAvailable(now time.Time, modelID string, excludedAccou
 	return p.nextFrom(now, modelID, excludedAccountIDs, true)
 }
 
-// nextFrom 在账号或访客会话中按上下文窗口与调度策略选择
+// nextFrom 在账号或访客会话中选择：先取请求槽空闲的账号，都不空闲时取全部账号，其中上下文窗口最大的按调度策略选择
 func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs map[string]struct{}, guest bool) *accountEntry {
 	if len(p.entries) == 0 {
 		return nil
@@ -1028,25 +1039,24 @@ func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs
 		_, excluded := excludedAccountIDs[entry.AccountID]
 		return !excluded && entry.guest() == guest && entry.schedulable(now, modelID)
 	}
-	maxContextWindow := -1
-	for _, entry := range p.entries {
-		if eligible(entry) && entry.Client.ContextWindow() > maxContextWindow {
-			maxContextWindow = entry.Client.ContextWindow()
-		}
-	}
-	if maxContextWindow < 0 {
-		return nil
-	}
-
 	start := p.index
 	if p.strategy == FillFirst {
 		start = 0
 	}
 	for _, idleOnly := range []bool{true, false} {
+		candidate := func(entry *accountEntry) bool {
+			return eligible(entry) && (!idleOnly || !entry.Client.Busy())
+		}
+		maxContextWindow := -1
+		for _, entry := range p.entries {
+			if candidate(entry) {
+				maxContextWindow = max(maxContextWindow, entry.Client.ContextWindow())
+			}
+		}
 		for offset := uint64(0); offset < uint64(len(p.entries)); offset++ {
 			idx := (start + offset) % uint64(len(p.entries))
 			entry := p.entries[idx]
-			if eligible(entry) && entry.Client.ContextWindow() == maxContextWindow && (!idleOnly || !entry.Client.Busy()) {
+			if candidate(entry) && entry.Client.ContextWindow() == maxContextWindow {
 				p.index = idx + 1
 				return entry
 			}

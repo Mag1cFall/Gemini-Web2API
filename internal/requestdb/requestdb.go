@@ -39,6 +39,9 @@ const pruneInterval = time.Hour
 // batchLimit 是单个写事务合并的最大记录数
 const batchLimit = 256
 
+// commitWindow 是写入协程收到一条记录后等待合并后续记录的时长
+const commitWindow = 200 * time.Millisecond
+
 // queueLimit 是等待写入的最大记录数，队列已满时丢弃新记录
 const queueLimit = 4096
 
@@ -74,6 +77,8 @@ CREATE TABLE IF NOT EXISTS bodies (
 CREATE TABLE IF NOT EXISTS responses (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, previous_id TEXT NOT NULL, background INTEGER NOT NULL,
  status TEXT NOT NULL, response TEXT NOT NULL, input TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS responses_created ON responses(created_at);
+CREATE INDEX IF NOT EXISTS responses_unfinished ON responses(status) WHERE background=1 AND status IN ('queued','in_progress');
 CREATE TABLE IF NOT EXISTS files (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, filename TEXT NOT NULL,
  mime_type TEXT NOT NULL, bytes INTEGER NOT NULL, purpose TEXT NOT NULL, sha256 TEXT NOT NULL, source TEXT NOT NULL);
@@ -97,15 +102,21 @@ type Body struct {
 	ResponseSize int64
 }
 
-// write 是写入协程处理的一条用量或正文
+// write 是写入协程处理的一条用量、正文或会话，flushed 非空时表示提交此前排队的全部内容后关闭它
 type write struct {
-	info *logging.RequestInfo
-	body *RequestBody
+	info     *logging.RequestInfo
+	body     *RequestBody
+	sessions []StoredSession
+	flushed  chan struct{}
 }
 
-// Store 串行批量写入请求账本与汇总，并提供聚合与明细查询
+// readConnections 是只读连接池的连接数
+const readConnections = 4
+
+// Store 串行批量写入请求账本与汇总，并提供聚合与明细查询；db 是单连接的写连接池，reads 是只读连接池
 type Store struct {
 	db      *sql.DB
+	reads   *sql.DB
 	writes  chan write
 	done    chan struct{}
 	capture atomic.Bool
@@ -120,21 +131,29 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	options := url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "journal_size_limit(524288)"}}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?"+options.Encode())
+	dsn := "file:" + filepath.ToSlash(path) + "?" + options.Encode()
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(4)
+	db.SetMaxOpenConns(1)
 	if err := useIncrementalVacuum(db); err != nil {
 		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
 	}
 	if err := applySchema(db); err != nil {
 		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
 	}
-	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{})}
-	if err := store.alignDays(); err != nil {
-		return nil, errors.Join(fmt.Errorf("重建本地日汇总: %w", err), db.Close())
+	reads, err := sql.Open("sqlite", dsn+"&_query_only=1")
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
 	}
+	reads.SetMaxOpenConns(readConnections)
+	reads.SetMaxIdleConns(readConnections)
+	store := &Store{db: db, reads: reads, writes: make(chan write, queueLimit), done: make(chan struct{})}
+	if err := store.alignDays(); err != nil {
+		return nil, errors.Join(fmt.Errorf("重建本地日汇总: %w", err), reads.Close(), db.Close())
+	}
+	store.removeInterruptedUploads()
 	go store.run()
 	return store, nil
 }
@@ -153,7 +172,7 @@ func (store *Store) Close() error {
 	close(store.writes)
 	store.mu.Unlock()
 	<-store.done
-	return store.db.Close()
+	return errors.Join(store.reads.Close(), store.db.Close())
 }
 
 // SetBodyCapture 设置是否保存请求与响应正文
@@ -215,37 +234,58 @@ func (store *Store) enqueue(item write) {
 	}
 }
 
-// run 合并连续到达的记录为单个事务，并每隔 pruneInterval 清理过期数据
+// run 把 commitWindow 内到达的记录合并为单个事务，查询前按 flush 请求提前提交，并每隔 pruneInterval 清理过期数据
 func (store *Store) run() {
 	defer close(store.done)
 	store.prune()
 	prune := time.NewTicker(pruneInterval)
 	defer prune.Stop()
+	window := time.NewTimer(commitWindow)
+	window.Stop()
+	var batch []write
+	commit := func() {
+		if len(batch) > 0 {
+			store.commit(batch)
+			batch = nil
+		}
+	}
 	for {
 		select {
 		case item, ok := <-store.writes:
 			if !ok {
+				commit()
 				return
 			}
-			batch := []write{item}
-			for len(batch) < batchLimit {
-				select {
-				case next, ok := <-store.writes:
-					if !ok {
-						store.commit(batch)
-						return
-					}
-					batch = append(batch, next)
-					continue
-				default:
-				}
-				break
+			if item.flushed != nil {
+				commit()
+				close(item.flushed)
+				continue
 			}
-			store.commit(batch)
+			if len(batch) == 0 {
+				window.Reset(commitWindow)
+			}
+			if batch = append(batch, item); len(batch) == batchLimit {
+				commit()
+			}
+		case <-window.C:
+			commit()
 		case <-prune.C:
 			store.prune()
 		}
 	}
+}
+
+// flush 等待此前排队的内容全部提交，查询据此读到已结束的请求
+func (store *Store) flush() {
+	store.mu.RLock()
+	if store.closed {
+		store.mu.RUnlock()
+		return
+	}
+	flushed := make(chan struct{})
+	store.writes <- write{flushed: flushed}
+	store.mu.RUnlock()
+	<-flushed
 }
 
 // commit 写入一批记录，记录写入失败与队列丢弃
@@ -286,7 +326,7 @@ func collect(target map[rollupKey]*entry, key rollupKey, value *entry) {
 	target[key] = copied
 }
 
-// write 在一个事务内写入记录、累加小时与本地日汇总并裁剪正文条数
+// write 在一个事务内写入记录与会话、累加小时与本地日汇总并裁剪正文条数
 func (store *Store) write(batch []write) (err error) {
 	tx, err := store.db.Begin()
 	if err != nil {
@@ -330,6 +370,11 @@ func (store *Store) write(batch []write) (err error) {
 			bodies = true
 			if _, err := tx.Exec(`INSERT OR REPLACE INTO bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`,
 				body.ID, body.Time.UnixMilli(), body.Request, body.RequestSize, body.Response, body.ResponseSize); err != nil {
+				return err
+			}
+		}
+		for _, session := range item.sessions {
+			if err := saveSession(tx, session); err != nil {
 				return err
 			}
 		}
@@ -459,9 +504,10 @@ func (store *Store) alignDays() (err error) {
 
 // RequestBody 返回请求保存的截断正文
 func (store *Store) RequestBody(ctx context.Context, id string) (RequestBody, error) {
+	store.flush()
 	body := RequestBody{ID: id}
 	var at int64
-	err := store.db.QueryRowContext(ctx, `SELECT time,request,request_size,response,response_size FROM bodies WHERE id=?`, id).
+	err := store.reads.QueryRowContext(ctx, `SELECT time,request,request_size,response,response_size FROM bodies WHERE id=?`, id).
 		Scan(&at, &body.Request, &body.RequestSize, &body.Response, &body.ResponseSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RequestBody{}, ErrRequestBodyNotFound

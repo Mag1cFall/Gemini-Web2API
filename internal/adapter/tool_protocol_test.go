@@ -127,7 +127,7 @@ func TestSplitCallGateHoldsCallMarkers(t *testing.T) {
 						break
 					}
 					var safe string
-					safe, held, found = splitCallGate(held + chunk)
+					safe, held, found = splitCallGate("", held+chunk)
 					output += safe
 				}
 				if !found || output != "intro" {
@@ -136,12 +136,55 @@ func TestSplitCallGateHoldsCallMarkers(t *testing.T) {
 			}
 		}
 	}
-	safe, held, _ := splitCallGate(`path C:\`)
+	safe, held, _ := splitCallGate("", `path C:\`)
 	if safe != "path C:" || held != `\` {
 		t.Fatalf("末尾反斜杠应暂扣：%q %q", safe, held)
 	}
-	safe, held, _ = splitCallGate(held + `new [x] done`)
+	safe, held, _ = splitCallGate("", held+`new [x] done`)
 	if safe != `\new [x] done` || held != "" {
 		t.Fatalf("反斜杠不属于调用块时应输出：%q %q", safe, held)
+	}
+}
+
+// TestCallAfterUnclosedBacktick 验证没有闭合的反引号是普通字符，其后的调用块照常解析，同一行闭合的行内代码中的调用块是示例
+func TestCallAfterUnclosedBacktick(t *testing.T) {
+	bridge := ToolBridge{Choice: "auto", Definitions: []ToolDefinition{{Name: "echo", Parameters: json.RawMessage(`{"type":"object"}`)}}}
+	text, calls, err := bridge.Parse("好的 ( ´ ▽ ` )ﾉ[Call:echo]\n[/Call]\n[Call:echo]\n[/Call]")
+	if err != nil || len(calls) != 2 || text != "好的 ( ´ ▽ ` )ﾉ" {
+		t.Fatalf("正文 %q 调用 %d 错误 %v", text, len(calls), err)
+	}
+	for _, sample := range []string{"写法 ` x [Call:echo] y ` 完毕", "`` a ` [Call:echo] ``"} {
+		text, calls, err := bridge.Parse(sample)
+		if err != nil || len(calls) != 0 || text != sample {
+			t.Fatalf("样本 %q: 正文 %q 调用 %d 错误 %v", sample, text, len(calls), err)
+		}
+	}
+}
+
+// TestSplitCallGateWaitsForLineAfterUnclosedBacktick 验证未闭合反引号之后的调用块开头暂扣到所在行有结果：行结束时是调用，反引号闭合时是示例，分片位置不影响输出
+func TestSplitCallGateWaitsForLineAfterUnclosedBacktick(t *testing.T) {
+	cases := []struct {
+		text   string
+		output string
+		found  bool
+	}{
+		{"好 ( ` )ﾉ[Call:echo]\n", "好 ( ` )ﾉ", true},
+		{"写法 ` x [Call:echo] y ` 完毕\n", "写法 ` x [Call:echo] y ` 完毕", false},
+	}
+	for _, item := range cases {
+		for first := 1; first < len(item.text); first++ {
+			output, held, found := "", "", false
+			for _, chunk := range []string{item.text[:first], item.text[first:]} {
+				var safe string
+				safe, held, found = splitCallGate(output, held+chunk)
+				output += safe
+				if found {
+					break
+				}
+			}
+			if found != item.found || output != item.output {
+				t.Fatalf("%q 切分于 %d：输出 %q，暂扣 %q，found %v", item.text, first, output, held, found)
+			}
+		}
 	}
 }

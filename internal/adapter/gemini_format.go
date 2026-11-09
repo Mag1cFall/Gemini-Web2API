@@ -199,7 +199,7 @@ func geminiJSONName(name string) string {
 	}
 	var builder strings.Builder
 	upper := false
-	for _, char := range name {
+	for _, char := range strings.TrimLeft(name, "_") {
 		if char == '_' {
 			upper = true
 			continue

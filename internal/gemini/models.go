@@ -102,6 +102,9 @@ func parseToolOptions(payload []any) map[Feature][]toolOption {
 	return options
 }
 
+// nativeImageRatios 是官网菜单之外上游按原值生成的图片宽高比
+var nativeImageRatios = []string{"2:3", "21:9", "1:8", "8:1"}
+
 // toolChoice 是生成请求选中的工具选项：options 写入 55 槽，sources 为其中 Sources 组的选项，aspectRatio 为请求宽高比时选中的标签，aspectOrder 与 durationOrder 为选中的宽高比与视频时长在官网菜单中的序号（从 1 起）
 type toolChoice struct {
 	options       []int
@@ -146,6 +149,9 @@ func (c ModelCatalog) toolSelection(feature Feature, aspectRatio string) *toolCh
 	if closest.id >= 0 {
 		choice.options = append(choice.options, closest.id)
 		choice.aspectRatio, choice.aspectOrder = closest.label, closestOrder
+		if slices.Contains(nativeImageRatios, aspectRatio) {
+			choice.aspectRatio = aspectRatio
+		}
 	}
 	return choice
 }

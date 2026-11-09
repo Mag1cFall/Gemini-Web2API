@@ -15,6 +15,8 @@ type stopCutter struct {
 	matched   string
 	// cutAt 是命中的停止序列在正文中的起点
 	cutAt int
+	// toolCalls 表示回答可能含调用块，停止序列只在调用块之前生效
+	toolCalls bool
 }
 
 // newStopCutter 返回按非空停止序列截断正文的 stopCutter，没有停止序列时为 nil
@@ -35,13 +37,19 @@ func (s *stopCutter) cut(text string) (string, bool) {
 		s.sent = 0
 	}
 	s.text = text
+	limit := len(text)
+	if s.toolCalls {
+		if location := firstCallStart(text); location != nil {
+			limit = location[0]
+		}
+	}
 	end := len(text)
 	for _, sequence := range s.sequences {
-		if index := strings.Index(text, sequence); index >= 0 && (s.matched == "" || index < end) {
+		if index := strings.Index(text[:limit], sequence); index >= 0 && (s.matched == "" || index < end) {
 			end, s.matched, s.cutAt = index, sequence, index
 		}
 	}
-	if s.matched == "" {
+	if s.matched == "" && limit == len(text) {
 		for _, sequence := range s.sequences {
 			for size := min(len(sequence)-1, len(text)); size > 0; size-- {
 				if strings.HasSuffix(text, sequence[:size]) {

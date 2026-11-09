@@ -149,7 +149,10 @@ func useIncrementalVacuum(db *sql.DB) error {
 	return nil
 }
 
-// reclaim 把空闲页交还文件系统并截短 WAL 文件，incremental_vacuum 每交还一页返回一行，读完全部行才交还全部空闲页
+// walTruncateFrames 是定时回收截短 WAL 文件的帧数下限，约 16 MB
+const walTruncateFrames = 4096
+
+// reclaim 把空闲页交还文件系统并做不等待读事务的被动检查点，WAL 达到 walTruncateFrames 且已全部写回时截短文件；incremental_vacuum 每交还一页返回一行，读完全部行才交还全部空闲页
 func reclaim(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, `PRAGMA incremental_vacuum`)
 	if err != nil {
@@ -159,6 +162,13 @@ func reclaim(ctx context.Context, db *sql.DB) error {
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return fmt.Errorf("交还空闲页: %w", err)
+	}
+	var busy, frames, checkpointed int
+	if err := db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &checkpointed); err != nil {
+		return fmt.Errorf("写回 WAL: %w", err)
+	}
+	if busy != 0 || frames < walTruncateFrames || checkpointed != frames {
+		return nil
 	}
 	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return fmt.Errorf("截短 WAL: %w", err)

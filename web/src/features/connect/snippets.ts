@@ -88,6 +88,62 @@ export function opencodeConfig(input: SnippetInput) {
   )
 }
 
+// openclawConfig 是 OpenClaw 的配置文件，默认模型为所选模型
+export function openclawConfig(input: SnippetInput) {
+  return JSON.stringify(
+    {
+      agents: { defaults: { model: { primary: 'gemini-web2api/' + input.model } } },
+      models: {
+        providers: {
+          'gemini-web2api': {
+            baseUrl: input.origin + '/v1',
+            apiKey: input.key,
+            api: 'openai-completions',
+            models: input.models,
+          },
+        },
+      },
+    },
+    null,
+    2,
+  )
+}
+
+// ompModels 是 omp 的模型配置文件，经 Gemini 协议接入
+export function ompModels(input: SnippetInput) {
+  return [
+    'providers:',
+    '  gemini-web2api:',
+    `    baseUrl: ${input.origin}/v1beta`,
+    '    api: google-generative-ai',
+    '    apiKey: GEMINI_WEB2API_KEY',
+    '    models:',
+    ...input.models.map((model) => `      - id: ${model.id}`),
+  ].join('\n')
+}
+
+// ompEnv 是设置 key 后启动 omp 的终端命令
+export function ompEnv(input: SnippetInput, shell: Shell) {
+  return envBlock(
+    shell,
+    [['GEMINI_WEB2API_KEY', input.key]],
+    `omp --provider gemini-web2api --model ${input.model}`,
+  )
+}
+
+// magpieImport 是把本服务导入 Magpie 的命令，模型由 Magpie 从 /v1/models 读取
+export function magpieImport(input: SnippetInput) {
+  const query = new URLSearchParams({
+    name: 'Gemini-Web2API',
+    chat: input.origin + '/v1',
+    responses: input.origin + '/v1',
+    anthropic: input.origin,
+    gemini: input.origin + '/v1beta',
+    key: input.key,
+  })
+  return `magpie import 'magpie://import?${query.toString()}'`
+}
+
 // curlOpenai 是 OpenAI Chat Completions 的流式请求
 export function curlOpenai(input: SnippetInput) {
   return [

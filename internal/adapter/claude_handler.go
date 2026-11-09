@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -100,15 +101,15 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 							thinkingOpen = true
 						}
 						return processor.ProcessEvent(event)
-					}, processor.EmitError)
+					})
 				},
-				projection.hasVisibleOutput,
+				projection,
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
 				if stream.reject() {
 					writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
-				} else if !projection.errorSent {
+				} else {
 					_ = processor.EmitErrorType(claudeUpstreamType(err), streamFailure(c, err))
 				}
 				return
@@ -190,6 +191,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
+		defer startNonstreamKeepalive(c)()
 		result, accountID, err := runGeneration(
 			c.Request.Context(), pool, sessionKey, previousResponsePolicy(request.PreviousResponseID), request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 			func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
@@ -240,8 +242,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			blocks = append(blocks, claude.ContentBlock{Type: "text", Text: content})
 		}
 		for _, call := range calls {
-			var input map[string]interface{}
-			_ = json.Unmarshal(call.Arguments, &input)
+			input := claudeToolInput(call.Arguments)
 			blocks = append(blocks, claude.ContentBlock{Type: "tool_use", ID: call.ID, Name: call.Name, Input: &input})
 		}
 		stopReason := "end_turn"
@@ -360,8 +361,21 @@ func claudeToolNames(messages []claude.Message) map[string]string {
 	return names
 }
 
+// claudeToolInput 解码工具调用参数，数字保持原文
+func claudeToolInput(arguments json.RawMessage) map[string]interface{} {
+	decoder := json.NewDecoder(bytes.NewReader(arguments))
+	decoder.UseNumber()
+	var input map[string]interface{}
+	_ = decoder.Decode(&input)
+	return input
+}
+
 func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
-	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice), Stop: request.StopSequences}
+	var parallel struct {
+		Disable bool `json:"disable_parallel_tool_use"`
+	}
+	_ = json.Unmarshal(request.ToolChoice, &parallel)
+	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice), Stop: request.StopSequences, SingleCall: parallel.Disable}
 	webTool := false
 	for _, tool := range request.Tools {
 		if tool.IsWebSearch() {
@@ -374,6 +388,7 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 			kind = strings.ToLower(*tool.Type)
 		}
 		if anthropicServerTool(kind) {
+			bridge.URLContext = bridge.URLContext || strings.HasPrefix(kind, "web_fetch_")
 			continue
 		}
 		if tool.Name == nil || *tool.Name == "" {
@@ -402,7 +417,10 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 		}
 		bridge.JSONSchema = format.Schema
 	}
-	choice := strings.ToLower(strings.TrimSpace(bridge.Choice))
+	if bridge.hasTool(bridge.explicitTool()) {
+		return bridge, nil
+	}
+	choice := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(bridge.Choice), explicitChoicePrefix))
 	switch choice {
 	case "web_search", "web_search_20250305", "google_search":
 		if !webTool {
@@ -411,14 +429,12 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 		bridge.RequireWebSearch = true
 		bridge.Choice = "auto"
 	case "any", "required":
-		if webTool && len(request.Tools) == 1 {
+		if webTool && len(bridge.Definitions) == 0 {
 			bridge.RequireWebSearch = true
 			bridge.Choice = "auto"
-		} else if webTool {
-			return ToolBridge{}, fmt.Errorf("web_search 与其他工具组合时不支持 tool_choice=%s", choice)
 		}
 	}
-	return bridge, nil
+	return bridge, bridge.checkExplicitTool()
 }
 
 func claudeToolChoice(raw json.RawMessage) string {
@@ -428,7 +444,7 @@ func claudeToolChoice(raw json.RawMessage) string {
 	}
 	if json.Unmarshal(raw, &choice) == nil {
 		if choice.Name != "" {
-			return choice.Name
+			return explicitChoicePrefix + choice.Name
 		}
 		if choice.Type != "" {
 			return choice.Type

@@ -101,9 +101,7 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 			})
 		}
 	}
-	if err := store.SaveSessions(context.Background(), sessions); err != nil {
-		logging.Warn(logging.SourceService, "保存会话失败", "错误", err)
-	}
+	store.SaveSessions(sessions)
 }
 
 // configureCooldownStore 让账号与模型冷却写入账本库，并恢复上次运行保存的未结束冷却

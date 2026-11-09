@@ -534,7 +534,7 @@ func (r *Request) Finish(httpStatus int, clientGone bool) RequestInfo {
 	r.finished = true
 	now := time.Now()
 	switch {
-	case clientGone && !r.detached || r.canceled:
+	case clientGone && !r.detached && (!r.failed || r.info.Status == StatusClientClosed) || r.canceled:
 		r.info.State, r.info.Status = StateCancelled, StatusClientClosed
 	case r.failed || httpStatus >= 400:
 		r.info.State = StateFailed

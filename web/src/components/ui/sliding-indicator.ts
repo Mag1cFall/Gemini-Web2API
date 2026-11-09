@@ -21,7 +21,8 @@ export function useSlidingIndicator<C extends HTMLElement, I extends HTMLElement
       const left = fit
         ? item.offsetLeft
         : item.offsetLeft + (item.offsetWidth - bar.offsetWidth) / 2
-      bar.style.transform = `translateX(${String(left)}px)`
+      const top = item.offsetTop + item.offsetHeight - root.clientHeight
+      bar.style.transform = `translate(${String(left)}px, ${String(top)}px)`
       bar.style.opacity = '1'
     }
     place()

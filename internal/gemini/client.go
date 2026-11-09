@@ -20,6 +20,7 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
@@ -388,22 +389,30 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		}
 		trace.SetStage("上传附件")
 	}
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(uploadLimit)
 	for index := range request.Files {
 		file := &request.Files[index]
-		if file.URL == "" {
-			uploaded, err := c.uploadFile(ctx, bootstrap, *file)
-			if err != nil {
-				return uploadFailed(err)
+		group.Go(func() error {
+			if file.URL == "" {
+				uploaded, err := c.uploadFile(groupCtx, bootstrap, *file)
+				if err != nil {
+					return err
+				}
+				*file = uploaded
 			}
-			*file = uploaded
-		}
-		if file.FileID == "" {
-			fileID, err := c.processFile(ctx, bootstrap, model, request.ThinkingLevel, *file)
-			if err != nil {
-				return uploadFailed(err)
+			if file.FileID == "" {
+				fileID, err := c.processFile(groupCtx, bootstrap, model, request.ThinkingLevel, *file)
+				if err != nil {
+					return err
+				}
+				file.FileID = fileID
 			}
-			file.FileID = fileID
-		}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return uploadFailed(err)
 	}
 	if uploads > 0 {
 		trace.Stage("附件上传完成", "数量", uploads, "大小", formatBytes(uploadBytes), "耗时", time.Since(uploadStarted))
@@ -513,7 +522,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if err == nil && decoder.background && !request.researchConfirm {
 		err = c.awaitTurn(ctx, decodeState, nil, model, request.ThinkingLevel, nil, request.researchPlan, guard.Emit)
 	}
-	if snapshot := decodeState.Snapshot(); streamInterrupted(err) && !temporaryChat && !request.researchConfirm && snapshot.CID != "" && snapshot.RID != next.RID {
+	if snapshot := decodeState.Snapshot(); streamInterrupted(err) && !temporaryChat && !c.guest && !request.researchConfirm && snapshot.CID != "" && snapshot.RID != next.RID {
 		trace.Stage("生成流中断，读取会话取回回答", "原因", err)
 		err = c.awaitTurn(ctx, decodeState, decoder, model, request.ThinkingLevel, nil, request.researchPlan, guard.Emit)
 	}

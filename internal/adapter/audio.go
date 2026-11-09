@@ -437,15 +437,11 @@ func streamTranscription(c *gin.Context, pool *balancer.AccountPool, request tra
 		func(event gemini.Event) error {
 			return projection.project(event, func(event gemini.Event) error {
 				return writeSSEJSON(c.Writer, gin.H{"type": "transcript.text.delta", "delta": event.Delta})
-			}, func(err error) error {
-				return writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "upstream_rewrite", err)
 			})
-		}, projection.hasVisibleOutput)
+		}, projection)
 	c.Set("account_id", accountID)
 	if err != nil {
-		if !projection.errorSent {
-			_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
-		}
+		_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
 		return
 	}
 	primary := result.Accumulator.Primary()

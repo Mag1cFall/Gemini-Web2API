@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -120,10 +121,13 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			turns = responsesHistoryTurns(request.Input)
 			sessionKey = continuedHistoryKey(request.Instructions, bridge, turns)
 		}
-		rebuilt := rebuiltResponsesRequest(c.Request.Context(), store, request)
+		rebuilt, instructionsChanged := rebuiltResponsesRequest(c.Request.Context(), store, request)
 		policy := previousResponsePolicy(request.PreviousResponseID)
 		if rebuilt != nil {
 			policy = sessionRebuild
+			if instructionsChanged {
+				sessionKey = ""
+			}
 		}
 		responseID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
@@ -165,6 +169,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			if err := writer.startWith(responseID, streamModel, created, startStatus, request); err != nil {
 				return
 			}
+			stream.setFrame(writer.progressFrame())
 			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
 				ctx, pool, sessionKey, policy, request.Model, responseID, media, thinkingLevel, bridge,
@@ -182,11 +187,9 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 					}
 					return projection.project(event, func(event gemini.Event) error {
 						return writer.live(event)
-					}, func(err error) error {
-						return writer.fail(err)
 					})
 				},
-				projection.hasVisibleOutput,
+				projection,
 			)
 			c.Set("account_id", accountID)
 			if err != nil {
@@ -194,21 +197,16 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 					writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 					return
 				}
-				if !projection.errorSent {
-					_ = writer.fail(streamFailure(c, err))
-				}
-				saveFailedResponse(ctx, store, request, responseID, created, publicError(c, err))
+				saveFailedResponse(ctx, store, request, responseID, created, writer.fail(c, err))
 				return
 			}
 			if err := inlineResultMedia(ctx, &result); err != nil {
-				_ = writer.fail(streamFailure(c, err))
-				saveFailedResponse(ctx, store, request, responseID, created, publicError(c, err))
+				saveFailedResponse(ctx, store, request, responseID, created, writer.fail(c, err))
 				return
 			}
 			response, err := buildResponsesObject(responseID, created, request.PreviousResponseID, result, bridge, includeThoughts)
 			if err != nil {
-				_ = writer.fail(streamFailure(c, err))
-				saveFailedResponse(ctx, store, request, responseID, created, publicError(c, err))
+				saveFailedResponse(ctx, store, request, responseID, created, writer.fail(c, err))
 				return
 			}
 			rememberHistory(pool, result, request.Instructions, bridge, turns)
@@ -217,11 +215,12 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 				saveResponse(ctx, store, request, responseID, created, response)
 			}
 			if err := writer.finishProjected(response, result.Accumulator, projection); err != nil {
-				_ = writer.fail(streamFailure(c, err))
+				writer.fail(c, err)
 			}
 			return
 		}
 
+		defer startNonstreamKeepalive(c)()
 		result, accountID, err := runGeneration(
 			ctx, pool, sessionKey, policy, request.Model, responseID, media, thinkingLevel, bridge,
 			responsesPrompt(c, request, rebuilt, sessionKey, bridge), nil, nil,
@@ -250,12 +249,12 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 	}
 }
 
-// responsesPrompt 返回 Responses 请求的提示词构造函数：新建会话且请求可由响应链重建时用重建后的完整输入
+// responsesPrompt 返回 Responses 请求的提示词构造函数：请求可由响应链重建时用重建后的完整输入
 func responsesPrompt(c *gin.Context, request ResponsesRequest, rebuilt *ResponsesRequest, sessionKey string, bridge ToolBridge) func(*gemini.Client, bool) (string, []gemini.FileData, error) {
+	if rebuilt != nil {
+		request = *rebuilt
+	}
 	return func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
-		if !continuation && rebuilt != nil {
-			return buildResponsesPrompt(c, client, *rebuilt, false, bridge.declared(false))
-		}
 		return buildResponsesPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(sessionKey)))
 	}
 }
@@ -265,7 +264,7 @@ func buildResponsesPrompt(c *gin.Context, client *gemini.Client, request Respons
 	if err != nil {
 		return "", nil, err
 	}
-	messages, err := responsesMessages(input)
+	messages, err := responsesMessages(input, bridge.Definitions)
 	if err != nil {
 		return "", nil, err
 	}
@@ -277,7 +276,13 @@ func buildResponsesPrompt(c *gin.Context, client *gemini.Client, request Respons
 	return buildOpenAIChatPrompt(c, client, chatRequest, continuation, bridge)
 }
 
-func responsesMessages(raw json.RawMessage) ([]ChatMessage, error) {
+func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]ChatMessage, error) {
+	qualified := func(namespace, name string) string {
+		if full := namespace + "." + name; namespace != "" && slices.ContainsFunc(definitions, func(tool ToolDefinition) bool { return tool.Name == full }) {
+			return full
+		}
+		return name
+	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
@@ -300,6 +305,7 @@ func responsesMessages(raw json.RawMessage) ([]ChatMessage, error) {
 			CallID    string          `json:"call_id"`
 			Output    json.RawMessage `json:"output"`
 			Name      string          `json:"name"`
+			Namespace string          `json:"namespace"`
 			Arguments string          `json:"arguments"`
 			Result    string          `json:"result"`
 			Input     string          `json:"input"`
@@ -317,13 +323,13 @@ func responsesMessages(raw json.RawMessage) ([]ChatMessage, error) {
 			messages = append(messages, ChatMessage{Role: "tool", Content: envelope.Output, ToolCallID: envelope.CallID})
 		case "function_call":
 			arguments := envelope.Arguments
-			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(envelope.CallID, envelope.Name, arguments)}})
+			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(envelope.CallID, qualified(envelope.Namespace, envelope.Name), arguments)}})
 		case "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call":
 			name, arguments := responsesClientCall(envelope.Type, envelope.Input, envelope.Action, envelope.Operation)
 			if name == "" {
 				name = envelope.Name
 			}
-			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(cmp.Or(envelope.CallID, envelope.ID), name, arguments)}})
+			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(cmp.Or(envelope.CallID, envelope.ID), qualified(envelope.Namespace, name), arguments)}})
 		case "custom_tool_call_output", "local_shell_call_output", "shell_call_output", "apply_patch_call_output":
 			output := envelope.Output
 			if envelope.Type == "apply_patch_call_output" {
@@ -368,7 +374,7 @@ func responsesPriorToolCall(id string, name string, arguments string) OpenAITool
 }
 
 func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
-	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice)}
+	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), SingleCall: request.ParallelToolCalls != nil && !*request.ParallelToolCalls}
 	addFunction := func(tool ResponsesTool, namespace string) error {
 		if tool.Name == "" {
 			return fmt.Errorf("function 工具 name 不能为空")
@@ -440,7 +446,11 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 	if err := restrictAllowedTools(&bridge, request.ToolChoice); err != nil {
 		return ToolBridge{}, err
 	}
-	choice := strings.ToLower(strings.TrimSpace(bridge.Choice))
+	qualifyNamespaces(bridge.Definitions)
+	if bridge.hasTool(bridge.explicitTool()) {
+		return bridge, nil
+	}
+	choice := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(bridge.Choice), explicitChoicePrefix))
 	hostedChoice := false
 	switch choice {
 	case "image_generation":
@@ -468,18 +478,18 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 				hosted++
 			}
 		}
-		if hosted > 0 && hosted+len(bridge.Definitions) > 1 {
-			return ToolBridge{}, fmt.Errorf("内置工具与其他工具组合时不支持 tool_choice=%s", choice)
+		hostedChoice = hosted > 0 && len(bridge.Definitions) == 0
+		if hostedChoice && hosted == 1 {
+			bridge.RequireImageGeneration = bridge.ImageGeneration
+			bridge.RequireCodeExecution = bridge.CodeExecution
+			bridge.RequireWebSearch = bridge.WebSearch
 		}
-		bridge.RequireImageGeneration = bridge.ImageGeneration
-		bridge.RequireCodeExecution = bridge.CodeExecution
-		bridge.RequireWebSearch = bridge.WebSearch
-		hostedChoice = hosted > 0
+		bridge.RequireHostedTool = hostedChoice && hosted > 1
 	}
 	if hostedChoice {
 		bridge.Choice = "auto"
 	}
-	return bridge, nil
+	return bridge, bridge.checkExplicitTool()
 }
 
 func buildResponsesObject(id string, created int64, previousResponseID string, result generationResult, bridge ToolBridge, includeThoughts bool) (gin.H, error) {
@@ -706,6 +716,12 @@ func (w *responseSequenceWriter) startWith(responseID string, model string, crea
 	return w.emit("response.in_progress", gin.H{"response": running})
 }
 
+// progressFrame 返回上游静默时重发的 response.in_progress 帧，序号沿用开场事件
+func (w *responseSequenceWriter) progressFrame() []byte {
+	data, _ := json.Marshal(gin.H{"type": "response.in_progress", "sequence_number": 1, "response": responseShell(w.responseID, w.model, w.created, "in_progress")})
+	return fmt.Appendf(nil, "event: response.in_progress\ndata: %s\n\n", data)
+}
+
 func (w *responseSequenceWriter) live(event gemini.Event) error {
 	if event.Kind == gemini.EventThought {
 		return w.reasoningDelta(event.Delta)
@@ -777,14 +793,16 @@ func (w *responseSequenceWriter) ensureOutputItem(id string, item gin.H) (int, e
 	return index, nil
 }
 
-func (w *responseSequenceWriter) fail(err error) error {
-	if err == nil || w.failed {
-		return nil
+// fail 写出 response.failed 并返回其 error 对象
+func (w *responseSequenceWriter) fail(c *gin.Context, err error) gin.H {
+	failure := responsesFailure(c, err)
+	if !w.failed {
+		w.failed = true
+		response := responseShell(w.responseID, w.model, w.created, "failed")
+		response["error"] = failure
+		_ = w.emit("response.failed", gin.H{"response": response})
 	}
-	w.failed = true
-	response := responseShell(w.responseID, w.model, w.created, "failed")
-	response["error"] = gin.H{"code": "server_error", "message": err.Error()}
-	return w.emit("response.failed", gin.H{"response": response})
+	return failure
 }
 
 func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *EventAccumulator, projection *streamProjection) error {
@@ -795,7 +813,7 @@ func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *Ev
 		}
 	}
 	output, _ := response["output"].([]gin.H)
-	if projection.bufferText && projection.emittedText {
+	if projection.bufferText && projection.sentText.Len() > 0 {
 		for _, item := range output {
 			if item["type"] != "message" {
 				continue
@@ -1015,9 +1033,6 @@ func unsupportedResponsesParameters(request ResponsesRequest) []string {
 	}
 	if request.Truncation != "" {
 		fields = append(fields, "truncation")
-	}
-	if request.ParallelToolCalls != nil {
-		fields = append(fields, "parallel_tool_calls")
 	}
 	for index, tool := range request.Tools {
 		if tool.Type != "image_generation" {

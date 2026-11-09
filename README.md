@@ -14,7 +14,7 @@
 - **函数工具**：四种协议的函数工具经网页提示词桥接，模型在调用前写的说明随调用一起返回，调用无法解析时在首个可见输出前换账号重试
 - **图片能力**：支持多模态输入、图片生成和图片编辑，生成图返回官网“下载原图”的原尺寸图片
 - **官网工具**：Create video、Create music、Canvas、Deep Research、Guided Learning 与 Task 模式以独立模型 ID 提供
-- **多账户负载均衡**：按模型可用性调度多个 Google 账户，用量上限与频率限制只冷却对应模型，并发数与调度策略可配置
+- **多账户负载均衡**：按模型可用性调度多个 Google 账户，用量上限只冷却对应模型，频率限制冷却整个账号，并发数与调度策略可配置
 - **访客会话**：没有可用账号时以 Gemini 网页的未登录会话提供官网未登录可用的模型（当前为 `gemini-3.5-flash-lite`，不含官网工具与附件上传），账号就绪后优先使用账号
 - **管理端与桌面版**：网页管理端提供各客户端的接入配置、实时日志、活动请求、用量与费用统计、账号导入与管理、模型目录、设置与 Playground；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
 - **运行日志**：彩色分列控制台日志，逐请求记录开始、选号、上传、首个输出、换号、等待与结束
@@ -44,7 +44,7 @@
 - **模型目录**：服务启动时读取各账号的 Gemini Web 模型目录与官网工具，运行后以 `/v1/models` 为准；模型 ID 由官网显示名称生成，账号收到新模型后自动公开
 - **目录字段**：`available_account_count` 是可用账号数，`default` 标出默认模型，`thinking_levels` 列出可选思考强度
 - **工具模型**：工具 ID 只在账号具备对应官网工具时出现，由该账号的官网默认模型执行
-- **图片**：图片 ID 用于对话生图和 `/v1/images/*`，`size` 与 `imageConfig.aspectRatio` 支持 1:1、9:16、3:4、4:3、16:9
+- **图片**：图片 ID 用于对话生图和 `/v1/images/*`，`size` 与 `imageConfig.aspectRatio` 支持 1:1、9:16、3:4、4:3、16:9、2:3、21:9、1:8、8:1
 - **视频**：视频 ID 的 `imageConfig.aspectRatio` 支持横向 16:9 与竖向 9:16
 - **会话历史**：Task、Deep Research 与视频请求使用普通会话，对话保存在账号历史中
 - **Deep Research**：研究计划与进度作为思考内容返回，报告作为正文返回，报告中的引用以各协议的引用字段给出网页来源；一次通常需要十几分钟，客户端请求超时要设得更长
@@ -257,6 +257,8 @@ DELETE /v1beta/files/{name}
 GET    /v1beta/models
 ```
 
+`/v1/models/{model}:generateContent` 等路径与 `/v1beta` 相同（google-genai 3.x 的默认路径），`GET /v1/models` 与 `/v1/files` 带 `x-goog-api-key` 时按 Gemini 形状返回。
+
 `streamGenerateContent` 不带 `alt=sse` 时返回 JSON 数组。上传的文件以 `fileData.fileUri` 引用，YouTube 链接按官网读取视频内容。`predictLongRunning` 使用 `gemini-video`。
 
 ### MCP
@@ -279,7 +281,7 @@ GET  /readyz
 
 浏览器打开 `http://127.0.0.1:8007/` 进入管理端，页面使用 `/api/*` 接口。
 
-- **接入**：“接入”页列出三种协议的 base URL，并按所选模型给出 Claude Code、Codex、OpenCode、Cherry Studio、SillyTavern 与 curl 的现成配置；“连通测试”用所选 API key 读取模型列表并向所选模型发一条最短的请求，逐条显示结果、耗时与错误原因
+- **接入**：“接入”页列出三种协议的 base URL，并按所选模型给出 Claude Code、Codex、OpenCode、OpenClaw、omp、Magpie、Cherry Studio、SillyTavern 与 curl 的现成配置；“连通测试”用所选 API key 读取模型列表并向所选模型发一条最短的请求，逐条显示结果、耗时与错误原因
 - **导入账号**：粘贴 Cookie 后自动识别其中登录的账号，勾选后导入；导入在服务端后台运行，离开页面后继续，页面显示每个账号的进度与失败原因
 - **预热**：“全部账号”页的“预热”对选中的账号与模型各发一条最小生成请求，逐行显示结果、耗时与失败原因，请求计入请求记录
 - **监听端口**：配置的端口落在 Windows 的系统保留端口段（Hyper-V、WSL2、Docker）时，服务改用其后第一个可用端口，管理端顶部显示实际地址
@@ -336,12 +338,14 @@ build/               # 桌面版图标与打包配置
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `GEMINI_SAVE_HISTORY` | 是否写入 Gemini 官网历史记录 | `false` |
+| `NONSTREAM_KEEPALIVE` | 非流式请求等待结果期间每 10 秒写出一个换行 | `true` |
+| `FAKE_STREAM` | 流式请求收齐完整结果后再按流式输出 | `false` |
 | `GEMINI_AUTH_STATES` | 认证文件或目录，多个路径用逗号分隔 | `auth` |
 | `LISTEN_ADDR` | 服务监听地址 | `127.0.0.1:8007` |
 | `PROXY_API_KEY` | 本地 2API 访问密钥，多个 key 用逗号分隔 | 空 |
 | `PROXY` | 代理池，多个代理用逗号分隔 | 空 |
 | `MODEL_MAPPING` | 外部模型名到当前模型 ID 的映射 | 空 |
-| `ACCOUNT_COOLDOWN` | 账号失败后的冷却时间，上游频率限制最多冷却 1 分钟 | `2m` |
+| `ACCOUNT_COOLDOWN` | 账号失败后的冷却时间，上游频率限制从 1 分钟起连续翻倍，最长 10 分钟 | `2m` |
 | `SESSION_TTL` | 显式会话状态的存活时间 | `30m` |
 | `INIT_TIMEOUT` | 单账号启动初始化超时 | `20s` |
 | `PER_ACCOUNT_CONCURRENCY` | 每个账号同时进行的上游请求数；等待上游首个输出满 1 分钟的请求让出名额，每个账号同时让出一个 | `1` |

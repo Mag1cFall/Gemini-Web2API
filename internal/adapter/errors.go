@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -40,6 +41,9 @@ func scopeOf(c *gin.Context) (requestScope, bool) {
 
 // upstreamStatus 返回上游错误对应的 HTTP 状态，账号上下文窗口不足按请求过长返回 400
 func upstreamStatus(err error) int {
+	if errors.Is(err, context.Canceled) {
+		return logging.StatusClientClosed
+	}
 	if isAccountContextError(err) {
 		return http.StatusBadRequest
 	}
@@ -196,19 +200,39 @@ func setRetryAfter(c *gin.Context, status int) {
 	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
 		return
 	}
+	if seconds := retryAfterSeconds(c); seconds > 0 {
+		c.Header("Retry-After", strconv.Itoa(seconds))
+	}
+}
+
+// retryAfterSeconds 返回请求模型最早结束冷却的秒数，没有冷却中的账号时为 0
+func retryAfterSeconds(c *gin.Context) int {
 	scope, ok := scopeOf(c)
 	if !ok {
-		return
+		return 0
 	}
 	until := scope.pool.RetryAfter(c.Request.Context(), config.MapModel(scope.model))
 	if until.IsZero() {
-		return
+		return 0
 	}
-	seconds := int(math.Ceil(time.Until(until).Seconds()))
-	if seconds < 1 {
-		seconds = 1
+	return max(int(math.Ceil(time.Until(until).Seconds())), 1)
+}
+
+// responsesErrorCode 返回 Responses 失败对象的错误码，限流与上下文超限按 OpenAI 错误码写出，其余为 server_error
+func responsesErrorCode(err error) string {
+	if code := openAIUpstreamCode(err); code == "rate_limit_exceeded" || code == "context_length_exceeded" {
+		return code
 	}
-	c.Header("Retry-After", strconv.Itoa(seconds))
+	return "server_error"
+}
+
+// responsesFailure 记录流式响应头发出后的失败并返回 response.failed 的 error 对象，限流时正文按 OpenAI 措辞写明等待秒数
+func responsesFailure(c *gin.Context, err error) gin.H {
+	code, message := responsesErrorCode(err), streamFailure(c, err).Error()
+	if seconds := retryAfterSeconds(c); code == "rate_limit_exceeded" && seconds > 0 {
+		message = fmt.Sprintf("%s Please try again in %ds.", message, seconds)
+	}
+	return gin.H{"code": code, "message": message}
 }
 
 // upstreamURLPattern 匹配 Go HTTP 客户端错误中的请求方法与 URL 前缀

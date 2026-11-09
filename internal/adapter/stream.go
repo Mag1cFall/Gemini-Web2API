@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
@@ -56,6 +58,9 @@ type outputMismatchError struct {
 func (e *outputMismatchError) Error() string { return e.err.Error() }
 func (e *outputMismatchError) Unwrap() error { return e.err }
 
+// errSnapshotDiverged 是上游改写了已发给客户端的内容且找不到继续输出的位置时的错误，生成循环据此按已发出内容接续生成
+var errSnapshotDiverged = &gemini.ProtocolError{HTTPStatus: 502, Message: "Gemini Web 改写了已发出的内容"}
+
 type streamProjection struct {
 	bridge        ToolBridge
 	bufferText    bool
@@ -65,26 +70,30 @@ type streamProjection struct {
 	// heldText 是已到达但可能属于调用块开头的正文尾部
 	heldText       string
 	includeThought bool
-	emittedText    bool
-	emittedThought bool
-	textRunes      int
-	visibleOutput  bool
-	errorSent      bool
+	// sentText 是已发出的正文
+	sentText strings.Builder
+	// sentThought 是已发出的思考
+	sentThought strings.Builder
+	// textRunes 是已发出的正文在当前正文快照中的 rune 位置
+	textRunes int
+	// textRewritten 表示上游改写过已发出的正文
+	textRewritten bool
+	visibleOutput bool
 }
 
 func newStreamProjection(bridge ToolBridge, includeThought bool) *streamProjection {
 	disallowHostedTools := bridge.disallowsHostedTools()
-	holdAll := len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 || bridge.WebSearch || bridge.RequireImageGeneration || bridge.RequireCodeExecution || disallowHostedTools
+	holdAll := len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 || bridge.WebSearch || bridge.RequireImageGeneration || bridge.RequireCodeExecution || bridge.RequireHostedTool || disallowHostedTools || fakeStream.Load()
 	return &streamProjection{
 		bridge:         bridge,
 		bufferText:     len(bridge.Definitions) > 0 || holdAll,
-		bufferThought:  bridge.RequireImageGeneration || disallowHostedTools,
+		bufferThought:  bridge.RequireImageGeneration || disallowHostedTools || fakeStream.Load(),
 		gateCalls:      len(bridge.Definitions) > 0 && !holdAll,
 		includeThought: includeThought,
 	}
 }
 
-func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) error, emitError func(error) error) error {
+func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) error) error {
 	if usageOnly(event) && !p.visibleOutput {
 		*p = *newStreamProjection(p.bridge, p.includeThought)
 		return nil
@@ -103,86 +112,208 @@ func (p *streamProjection) project(event gemini.Event, emit func(gemini.Event) e
 	if event.Kind == gemini.EventThought && !p.includeThought {
 		return nil
 	}
-	if event.Kind == gemini.EventText && p.gateCalls && event.Operation == gemini.SnapshotAppend {
-		safe, held, call := splitCallGate(p.heldText + event.Delta)
+	if event.Operation != gemini.SnapshotAppend {
+		var aligned bool
+		if event, aligned = p.realign(event); !aligned {
+			return errSnapshotDiverged
+		}
+	}
+	if event.Kind == gemini.EventText && p.gateCalls {
+		safe, held, call := splitCallGate(p.sentText.String(), p.heldText+event.Delta)
 		p.heldText = held
 		p.gateCalls = !call
 		if safe == "" {
 			return nil
 		}
 		event.Delta = safe
-		if err := emit(event); err != nil {
-			return err
-		}
-		p.emittedText = true
-		p.textRunes += len([]rune(safe))
-		p.visibleOutput = true
-		return nil
+		return p.send(event, emit)
 	}
-	buffered := &p.bufferText
-	emitted := &p.emittedText
+	buffered := p.bufferText
 	if event.Kind == gemini.EventThought {
-		buffered = &p.bufferThought
-		emitted = &p.emittedThought
+		buffered = p.bufferThought
 	}
-	if event.Operation == gemini.SnapshotAppend {
-		if event.Kind == gemini.EventText && !p.emittedText && strings.TrimSpace(event.Delta) == "" {
+	if event.Kind == gemini.EventText && p.sentText.Len() == 0 {
+		event.Delta = p.heldText + event.Delta
+		if strings.TrimSpace(event.Delta) == "" {
+			p.heldText = event.Delta
 			return nil
 		}
-		if *buffered || event.Delta == "" {
-			return nil
-		}
-		if err := emit(event); err != nil {
-			return err
-		}
-		*emitted = true
-		if event.Kind == gemini.EventText {
-			p.textRunes += len([]rune(event.Delta))
-		}
-		p.visibleOutput = true
+		p.heldText = ""
+	}
+	if buffered || event.Delta == "" {
 		return nil
 	}
-	if event.Kind == gemini.EventText {
-		p.gateCalls = false
-	}
-	if !*emitted {
-		*buffered = true
-		return nil
-	}
-	err := fmt.Errorf("Gemini Web 在流式输出后改写了%s快照", streamEventName(event.Kind))
-	p.errorSent = true
-	if emitError != nil {
-		if writeErr := emitError(err); writeErr != nil {
-			return writeErr
-		}
-	}
-	return err
+	return p.send(event, emit)
 }
 
-func (p *streamProjection) hasVisibleOutput() bool {
-	return p.visibleOutput
+// keepSentText 在上游改写过已发出内容时把最终正文换成客户端收到的内容加上尚未发出的部分
+func (p *streamProjection) keepSentText(output *CandidateOutput) {
+	if !p.textRewritten {
+		return
+	}
+	text := []rune(output.Text)
+	output.Text = p.sentText.String() + string(text[min(p.textRunes, len(text)):])
+}
+
+// send 发出一段增量并记录已发出的内容
+func (p *streamProjection) send(event gemini.Event, emit func(gemini.Event) error) error {
+	if err := emit(event); err != nil {
+		return err
+	}
+	if event.Kind == gemini.EventThought {
+		p.sentThought.WriteString(event.Delta)
+	} else {
+		p.sentText.WriteString(event.Delta)
+		p.textRunes += len([]rune(event.Delta))
+	}
+	p.visibleOutput = true
+	return nil
+}
+
+// realign 把改写快照的事件换算成已发出内容之后的追加，并把发出位置移到已发出内容在新快照中的结尾，已发出内容保持客户端收到的原文，找不到结尾时 aligned 为 false
+func (p *streamProjection) realign(event gemini.Event) (result gemini.Event, aligned bool) {
+	sent := p.sentText.String()
+	if event.Kind == gemini.EventThought {
+		sent = p.sentThought.String()
+	}
+	snapshot := []rune(event.Snapshot)
+	position, aligned := alignedLength([]rune(sent), snapshot)
+	if !aligned {
+		return event, false
+	}
+	if event.Kind == gemini.EventText {
+		p.textRunes, p.heldText = position, ""
+		p.textRewritten = p.textRewritten || !strings.HasPrefix(event.Snapshot, sent)
+	}
+	event.Delta = string(snapshot[position:])
+	event.Operation = gemini.SnapshotAppend
+	return event, true
+}
+
+const (
+	// alignWindow 是重新定位时比较的已发出内容末尾的最大 rune 数
+	alignWindow = 200
+	// alignMinimum 是认定为同一段内容的最短末尾 rune 数
+	alignMinimum = 8
+)
+
+// alignedLength 返回已发出内容的结尾在新快照中的 rune 位置：已发出内容仍是快照前缀时为其长度，否则取其末尾在快照中最接近原位置的匹配，没有匹配时 aligned 为 false
+func alignedLength(sent, snapshot []rune) (position int, aligned bool) {
+	prefix := 0
+	for prefix < len(sent) && prefix < len(snapshot) && sent[prefix] == snapshot[prefix] {
+		prefix++
+	}
+	if prefix == len(sent) {
+		return prefix, true
+	}
+	text, expected := string(snapshot), len(string(sent))
+	distance := func(end int) int { return max(end-expected, expected-end) }
+	for size := min(len(sent), alignWindow); size >= alignMinimum; size-- {
+		tail := string(sent[len(sent)-size:])
+		best := -1
+		for offset := 0; ; {
+			index := strings.Index(text[offset:], tail)
+			if index < 0 {
+				break
+			}
+			if end := offset + index + len(tail); best < 0 || distance(end) < distance(best) {
+				best = end
+			}
+			offset += index + 1
+		}
+		if best >= 0 {
+			return utf8.RuneCountInString(text[:best]), true
+		}
+	}
+	return 0, false
+}
+
+// partialOutput 是上一次生成已发给客户端的内容，下一次生成接在它之后输出
+type partialOutput struct {
+	text    string
+	thought string
+}
+
+// resume 返回已发出的内容并恢复生成开始时的暂扣状态，暂扣的正文作废
+func (p *streamProjection) resume() partialOutput {
+	fresh := newStreamProjection(p.bridge, p.includeThought)
+	p.bufferText, p.bufferThought, p.gateCalls, p.heldText = fresh.bufferText, fresh.bufferThought, fresh.gateCalls, ""
+	return partialOutput{text: p.sentText.String(), thought: p.sentThought.String()}
+}
+
+// assistantTurnStart 是转录末尾留出的助手轮开头
+const assistantTurnStart = "<|im_start|>assistant\n"
+
+// resumeInstruction 是接着已发出内容生成时写在助手轮之前的系统说明
+const resumeInstruction = "上一次回答在输出途中被网络中断，下面的助手轮是已经发给用户的内容。从中断处的下一个字符接着写，不要重复已写内容，不要加任何说明。"
+
+// resumedPrompt 把已发出的正文写在提示词末尾的助手轮中，模型从中断处接着写
+func resumedPrompt(prompt, sent string) string {
+	prompt, transcript := strings.CutSuffix(prompt, assistantTurnStart)
+	if !transcript {
+		prompt = "<|im_start|>user\n" + strings.TrimRightFunc(prompt, unicode.IsSpace) + "\n<|im_end|>\n"
+	}
+	return prompt + "<|im_start|>system\n" + resumeInstruction + "\n<|im_end|>\n" + assistantTurnStart + sent
+}
+
+// resumeAligner 去掉接续生成开头对已发出正文的复述
+type resumeAligner struct {
+	sent    string
+	decided bool
+	skip    int
+	// held 是仍可能是复述而暂扣的快照
+	held string
+}
+
+// align 返回生成快照中接在已发出正文之后的部分，快照仍可能是复述时 ok 为 false
+func (a *resumeAligner) align(snapshot string) (rest string, ok bool) {
+	if !a.decided {
+		if strings.Contains(a.sent, snapshot) {
+			a.held = snapshot
+			return "", false
+		}
+		a.decide(snapshot)
+	}
+	return snapshot[min(a.skip, len(snapshot)):], true
+}
+
+// decide 按快照开头与已发出正文结尾的重合确定跳过的长度
+func (a *resumeAligner) decide(snapshot string) {
+	a.decided = true
+	for size := min(len(a.sent), len(snapshot)); size >= alignMinimum && a.skip == 0; size-- {
+		if strings.HasSuffix(a.sent, snapshot[:size]) {
+			a.skip = size
+		}
+	}
+}
+
+// finish 在生成结束时结算暂扣的快照，返回其中接在已发出正文之后的部分
+func (a *resumeAligner) finish() string {
+	if a.decided || a.held == "" {
+		return ""
+	}
+	a.decide(a.held)
+	return a.held[min(a.skip, len(a.held)):]
 }
 
 // partialCallPattern 匹配正文末尾可能是调用块开头前缀的部分
 var partialCallPattern = regexp.MustCompile(`\\?\[\s*(?:C(?:a(?:l(?:l\s*(?:\\?(?::[^\]\r\n\\]*\\?)?)?)?)?)?)?$|\\$`)
 
-// splitCallGate 把正文分为可以输出的部分与暂扣的尾部：出现调用块开头时从调用块起全部暂扣并报告 call；否则暂扣可能是调用块开头前缀的尾部与末尾空白
-func splitCallGate(text string) (safe string, held string, call bool) {
+// splitCallGate 把 sent 之后待输出的正文分为可以输出的部分与暂扣的尾部：代码以外出现调用块开头时从调用块起全部暂扣，前面有未闭合的反引号串时所在行写完才报告 call，其余情况立即报告；否则暂扣可能是调用块开头前缀的尾部与末尾空白
+func splitCallGate(sent, text string) (safe string, held string, call bool) {
 	cut := len(text)
-	if location := callStartPattern.FindStringIndex(text); location != nil {
-		cut, call = location[0], true
-	} else if location := partialCallPattern.FindStringIndex(text); location != nil {
+	if callStartPattern.MatchString(text) {
+		all := sent + text
+		if location := firstCallStart(all); location != nil {
+			_, unclosed := codeSpanAt(all, location[0])
+			cut, call = max(location[0]-len(sent), 0), !unclosed || strings.Contains(all[location[1]:], "\n")
+		}
+	}
+	if location := partialCallPattern.FindStringIndex(text); location != nil && !call && location[0] < cut {
 		cut = location[0]
 	}
 	cut = len(strings.TrimRightFunc(text[:cut], unicode.IsSpace))
 	return text[:cut], text[cut:], call
-}
-
-func streamEventName(kind gemini.EventKind) string {
-	if kind == gemini.EventThought {
-		return "思考"
-	}
-	return "文本"
 }
 
 // sessionPolicy 是带会话键的请求在会话未登记或无法续接时的处理方式
@@ -217,10 +348,10 @@ func runGeneration(
 	bridge ToolBridge,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
-	hasVisibleOutput func() bool,
+	projection *streamProjection,
 ) (generationResult, string, error) {
 	trace := logging.FromContext(ctx)
-	result, accountID, err := runGenerationAttempts(ctx, pool, sessionKey, policy, modelName, responseID, media, thinkingLevel, bridge, prepare, onEvent, hasVisibleOutput)
+	result, accountID, err := runGenerationAttempts(ctx, pool, sessionKey, policy, modelName, responseID, media, thinkingLevel, bridge, prepare, onEvent, projection)
 	err = accountSessionError(cancelledError(ctx, err))
 	if err != nil {
 		trace.Fail(upstreamStatus(err), err.Error())
@@ -266,10 +397,11 @@ func runGenerationAttempts(
 	bridge ToolBridge,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
-	hasVisibleOutput func() bool,
+	projection *streamProjection,
 ) (generationResult, string, error) {
 	trace := logging.FromContext(ctx)
 	trace.SetResponseID(responseID)
+	visibleOutput := func() bool { return projection != nil && projection.visibleOutput }
 	requestedModel := config.MapModel(modelName)
 	if err := modelKnown(pool, modelName); err != nil {
 		return generationResult{}, "", err
@@ -296,20 +428,38 @@ func runGenerationAttempts(
 		newSession = !exists
 	}
 
-	requestAttempts := 1
-	if sessionKey == "" || newSession {
-		requestAttempts = 2
-	}
 	excludedAccountIDs := make(map[string]struct{})
 	availableAccounts := pool.Size()
 	if availableAccounts == 0 {
-		return generationResult{}, "", &gemini.ProtocolError{HTTPStatus: 503, Message: "没有可用账号", Retryable: true}
+		return generationResult{}, "", noAccountError(ctx, pool, modelName)
+	}
+	requestAttempts := 1
+	if sessionKey == "" || newSession {
+		requestAttempts = availableAccounts
 	}
 	usedRequestAttempts := 0
 	regenerated, regenerating := 0, false
+	var resume partialOutput
 	lastAccountID := ""
 	var lastErr error
-	for len(excludedAccountIDs) < availableAccounts || regenerating {
+	// recoverAccounts 在账号都因频率限制不可用且一分钟内恢复时等待恢复并重新选号，首个可见输出之后不等待
+	recoverAccounts := func() bool {
+		if visibleOutput() || regenerated >= regenerations || !awaitAccountRecovery(ctx, pool, requestedModel) {
+			return false
+		}
+		regenerated++
+		usedRequestAttempts = 0
+		clear(excludedAccountIDs)
+		return true
+	}
+	// attemptsLeft 判断还能继续选号，账号都已试过且最后的错误是频率限制时先等待恢复
+	attemptsLeft := func() bool {
+		if len(excludedAccountIDs) < availableAccounts || regenerating {
+			return true
+		}
+		return upstreamStatus(lastErr) == http.StatusTooManyRequests && recoverAccounts()
+	}
+	for attemptsLeft() {
 		selectionKey := sessionKey
 		if newSession {
 			selectionKey = ""
@@ -328,19 +478,22 @@ func runGenerationAttempts(
 		if client == nil {
 			if sessionKey != "" && !newSession && accountID != "" {
 				if rebuildable {
-					sessionKey, newSession, requestAttempts = "", true, 2
+					sessionKey, newSession, requestAttempts = "", true, availableAccounts
 					continue
 				}
 				return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: fmt.Sprintf("会话所在账号 %s，会话没有保存的响应链，无法在其他账号续接", pool.AccountReason(ctx, accountID, requestedModel))}
 			}
+			if (lastErr == nil || upstreamStatus(lastErr) == http.StatusTooManyRequests) && recoverAccounts() {
+				continue
+			}
 			if lastErr != nil {
 				return generationResult{}, lastAccountID, lastErr
 			}
-			return generationResult{}, accountID, &gemini.ProtocolError{HTTPStatus: 503, Message: "没有可用账号", Retryable: true}
+			return generationResult{}, accountID, noAccountError(ctx, pool, requestedModel)
 		}
-		attemptSessionKey, attemptNewSession := sessionKey, newSession
+		attemptSessionKey, attemptNewSession, attemptResume := sessionKey, newSession, resume
 		run := func(ctx context.Context, client *gemini.Client, accountID string, emit func(gemini.Event) error) (generationResult, error) {
-			return runGenerationWithClient(ctx, pool, client, accountID, attemptSessionKey, attemptNewSession, requestedModel, responseID, media, thinkingLevel, bridge, prepare, emit)
+			return runGenerationWithClient(ctx, pool, client, accountID, attemptSessionKey, attemptNewSession, requestedModel, responseID, media, thinkingLevel, bridge, attemptResume, prepare, emit)
 		}
 		var target *hedgeTarget
 		if delay, ok := hedgeDelay(requestedModel); ok && (newSession || rebuildable) {
@@ -349,29 +502,42 @@ func runGenerationAttempts(
 				hedgeSessionKey = sessionKey
 			}
 			target = &hedgeTarget{delay: delay, excluded: excludedAccountIDs, run: func(ctx context.Context, client *gemini.Client, accountID string, emit func(gemini.Event) error) (generationResult, error) {
-				return runGenerationWithClient(ctx, pool, client, accountID, hedgeSessionKey, true, requestedModel, responseID, media, thinkingLevel, bridge, prepare, emit)
+				return runGenerationWithClient(ctx, pool, client, accountID, hedgeSessionKey, true, requestedModel, responseID, media, thinkingLevel, bridge, attemptResume, prepare, emit)
 			}}
 		}
 		result, winnerID, err := raceFirstEvent(ctx, pool, requestedModel, client, accountID, releaseRequest, run, onEvent, target)
 		accountID = winnerID
 		if err == nil {
 			result.Model = requestedModel
+			if projection != nil {
+				projection.keepSentText(result.Accumulator.candidate(0))
+			}
 			return result, accountID, nil
 		}
-		lastErr = err
-		lastAccountID = accountID
+		if lastErr == nil || !isAccountContextError(err) {
+			lastErr, lastAccountID = err, accountID
+		}
 		if ctx.Err() != nil {
 			return generationResult{}, accountID, err
 		}
-		if errors.Is(err, gemini.ErrConversationLost) && rebuildable && !newSession && (hasVisibleOutput == nil || !hasVisibleOutput()) {
+		if errors.Is(err, gemini.ErrConversationLost) && rebuildable && !newSession && !visibleOutput() {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
-			sessionKey, newSession, requestAttempts = "", true, 2
+			sessionKey, newSession, requestAttempts = "", true, availableAccounts
 			continue
 		}
-		if rebuildable && sessionKey != "" && !newSession && (isAccountContextError(err) || errors.Is(err, gemini.ErrGuestAttachments) || retryableAccountError(err) && (hasVisibleOutput == nil || !hasVisibleOutput())) {
+		if errors.Is(err, gemini.ErrGuestAttachments) && !pool.RetryAfter(ctx, requestedModel).IsZero() && (sessionKey == "" || newSession || rebuildable) {
+			retrying := recoverAccounts()
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, retrying)
+			if !retrying {
+				return generationResult{}, accountID, noAccountError(ctx, pool, requestedModel)
+			}
+			sessionKey, newSession, requestAttempts = "", true, availableAccounts
+			continue
+		}
+		if rebuildable && sessionKey != "" && !newSession && (isAccountContextError(err) || errors.Is(err, gemini.ErrGuestAttachments) || retryableAccountError(err) && !visibleOutput()) {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
-			sessionKey, newSession, requestAttempts = "", true, 2
+			sessionKey, newSession, requestAttempts = "", true, availableAccounts
 			continue
 		}
 		if isAccountContextError(err) {
@@ -382,17 +548,31 @@ func runGenerationAttempts(
 			excludedAccountIDs[accountID] = struct{}{}
 			continue
 		}
-		if (gemini.TransientError(err) || isOutputMismatchError(err)) && (sessionKey == "" || newSession) && regenerated < regenerations && (hasVisibleOutput == nil || !hasVisibleOutput()) {
+		if (gemini.TransientError(err) || isOutputMismatchError(err)) && (sessionKey == "" || newSession) && regenerated < regenerations && !visibleOutput() {
 			regenerated++
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
 			regenerating = true
 			continue
 		}
+		if (gemini.TransientError(err) || errors.Is(err, gemini.ErrUpstreamFailureText) || errors.Is(err, errSnapshotDiverged)) && (sessionKey == "" || newSession || rebuildable) && regenerated < regenerations && visibleOutput() {
+			regenerated++
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
+			excludedAccountIDs[accountID] = struct{}{}
+			regenerating = true
+			if sessionKey != "" && !newSession {
+				sessionKey, newSession, requestAttempts = "", true, availableAccounts
+			}
+			resume = projection.resume()
+			continue
+		}
 		usedRequestAttempts++
-		if usedRequestAttempts >= requestAttempts || !retryableAccountError(err) ||
-			hasVisibleOutput != nil && hasVisibleOutput() {
-			trace.AttemptFailed(accountID, upstreamStatus(err), err, false)
+		if usedRequestAttempts >= requestAttempts || !retryableAccountError(err) || visibleOutput() {
+			retrying := upstreamStatus(err) == http.StatusTooManyRequests && retryableAccountError(err) && recoverAccounts()
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, retrying)
+			if retrying {
+				continue
+			}
 			return generationResult{}, accountID, err
 		}
 		trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
@@ -401,7 +581,22 @@ func runGenerationAttempts(
 	return generationResult{}, lastAccountID, lastErr
 }
 
-// regenerations 是生成流中断、5xx、固定失败文字或输出不符合请求要求且客户端没有收到内容时重新生成的次数上限，优先换用其他账号，没有其他账号时回到失败的账号
+// awaitAccountRecovery 在账号全部冷却且最早的账号在 modelRecoveryWindow 内恢复时等到恢复，返回是否等待完成
+func awaitAccountRecovery(ctx context.Context, pool *balancer.AccountPool, modelID string) bool {
+	recoverAt := pool.RetryAfter(ctx, modelID)
+	wait := time.Until(recoverAt)
+	if recoverAt.IsZero() || wait > modelRecoveryWindow {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+		return true
+	}
+}
+
+// regenerations 是生成流中断、5xx、固定失败文字或输出不符合请求要求时重新生成的次数上限，优先换用其他账号，没有其他账号时回到失败的账号；客户端已收到内容时新的生成接在已发出内容之后
 const regenerations = 3
 
 func runGenerationWithClient(
@@ -416,6 +611,7 @@ func runGenerationWithClient(
 	media generationMedia,
 	thinkingLevel gemini.ThinkingLevel,
 	bridge ToolBridge,
+	resume partialOutput,
 	prepare func(*gemini.Client, bool) (string, []gemini.FileData, error),
 	onEvent func(gemini.Event) error,
 ) (generationResult, error) {
@@ -458,6 +654,9 @@ func runGenerationWithClient(
 		}
 		return generationResult{}, &gemini.ProtocolError{HTTPStatus: 400, Message: err.Error()}
 	}
+	if resume.text != "" {
+		prompt = resumedPrompt(prompt, resume.text)
+	}
 	promptTokens := contextTokens + tokencount.Content(prompt) + mediaTokens(files)
 	if contextWindow := client.ContextWindow(); contextWindow > 0 && promptTokens > contextWindow {
 		return generationResult{}, &accountContextError{err: &gemini.ProtocolError{
@@ -470,7 +669,12 @@ func runGenerationWithClient(
 		feature = gemini.FeatureImage
 	}
 	accumulator := NewEventAccumulator()
+	accumulator.candidate(0).Text, accumulator.candidate(0).Thought = resume.text, resume.thought
 	cutter := newStopCutter(bridge.Stop)
+	if cutter != nil {
+		cutter.text, cutter.sent, cutter.toolCalls = resume.text, len(resume.text), len(bridge.Definitions) > 0
+	}
+	aligner := resumeAligner{sent: resume.text}
 	streamCtx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
 	if onEvent != nil {
@@ -478,18 +682,23 @@ func runGenerationWithClient(
 			return generationResult{}, adapterEmitError{err: err}
 		}
 	}
-	err = client.Stream(streamCtx, gemini.GenerateRequest{
-		Prompt:        prompt,
-		Model:         model.ID,
-		ThinkingLevel: thinkingLevel,
-		Feature:       feature,
-		AspectRatio:   media.aspectRatio,
-		Files:         files,
-		Conversation:  conversation,
-		Branch:        branch,
-	}, func(event gemini.Event) error {
+	handle := func(event gemini.Event) error {
 		if cutter != nil && cutter.matched != "" {
 			return nil
+		}
+		if event.Candidate == 0 && event.Kind == gemini.EventText && resume.text != "" {
+			decided := aligner.decided
+			rest, ok := aligner.align(event.Snapshot)
+			if !ok {
+				return nil
+			}
+			if !decided {
+				event.Delta = rest
+			}
+			event.Snapshot = resume.text + rest
+		}
+		if event.Candidate == 0 && event.Kind == gemini.EventThought {
+			event.Snapshot = resume.thought + event.Snapshot
 		}
 		switch event.Kind {
 		case gemini.EventText, gemini.EventThought, gemini.EventCode, gemini.EventMedia, gemini.EventImageProgress:
@@ -515,6 +724,8 @@ func runGenerationWithClient(
 					return nil
 				}
 				event = gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: delta}
+			} else {
+				event.Snapshot = cutter.text[:cutter.sent]
 			}
 		}
 		if onEvent != nil {
@@ -523,7 +734,22 @@ func runGenerationWithClient(
 			}
 		}
 		return nil
-	})
+	}
+	err = client.Stream(streamCtx, gemini.GenerateRequest{
+		Prompt:        prompt,
+		Model:         model.ID,
+		ThinkingLevel: thinkingLevel,
+		Feature:       feature,
+		AspectRatio:   media.aspectRatio,
+		Files:         files,
+		Conversation:  conversation,
+		Branch:        branch,
+	}, handle)
+	if err == nil {
+		if rest := aligner.finish(); rest != "" {
+			err = handle(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: rest, Snapshot: aligner.held})
+		}
+	}
 	if cutter != nil && cutter.matched != "" && errors.Is(err, context.Canceled) && ctx.Err() == nil {
 		err = nil
 	}
@@ -556,7 +782,7 @@ func runGenerationWithClient(
 		}
 	}
 	primary := accumulator.Primary()
-	if primary.Text == "" && len(primary.Codes) == 0 && len(primary.Media) == 0 && (cutter == nil || cutter.matched == "") {
+	if strings.TrimSpace(primary.Text) == "" && len(primary.Codes) == 0 && len(primary.Media) == 0 && (cutter == nil || cutter.matched == "") {
 		return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: "Gemini Web 完成了回答但没有正文、代码、媒体或工具调用", Retryable: true}}
 	}
 	if len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 {

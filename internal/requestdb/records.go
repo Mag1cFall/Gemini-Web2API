@@ -59,14 +59,35 @@ func scanRecord(rows *sql.Rows) (UsageRecord, error) {
 	return record, nil
 }
 
+// exportPageSize 是导出时一次读取的记录数，每页读完释放连接后再写出
+const exportPageSize = 1000
+
 // Records 按完成时间倒序返回一页请求记录
 func (store *Store) Records(ctx context.Context, query UsageRecordQuery) (UsageRecordPage, error) {
-	clause, args := recordFilter(query)
-	if before := query.Before; before != nil {
-		clause += ` AND (r.time < ? OR r.time = ? AND r.id < ?)`
-		args = append(args, before.Time.UnixMilli(), before.Time.UnixMilli(), before.ID)
+	store.flush()
+	return store.recordPage(ctx, query)
+}
+
+// pageEnd 返回一页记录的时间上界，游标早于查询终点时收紧到游标所在毫秒，索引从游标位置开始扫描
+func pageEnd(query UsageRecordQuery) time.Time {
+	if query.Before != nil {
+		if bound := query.Before.Time.Add(time.Millisecond); bound.Before(query.To) {
+			return bound
+		}
 	}
-	rows, err := store.db.QueryContext(ctx, `SELECT `+recordColumns+` FROM requests r`+clause+
+	return query.To
+}
+
+// recordPage 读取一页请求记录
+func (store *Store) recordPage(ctx context.Context, query UsageRecordQuery) (UsageRecordPage, error) {
+	before := query.Before
+	query.To = pageEnd(query)
+	clause, args := recordFilter(query)
+	if before != nil {
+		clause += ` AND (r.time < ? OR r.id < ?)`
+		args = append(args, before.Time.UnixMilli(), before.ID)
+	}
+	rows, err := store.reads.QueryContext(ctx, `SELECT `+recordColumns+` FROM requests r`+clause+
 		` ORDER BY r.time DESC, r.id DESC LIMIT ?`, append(args, query.Limit+1)...)
 	if err != nil {
 		return UsageRecordPage{}, err
@@ -106,38 +127,44 @@ func csvText(value string) string {
 
 // ExportRecords 以带 BOM 的 UTF-8 CSV 按完成时间倒序写出范围内全部符合条件的请求记录
 func (store *Store) ExportRecords(ctx context.Context, query UsageRecordQuery, output io.Writer) error {
-	clause, args := recordFilter(query)
-	rows, err := store.db.QueryContext(ctx, `SELECT `+recordColumns+` FROM requests r`+clause+` ORDER BY r.time DESC, r.id DESC`, args...)
-	if err != nil {
-		return err
-	}
+	store.flush()
 	if _, err := io.WriteString(output, "\xef\xbb\xbf"); err != nil {
-		return errors.Join(err, rows.Close())
+		return err
 	}
 	writer := csv.NewWriter(output)
 	if err := writer.Write(csvHeader); err != nil {
-		return errors.Join(err, rows.Close())
+		return err
 	}
-	for rows.Next() {
-		record, err := scanRecord(rows)
+	integer := func(value int64) string { return strconv.FormatInt(value, 10) }
+	query.Before, query.Limit = nil, exportPageSize
+	for {
+		page, err := store.recordPage(ctx, query)
 		if err != nil {
-			return errors.Join(err, rows.Close())
+			return err
 		}
-		attempts, err := json.Marshal(record.Attempts)
-		if err != nil {
-			return errors.Join(err, rows.Close())
+		for _, record := range page.Items {
+			attempts, err := json.Marshal(record.Attempts)
+			if err != nil {
+				return err
+			}
+			if err := writer.Write([]string{
+				record.Time.Format(time.RFC3339Nano), record.ID, record.ResponseID, record.Protocol, csvText(record.Path),
+				csvText(record.Model), csvText(record.ProviderModel), record.Thinking, csvText(record.Account), strconv.Itoa(record.Status), record.State,
+				integer(record.DurationMS), integer(record.FirstEventMS), integer(record.QueueMS), integer(record.InputTokens),
+				integer(record.ReasoningTokens), integer(record.ReplyTokens), integer(record.TotalTokens), strconv.Itoa(record.ToolCalls),
+				csvText(record.Error), string(attempts),
+			}); err != nil {
+				return err
+			}
 		}
-		integer := func(value int64) string { return strconv.FormatInt(value, 10) }
-		if err := writer.Write([]string{
-			record.Time.Format(time.RFC3339Nano), record.ID, record.ResponseID, record.Protocol, csvText(record.Path),
-			csvText(record.Model), csvText(record.ProviderModel), record.Thinking, csvText(record.Account), strconv.Itoa(record.Status), record.State,
-			integer(record.DurationMS), integer(record.FirstEventMS), integer(record.QueueMS), integer(record.InputTokens),
-			integer(record.ReasoningTokens), integer(record.ReplyTokens), integer(record.TotalTokens), strconv.Itoa(record.ToolCalls),
-			csvText(record.Error), string(attempts),
-		}); err != nil {
-			return errors.Join(err, rows.Close())
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			return err
 		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		last := page.Items[len(page.Items)-1]
+		query.Before = &UsageCursor{Time: last.Time, ID: last.ID}
 	}
-	writer.Flush()
-	return errors.Join(rows.Err(), rows.Close(), writer.Error())
 }

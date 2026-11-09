@@ -14,7 +14,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// historyLimit 是保留供管理端回放的最近事件数
+// historyLimit 是保留供管理端回放的最近事件数，切片累积到两倍时压缩回这个数
 const historyLimit = 2000
 
 // subscriberBuffer 是单个订阅者的待发事件上限，写满时断开该订阅者
@@ -154,8 +154,10 @@ func Publish(event Event) {
 		std.fileWrite(event)
 	}
 	std.history = append(std.history, event)
-	if len(std.history) > historyLimit {
-		std.history = append(std.history[:0:0], std.history[len(std.history)-historyLimit:]...)
+	if len(std.history) == 2*historyLimit {
+		kept := copy(std.history, std.history[historyLimit:])
+		clear(std.history[kept:])
+		std.history = std.history[:kept]
 	}
 	for subscriber := range std.subscribers {
 		select {
@@ -171,7 +173,7 @@ func Publish(event Event) {
 func Subscribe(limit int) ([]Event, <-chan Event, func()) {
 	std.mu.Lock()
 	defer std.mu.Unlock()
-	start := max(0, len(std.history)-limit)
+	start := max(0, len(std.history)-min(limit, historyLimit))
 	history := append([]Event(nil), std.history[start:]...)
 	channel := make(chan Event, subscriberBuffer)
 	std.subscribers[channel] = struct{}{}
@@ -278,5 +280,5 @@ func levelName(level slog.Level) string {
 func History() []Event {
 	std.mu.Lock()
 	defer std.mu.Unlock()
-	return append([]Event(nil), std.history...)
+	return append([]Event(nil), std.history[max(0, len(std.history)-historyLimit):]...)
 }

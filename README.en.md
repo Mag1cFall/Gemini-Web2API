@@ -14,7 +14,7 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Function tools**: function tools in all four protocols are bridged through the web prompt; text the model writes before a call is returned with the call, and an unparseable call is retried on another account before any output is visible
 - **Images**: supports multimodal input, image generation, and image editing; generated images are returned at full size through the official "Download full size image" request
 - **Official tools**: Create video, Create music, Canvas, Deep Research, Guided Learning, and Task mode are available as separate model IDs
-- **Multi-account balancing**: schedules Google accounts by model availability; usage and rate limits cool down only the affected model, with configurable concurrency and routing strategy
+- **Multi-account balancing**: schedules Google accounts by model availability; usage limits cool down only the affected model and rate limits cool down the whole account, with configurable concurrency and routing strategy
 - **Guest session**: when no account is available, serves the models the Gemini website offers without sign-in (currently `gemini-3.5-flash-lite`, without website tools or attachment uploads) through a signed-out session; ready accounts are always preferred
 - **Console and desktop app**: the web console shows ready-made client configuration, live logs, active requests, usage and cost statistics, account import and management, the model catalog, settings, and a playground; desktop apps for Windows, macOS, and Linux add a tray icon, single instance, and launch at login
 - **Run logs**: colored columnar console logs that record each request's start, account selection, uploads, first output, account switches, waits, and completion
@@ -44,7 +44,7 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Model catalog**: at startup the service reads each account's live Gemini Web model catalog and official tools; `/v1/models` is the runtime source of truth. IDs are derived from official display names, so new models appear automatically
 - **Catalog fields**: `available_account_count` is the number of usable accounts, `default` marks the default model, and `thinking_levels` lists the available thinking levels
 - **Tool models**: tool IDs appear only for accounts that have the corresponding official tool and run on that account's official default model
-- **Images**: the image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` support 1:1, 9:16, 3:4, 4:3, and 16:9
+- **Images**: the image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` support 1:1, 9:16, 3:4, 4:3, 16:9, 2:3, 21:9, 1:8, and 8:1
 - **Video**: for video IDs, `imageConfig.aspectRatio` supports landscape 16:9 and portrait 9:16
 - **Chat history**: Task, Deep Research, and video requests use saved chats, which remain in the account history
 - **Deep Research**: the research plan and progress are returned as reasoning and the report as text, with the report's citations returned as web sources in each protocol's citation fields; a run usually takes over ten minutes, so set the client request timeout longer than that
@@ -257,6 +257,8 @@ DELETE /v1beta/files/{name}
 GET    /v1beta/models
 ```
 
+The same methods are also served under `/v1` (the default path of google-genai 3.x); `GET /v1/models` and `/v1/files` return the Gemini shape when the request carries `x-goog-api-key`.
+
 `streamGenerateContent` without `alt=sse` returns a JSON array. Uploaded files are referenced with `fileData.fileUri`, and YouTube links are read as video content the same way as on the website. `predictLongRunning` uses `gemini-video`.
 
 ### MCP
@@ -279,7 +281,7 @@ Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, `x-goog-api-key`
 
 Open `http://127.0.0.1:8007/` in a browser for the console, which uses the `/api/*` endpoints.
 
-- **Connect**: the Connect page lists the base URLs of the three protocols and ready-made configuration for Claude Code, Codex, OpenCode, Cherry Studio, SillyTavern, and curl with the selected model; Connection test lists models with the selected API key and sends the shortest request to the selected model, showing the result, duration, and error reason per request
+- **Connect**: the Connect page lists the base URLs of the three protocols and ready-made configuration for Claude Code, Codex, OpenCode, OpenClaw, omp, Magpie, Cherry Studio, SillyTavern, and curl with the selected model; Connection test lists models with the selected API key and sends the shortest request to the selected model, showing the result, duration, and error reason per request
 - **Import accounts**: pasting cookies lists the accounts signed in to them; the import of the selected accounts runs in the background on the service and continues after you leave the page, which shows the progress and failure reason of each account
 - **Warm up**: Warm up on the All accounts page sends one minimal generation request for each selected account and model and lists the result, duration, and failure reason per row; the requests appear in the request records
 - **Listen port**: when the configured port falls inside a range reserved by Windows (Hyper-V, WSL2, Docker), the service listens on the next available port and the console shows the actual address at the top
@@ -336,12 +338,14 @@ build/               # Desktop icons and packaging configuration
 | Variable | Description | Default |
 | --- | --- | --- |
 | `GEMINI_SAVE_HISTORY` | Write conversations to Gemini Web history | `false` |
+| `NONSTREAM_KEEPALIVE` | Write a newline every 10 seconds while a non-streaming request waits for its result | `true` |
+| `FAKE_STREAM` | Collect the complete result before sending a streaming response | `false` |
 | `GEMINI_AUTH_STATES` | Auth file or directory, comma-separated | `auth` |
 | `LISTEN_ADDR` | Service listener | `127.0.0.1:8007` |
 | `PROXY_API_KEY` | Local 2API access keys, comma-separated | empty |
 | `PROXY` | Proxy pool, comma-separated | empty |
 | `MODEL_MAPPING` | External model name to current model ID mapping | empty |
-| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure; upstream rate limits cool down for at most 1 minute | `2m` |
+| `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure; upstream rate limits start at 1 minute and double on repeats, up to 10 minutes | `2m` |
 | `SESSION_TTL` | Lifetime of explicit session state | `30m` |
 | `INIT_TIMEOUT` | Per-account startup timeout | `20s` |
 | `PER_ACCOUNT_CONCURRENCY` | Concurrent upstream requests per account; a request that has waited 1 minute for the first upstream output yields its slot, one per account at a time | `1` |

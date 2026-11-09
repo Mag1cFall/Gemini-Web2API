@@ -169,6 +169,9 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 	}
 	setUnsupportedParameters(c, nonEmptyImageParameters(request))
 
+	if !request.Stream {
+		defer startNonstreamKeepalive(c)()
+	}
 	prompt := request.Prompt
 	images := make([][]byte, 0, request.N)
 	for index := 0; index < request.N && len(images) < request.N; index++ {

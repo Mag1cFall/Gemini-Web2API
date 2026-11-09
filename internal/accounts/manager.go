@@ -154,11 +154,12 @@ func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, firstDone
 			logging.Info(gemini.GuestID, "访客会话就绪", "模型", len(client.Models()), "耗时", time.Since(started))
 			break
 		}
+		retry := retryInterval(settings.RetryInterval, err)
 		if m.pool.MarkFailed(gemini.GuestID, err) {
-			logging.Warn(gemini.GuestID, "访客会话初始化失败", "耗时", time.Since(started), "下次重试", settings.RetryInterval, "错误", err)
+			logging.Warn(gemini.GuestID, "访客会话初始化失败", "耗时", time.Since(started), "下次重试", retry, "错误", err)
 		}
 		first()
-		if !sleep(ctx, settings.RetryInterval) {
+		if !sleep(ctx, retry) {
 			return
 		}
 	}
@@ -255,6 +256,17 @@ func (m *Manager) launch(account auth.LoadedAccount, firstDone func()) {
 	}()
 }
 
+// networkRetryInterval 是连接失败或初始化超时后重新初始化的间隔上限
+const networkRetryInterval = 10 * time.Second
+
+// retryInterval 返回初始化失败后的重试间隔：连接失败与超时不超过 networkRetryInterval，其余错误为配置值
+func retryInterval(configured time.Duration, err error) time.Duration {
+	if errors.Is(err, gemini.ErrTransport) || errors.Is(err, context.DeadlineExceeded) {
+		return min(configured, networkRetryInterval)
+	}
+	return configured
+}
+
 // run 初始化账号直到成功，之后按轮换页给出的间隔轮换 Cookie 直到 ctx 结束
 func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *gemini.Client, firstDone func()) {
 	var once sync.Once
@@ -272,13 +284,14 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 			logReady(account, client, time.Since(started))
 			break
 		}
+		retry := retryInterval(settings.RetryInterval, err)
 		if m.pool.MarkFailed(account.ID, err) {
-			logging.Error(account.ID, "账号初始化失败", "耗时", time.Since(started), "下次重试", settings.RetryInterval, "错误", err)
+			logging.Error(account.ID, "账号初始化失败", "耗时", time.Since(started), "下次重试", retry, "错误", err)
 		} else {
 			logging.Debug(account.ID, "账号初始化失败", "错误", err)
 		}
 		first()
-		if !sleep(ctx, settings.RetryInterval) {
+		if !sleep(ctx, retry) {
 			return
 		}
 	}

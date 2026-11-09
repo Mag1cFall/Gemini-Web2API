@@ -831,7 +831,7 @@ func GeminiFileListHandler(store *requestdb.Store) gin.HandlerFunc {
 
 // geminiFileName 返回路径参数中的文件 ID 与是否请求下载内容
 func geminiFileName(c *gin.Context) (string, bool) {
-	name := c.Param("name")
+	name := c.Param("file")
 	if id, ok := strings.CutSuffix(name, ":download"); ok {
 		return id, true
 	}

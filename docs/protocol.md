@@ -34,7 +34,7 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 
 `internal/gemini` 负责网页帧解码，各 API 适配器消费统一的规范事件。
 
-每个账号有 `PER_ACCOUNT_CONCURRENCY` 个请求槽（默认 1），每个槽同一时间只执行一条上游请求链：生成请求从上传、发送到流结束，管理端的用量读取，Cookie 轮换与续签都占用请求槽，其余请求排队等待；视频与 Deep Research 的后台轮询阶段让出请求槽，等待上游首事件满 60 秒的生成请求也让出请求槽（同一账号同时一个）。没有会话绑定的请求按 `ROUTING_STRATEGY` 选择有空闲请求槽的账号：`round-robin` 按轮询顺序，`fill-first` 优先选择排序靠前的账号；可用账号全部占用时排队，模型、会话所在账号与已尝试账号都相同的请求按到达顺序取得请求槽，任一账号空出请求槽、就绪或状态变化时由队首重新选号，跳过排队期间进入冷却或待认证的账号；依赖网页会话续接的请求只等待会话所在账号。
+每个账号有 `PER_ACCOUNT_CONCURRENCY` 个请求槽（默认 1），每个槽同一时间只执行一条上游请求链：生成请求从上传、发送到流结束，管理端的用量读取，Cookie 轮换与续签都占用请求槽，其余请求排队等待；视频与 Deep Research 的后台轮询阶段让出请求槽，等待上游首事件满 60 秒的生成请求也让出请求槽（同一账号同时一个）。没有会话绑定的请求按 `ROUTING_STRATEGY` 选择有空闲请求槽的账号，其中上下文窗口最大的优先：`round-robin` 按轮询顺序，`fill-first` 优先选择排序靠前的账号；提示词超过所选账号窗口的请求在发送前换用其他账号；可用账号全部占用时排队，模型、会话所在账号与已尝试账号都相同的请求按到达顺序取得请求槽，任一账号空出请求槽、就绪或状态变化时由队首重新选号，跳过排队期间进入冷却或待认证的账号；依赖网页会话续接的请求只等待会话所在账号。
 
 ## 2. Bootstrap 与模型目录
 
@@ -47,7 +47,7 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | 3 | `POST ...batchexecute?rpcids=ESY5D` | 账号偏好 |
 | 4 | `POST ...batchexecute?rpcids=jSf9Qc&source-path=/usage` | 套餐、用量窗口、重置时间 |
 
-任一步失败的账号在启动时标为不可用，之后按 `ACCOUNT_COOLDOWN` 间隔重新执行整条链路，成功后加入调度并开始轮换 Cookie。
+任一步失败的账号在启动时标为不可用，之后重新执行整条链路，连接失败与超时的重试间隔不超过 10 秒，其余错误按 `ACCOUNT_COOLDOWN`，成功后加入调度并开始轮换 Cookie。
 
 ### 多账号 Cookie
 
@@ -216,7 +216,7 @@ Task、Deep Research 只在普通会话中提供，视频成品在生成流结�
 | `11` | Duration（Ultra 账号） | `13` 10 seconds（默认）、`14` 15 seconds |
 | `21` | Length、Vocals、Genre | 时长、人声与曲风 |
 
-生成请求的 `f.req[55]` 写入 `[[选项 ID,...]]`，即一条消息中所选工具各组默认项的 ID，Sources 组的选中项另以 `[[[[[选项 ID,...]]]]]` 写入 `f.req[54]`；请求指定宽高比时，Aspect ratio 组取比例最接近的一项；Create image 另在 `f.req[0]` 下标 9 写入 `[null×6,[null,[null,"<选项标签>"]]]`，例如 9:16 为 `[null×6,[null,[null,"9:16"]]]`。OpenAI Images 的 `size`、Responses `image_generation` 工具的 `size` 与 Gemini `generationConfig.imageConfig.aspectRatio` 都按此映射。
+生成请求的 `f.req[55]` 写入 `[[选项 ID,...]]`，即一条消息中所选工具各组默认项的 ID，Sources 组的选中项另以 `[[[[[选项 ID,...]]]]]` 写入 `f.req[54]`；请求指定宽高比时，Aspect ratio 组取比例最接近的一项；Create image 另在 `f.req[0]` 下标 9 写入 `[null×6,[null,[null,"<选项标签>"]]]`，例如 9:16 为 `[null×6,[null,[null,"9:16"]]]`，请求的比例为 2:3、21:9、1:8 或 8:1 时这里写请求的比例，上游按该比例生成。OpenAI Images 的 `size`、Responses `image_generation` 工具的 `size` 与 Gemini `generationConfig.imageConfig.aspectRatio` 都按此映射。
 
 ### 思考强度
 
@@ -256,7 +256,7 @@ Task、Deep Research 只在普通会话中提供，视频成品在生成流结�
 | AI Plus | 131,072 |
 | AI Pro / Ultra | 1,048,576 |
 
-`jSf9Qc` 返回套餐级别，`TIER_CODE` 写入生成请求模型头第 11 槽。模型目录公开可用输入窗口范围；单次请求按实际账号窗口选择路由。
+`jSf9Qc` 返回套餐级别，`TIER_CODE` 写入生成请求模型头第 11 槽。模型目录公开可用输入窗口范围；单次请求按实际账号窗口路由，窗口足够的账号失败时返回该账号的错误，全部账号窗口都不足时返回窗口错误。
 
 官网输入框在高级模式下最多保留 1,000,000 个字符；上游按字符计数，对超过约 1,000,000 个字符的提示词返回没有候选的生成流。提示词超过 1,000,000 个字符时，服务把完整提示词作为 `message.txt`（`text/plain`）附件上传，生成请求的 `inner[0][0]` 只写读取该附件作答的指引；访客会话不能上传附件，这类请求落到访客会话时返回 503“访客会话不能上传附件，需要可用的登录账号”。
 
@@ -572,7 +572,7 @@ POST https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendSer
 
 `_reqid` 与官网页面脚本相同，为 1 加首个请求创建时本地时间的当日秒数，再加按请求创建顺序从 0 起的序号乘 `100000`；batchexecute、StreamGenerate 与 ProcessFile 共用序号，每个账号的 `gemini.Client` 一份，对应官网的一个页面。查询参数按 `bl`、`f.sid`、`hl`、`_reqid`、`rt` 的顺序发送。表单与 batchexecute 相同，按 `f.req=...&at=...&` 的顺序与 `encodeURIComponent` 编码，末尾带 `&`。
 
-服务的每个上游请求从发出到读完响应最长 600 秒，StreamGenerate 的完整流也在其内。
+上游把单个 StreamGenerate 生成流限制在 600 秒内：到时发送没有载荷、第 5 项为 `[13]` 的 `wrb.fr` 记录与 `["di",毫秒数]`，随后结束响应，回答没有完成。
 
 ### 关键 header
 
@@ -840,7 +840,7 @@ FILES = [
 
 ### 附件上传
 
-带附件的生成请求在 StreamGenerate 之前依次执行：
+带附件的生成请求在 StreamGenerate 之前依次执行，多个附件的第 2 至 4 步与官网一样同时进行，同时进行的附件最多 10 个：
 
 | 顺序 | 请求 | 内容 |
 | ---: | --- | --- |
@@ -1036,6 +1036,7 @@ DECIMAL_LENGTH_HINT
 | 正文累计快照 | `candidate[1][0]` |
 | phase | `candidate[8][0]`，`1=generating`、`2=complete` |
 | 思考累计快照 | `candidate[37][0][0]` |
+| 结构化正文 | `payload[26][0][0]`，段落 `[null,[null,0,文字,[[起点,长度,[样式]]]]]`（样式 `[null,null,null,null,3]` 为行内代码），代码块 `[null,null,null,[内容,语言]]` |
 | 标题 | `payload[10][0]`；只带少数字段的帧把字段放在末尾稀疏对象中，例如标题为键 `"11"`，下同 |
 | 控制 token | `payload[20][0]` |
 | 续接令牌 | `payload[25]` |
@@ -1073,7 +1074,7 @@ DECIMAL_LENGTH_HINT
 
 回答末尾的追问建议写在正文中，官网渲染为追问按钮：`<ElicitationsGroup message="…">`、若干 `<Elicitation label="…" query="…"/>` 与 `</ElicitationsGroup>`，或单个 `<FollowUp label="…" query="…"/>`。服务按这三个标签名去掉代码以外的这些标记，正文末尾尚未写完的标记不输出；`<FollowUpButton />` 等其他标签与代码中的标记保持原样。
 
-官网在流式输出中把正文里的域名路径改写为 `[域名路径](https://域名路径)`，已输出的文字在后续快照中变为链接。服务在代码以外把地址以 `https://`、`http://` 或 `mailto:` 开头、文字等于地址或等于去掉这一前缀的地址的链接还原为文字，相对地址等其他链接保持原样；回答完成前正文截止到末尾尚未写完的链接。这里的代码指 ```` ``` ```` 或 `~~~` 围栏代码块（关闭行的围栏不短于开头，没有关闭时延伸到正文末尾）与行内代码（同一段落内以等长反引号闭合，没有闭合时延伸到段落末尾）。
+官网在流式输出中把正文里的地址改写为 `[地址](https://地址)`，行内代码中的地址同样被改写，已输出的文字在后续快照中变为链接，地址尚未写完时链接随后续快照加长。官网判断代码块时，任何围栏行（以 ```` ``` ```` 或 `~~~` 开头，长度与语言标记不限）都切换代码状态，嵌套围栏的内层因此按正文改写。服务按同一判定在围栏代码块以外（没有关闭时延伸到正文末尾）把地址以 `https://`、`http://` 或 `mailto:` 开头、文字等于地址或等于去掉这一前缀的地址的链接还原为文字，相对地址等其他链接保持原样；回答完成前正文截止到末尾尚未写完的链接。正文中的 Markdown 转义（`\<`、`\>`、`\_`、`\[`、`\]`）还原为原字符，围栏代码块与行内代码保持原文。
 
 **实际模型。** 候选帧带实际模型 hash 与模型名，可以晚于正文到达；模型信息确认前的事件按原顺序暂存，回答结束前没有模型信息即为请求的模型。实际模型与请求不一致时产生可重试 `502`，同一帧带额度提示时为 `429`，错误说明附上提示原文。
 
@@ -1189,7 +1190,7 @@ GET https://lh3.googleusercontent.com/rd-gg-dl/...
 | `error` | HTTP 或帧内协议错误 |
 | `done` | 当前生产路径为 stop / error |
 
-正文与思考采用累计快照。解码器计算 `append`、`replace`、`truncate`，候选项之间保持独立状态。思考先于正文投影：上游在正文开始前给出完整思考，之后的正文快照只追加，适配器逐块转出；正文发生后续改写时，适配器缓冲最终快照，维持协议合法顺序。
+正文与思考采用累计快照。解码器计算 `append`、`replace`、`truncate`，候选项之间保持独立状态。思考先于正文投影：上游在正文开始前给出完整思考，之后的正文快照只追加，适配器逐块转出；上游改写已发出的内容时，适配器从已发出内容末尾在新快照中最接近原位置的匹配之后继续转出，响应的最终正文、账本与后续轮次的历史以客户端收到的内容为准，找不到匹配时按下表重新生成。
 
 ### 错误与重试
 
@@ -1199,10 +1200,13 @@ GET https://lh3.googleusercontent.com/rd-gg-dl/...
 | 请求模型与响应模型不一致 | 首个可见输出前以 `ListAccounts` 检查会话：会话已失效时按 `401` 续签、重新初始化并重试一次，没有续签材料时账号待认证；会话有效时返回可重试 `502`，按 `model_mismatch` 冷却该模型。会话失效时上游可能以未登录时的默认模型照常回答，属于这种情况 |
 | StreamGenerate HTTP `401/403` | 首个公开事件前续签并重试一次 |
 | 普通会话（不是 Temporary Chat）的生成流已收到 CID 与本轮回答的 RID（续接轮与上一轮的 RID 不同），在回答完成前断开或缺少终止记录 | 让出请求槽并以 `hNvQHb` 轮询同一轮回答，完成后只输出此前未输出的正文；连续 4 次读不到这一轮时按可重试错误换号 |
-| transport、空终止帧、可重试协议错误 | 首个可见输出前切换同能力账号；连接、TLS 与代理错误不冷却账号 |
+| transport、空终止帧、可重试协议错误 | 首个可见输出前切换同能力账号，直到全部账号都试过；连接、TLS 与代理错误不冷却账号 |
+| 客户端已收到内容后生成流中断、结束时没有完成的候选、上游 5xx、固定失败文字或改写已发出内容且找不到继续输出的位置 | 优先换用其他账号重新生成，最多 3 次：已发出的正文写在提示词末尾的助手轮中，模型的后续内容接在已发出内容之后输出；只有显式网页 session 且没有响应链时返回流内错误 |
 | 生成流距上一个语义事件 600 s，期间只有心跳 | 中止并发送停止回答，按 `504` 可重试错误在首个可见输出前换号 |
 | 客户端在生成中断开 | 发送停止回答 `NkpXw` 后立即结束请求、释放请求槽，不等待 `NkpXw` 的响应，与官网点击停止相同 |
 | 首页、RPC、生成或上传被 302 重定向到 `www.google.com/sorry`（人机验证页） | 出口 IP 与该账号会话被判定为异常流量。首页、模型目录、偏好、用量与生成请求在带续签材料时续签一次、重读首页后重试；仍被重定向、没有续签材料或在其他请求中被重定向时按 `429` 返回，整个账号按 `ACCOUNT_COOLDOWN` 冷却，首个可见输出前换号；初始化时账号保持不可用并按间隔重试 |
+| 首个可见输出前全部账号都因频率限制失败 | 最早恢复的账号在一分钟内恢复时等待后重新选号，最多等 3 次；更晚恢复时返回 `429` 与 `Retry-After` |
+| 带附件的请求落到访客会话，登录账号都在冷却 | 访客会话不接受附件。最早恢复的账号在一分钟内恢复时等待后由该账号完成，最多等 3 次；更晚恢复时返回 `429` 与 `Retry-After` |
 | 新会话首次失败 | 换账号后重新建立会话 |
 | 已建立显式会话失败 | 保持账号粘连并返回错误 |
 | 客户端参数错误 | 返回 `4xx`，账号保持健康 |
@@ -1218,7 +1222,7 @@ GET https://lh3.googleusercontent.com/rd-gg-dl/...
 | `1050` | 模型与会话历史不一致 | 400 | 否 |
 | `1052` | 模型请求头无效或模型暂不可用 | 502 | 否 |
 | `1060` | 出口 IP 被暂时限制 | 403 | 是 |
-| `1095` | 账号请求频率受限，约一分钟后恢复，该模型在此账号上最多冷却一分钟 | 429 | 是 |
+| `1095` | 账号请求频率受限，限流覆盖账号下的全部模型，整个账号从一分钟起冷却，连续出现时逐次翻倍，最长十分钟，成功后清零 | 429 | 是 |
 | `1100` | 请求中的附件无法读取，例如 0 字节文件 | 400 | 否 |
 | 其他 | 上游临时错误，例如 `1003`（附件未绑定会话）、`1013`、`1097` | 502 | 是 |
 
@@ -1251,16 +1255,16 @@ Chat 与 Completions 的 `stop`、Anthropic `stop_sequences` 与 Gemini `generat
 | --- | --- |
 | Chat | `max_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`presence_penalty`、`frequency_penalty`、`seed` |
 | Completions | Chat 的同名参数、`logprobs`、`logit_bias`、不为 1 的 `best_of` |
-| Responses | `max_output_tokens`、`temperature`、`top_p`、`truncation`、`parallel_tool_calls` |
+| Responses | `max_output_tokens`、`temperature`、`top_p`、`truncation` |
 | Responses `image_generation` 工具 | `action`、`background`、`input_fidelity`、`input_image_mask`、`model`、`moderation`、`output_compression`、`output_format`、`partial_images`、`quality` |
 | Anthropic | `max_tokens`、`temperature`、`top_p`、`top_k` |
 | Gemini | `generationConfig` 的其余字段 |
 
-- Gemini `generationConfig` 中生效的字段为 `responseMimeType`、`responseJsonSchema`、`responseSchema`、`responseFormat`、`thinkingConfig`、`imageConfig.aspectRatio`、`candidateCount` 与 `stopSequences`
+- Gemini `generationConfig` 中生效的字段为 `responseMimeType`、`responseJsonSchema`、`responseSchema`、`responseFormat`、`thinkingConfig`、`imageConfig.aspectRatio`、`candidateCount` 与 `stopSequences`，`candidateCount` 与 `thinkingBudget` 按 proto3 JSON 接受数字与字符串写法，字段名接受 proto 下划线写法与 `_responseJsonSchema`
 
 ### 自定义工具
 
-只有一条用户消息时，适配器与官网一样直接发送原文并接上协议说明；多条消息写成 ChatML 角色块（`<|im_start|>角色` 至 `<|im_end|>`），角色为 `system`、`user`、`assistant` 与 `tool`，消息正文按原文写入，协议说明作为最后一个 `system` 块，末尾留出 `<|im_start|>assistant` 轮。Responses 的 `namespace` 工具组展开为组内函数，模型返回的调用项回填所属 `namespace`。该桥接运行在网页普通提示词层，工具可靠性取决于模型服从能力。
+只有一条用户消息时，适配器与官网一样直接发送原文并接上协议说明；多条消息写成 ChatML 角色块（`<|im_start|>角色` 至 `<|im_end|>`，模型在回答末尾仿写的 `<|im_end|>` 由解码器去掉），角色为 `system`、`user`、`assistant` 与 `tool`，消息正文按原文写入，协议说明作为最后一个 `system` 块，末尾留出 `<|im_start|>assistant` 轮。Responses 的 `namespace` 工具组展开为组内函数，模型返回的调用项回填所属 `namespace`。该桥接运行在网页普通提示词层，工具可靠性取决于模型服从能力。
 
 实际提示形态为：
 
@@ -1305,13 +1309,15 @@ a.txt
 
 结束围栏前的换行不属于参数值，参数值以换行结束时结束围栏前留一个空行；协议说明要求新建源代码或文本文件、整文件复制时文件以换行结束，用户逐字指定的内容按原样写。
 
+Chat 与 Responses 的 `parallel_tool_calls` 为 `false` 或 Anthropic 的 `disable_parallel_tool_use` 为 `true` 时，协议说明中的“一次可以写多个调用。”换成“一次只调用一个工具。”，回答只取第一个调用块。
+
 `required`/`any` 时“需要调用工具时”为“必须调用一个可用工具”，指定工具时为“必须调用工具 <名称>”，两者都不带最后一句。显式响应 JSON Schema 追加“结构化输出协议：只输出符合以下 JSON Schema 的 JSON 值，不要输出 Markdown 代码块或额外文字”与 Schema 原文；`text/x.enum` 追加“输出协议：只输出以下取值之一，不加引号、代码块或其他文字：”与取值列表。
 
-历史中的工具调用写成调用块：每个参数一个代码块，字符串参数写原文，其余类型写 JSON。工具结果写成以工具名标记的结果块，同一轮多次调用同名工具时标记为 `工具名 #序号`（序号是这次调用在同名调用中的次序，按调用 ID 对应），结果原文放在代码块中，空结果写为“（执行完成，没有输出）”；Gemini `functionResponse.response` 的 `output` 与 `error` 字段分别写原文与 `error: ` 加原文，两者都没有时写整个 `response` 的 JSON。代码块的反引号比内容中最长的反引号串多一个且不少于三个。
+历史中的工具调用写成调用块：每个参数一个代码块，字符串参数写原文，其余类型写 JSON。工具结果写成以工具名标记的结果块，同一轮多次调用同名工具时标记为 `工具名 #序号`（序号是这次调用在同名调用中的次序，按调用 ID 对应），结果原文放在代码块中，空结果写为“（执行完成，没有输出）”；Gemini `functionResponse.response` 的 `output` 与 `error` 字段分别写原文与 `error: ` 加原文，两者都没有时写整个 `response` 的 JSON。代码块的反引号比内容中最长的反引号串多一个且不少于三个。代码块中的 `<|im_start|>`、`<|im_end|>` 写成 HTML 实体，原文中的字面实体多转义一层，避免模型把工具数据读成新的角色块；模型写在工具参数中的实体还原为原文。
 
-Gemini Web 会改写正文中的组件标签（`<TemplateWidget>`、`<GenerateWidget>`、`<Image>`）并把地址改写为 Markdown 链接，代码块中的内容保持原样；`[cite: N]` 形式的引用标记在正文与代码块中都会被删除。参数值因此都写在代码块中。账户关闭 Gemini 应用活动记录时，Gemini Web 对写文件一类的请求在提示词前注入 Google 云端硬盘与文档不可用的说明，模型偶尔因此不写调用块，改为在正文中直接给出内容。适配器在回答中找到第一个调用块，按出现顺序解析其后连续的调用块，调用块之前与之后的文字作为调用前的正文返回：Chat 为 `content`，Responses 为 `function_call` 之前的 `message`，Anthropic 为 `tool_use` 之前的 `text` 块，Gemini 为 `functionCall` 之前的 `text` part。解析时接受上游以反斜杠转义的方括号、工具名两侧的空白与多出的前导下划线、缺少的 `[/Arg]` 与不在代码块中的参数值；代码块的结束标记取其后紧跟参数结尾、下一参数、调用结尾、下一调用或回答结尾的第一行，外层代码块比参数中的反引号串短时同样完整取值。参数原文按参数 Schema 还原类型：只允许字符串的参数取原文，数字、布尔值、数组与对象取 JSON，未声明类型的参数是 JSON 时取值、否则取原文。调用块没有写完、调用未声明的工具或参数不符合参数结构时，该次回答按 502 上游错误处理，日志记录原因与回答开头：没有显式会话的请求在首个可见输出前换另一个账号新建会话重试，显式会话直接返回该错误。
+Gemini Web 会改写正文中的组件标签（`<TemplateWidget>`、`<GenerateWidget>`、`<Image>`）并把地址改写为 Markdown 链接，围栏代码块中的内容保持原样；`[cite: N]` 形式的引用标记在正文与代码块中都会被删除。参数值因此都写在代码块中。账户关闭 Gemini 应用活动记录时，Gemini Web 对写文件一类的请求在提示词前注入 Google 云端硬盘与文档不可用的说明，模型偶尔因此不写调用块，改为在正文中直接给出内容。适配器在回答中找到第一个位于代码以外的调用块（围栏代码块内与同一行前面有未配对反引号的是示例，按正文处理），按出现顺序解析其后连续的调用块，调用块组之前的文字作为调用前的正文返回，调用块组之后的内容丢弃：Chat 为 `content`，Responses 为 `function_call` 之前的 `message`，Anthropic 为 `tool_use` 之前的 `text` 块，Gemini 为 `functionCall` 之前的 `text` part。解析时接受上游以反斜杠转义的方括号、工具名两侧的空白与多出的前导下划线、缺少的 `[/Arg]` 与不在代码块中的参数值；代码块的结束标记取其后紧跟参数结尾、下一参数、调用结尾、下一调用或回答结尾的第一行，外层代码块比参数中的反引号串短时同样完整取值。参数原文按参数 Schema 还原类型，参数的 Schema 依次从 `properties`、根 `$ref`、`allOf` 与 `additionalProperties` 查找：只允许字符串的参数取原文，数字、布尔值、数组与对象取 JSON，未声明类型的参数是 JSON 时取值、否则取原文。调用块没有写完、调用未声明的工具或参数不符合参数结构时，该次回答按 502 上游错误处理，日志记录原因与回答开头：没有显式会话的请求在首个可见输出前换另一个账号新建会话重试，显式会话直接返回该错误。
 
-流式请求带自定义工具时，调用块之前的正文实时发出；可能是调用块开头的正文尾部与末尾空白暂缓到能确定为止，从调用块开头起的内容不作为正文发出，回答结束后按解析结果发出剩余正文与工具调用。
+流式请求带自定义工具时，调用块之前的正文实时发出；可能是调用块开头的正文尾部与末尾空白暂缓到能确定为止，从调用块开头起的内容不作为正文发出，回答结束后按解析结果发出剩余正文与工具调用。围栏代码块与同一行闭合的行内代码中的 `[Call:…]` 是示例，按正文输出；没有闭合的反引号串是普通字符，其后的调用块照常解析，所在行写完前暂缓发出。
 
 以上内容整体写入 Gemini Web 的普通提示词槽。`none` 使用对话与已有工具结果直接作答，提示中省略函数定义和调用格式，显式响应 JSON Schema 继续生效；`required`/`any` 要求调用任一声明工具，显式函数选择要求调用指定工具。支持 `previous_response_id` 或显式 conversation ID 的客户端会继续同一网页 session，回传完整历史的客户端按会话键续接；续接时工具协议沿用会话前文的函数定义与 JSON Schema，只重申调用规则与格式。未续接的无会话请求默认创建彼此独立的 Temporary Chat。
 
@@ -1327,6 +1333,14 @@ Gemini Web 会改写正文中的组件标签（`<TemplateWidget>`、`<GenerateWi
 - Chat 与 Responses 的 `custom` 工具声明为只有字符串参数 `input` 的函数，`grammar` 格式写入函数描述，Chat 的 `custom.format.grammar.{syntax,definition}` 与 Responses 的 `format.{syntax,definition}` 同义；`local_shell`、`shell`、`apply_patch` 声明为固定参数结构的函数。历史中的这些调用项与输出项按函数调用与工具结果写回
 - `tool_choice` 为 `allowed_tools` 时只声明其中列出的工具，未列出的内置工具不启用，`mode` 为 `required` 时要求调用其中之一
 - Gemini `functionCallingConfig.mode` 的 `VALIDATED` 与 `MODE_UNSPECIFIED` 按 `AUTO` 处理
+- Gemini `urlContext` 工具组与 Anthropic `web_fetch` 不写入请求，协议说明要求模型打开用户给出的地址并依据网页内容作答，网页由 Gemini Web 读取
+- `required`/`any` 同时声明内置工具与函数工具时要求调用函数工具，只声明多个内置工具时由模型选择，一个都没有执行时返回错误
+- `tool_choice` 指定未声明的函数工具时返回 400
+- 声明函数工具时停止序列只在第一个调用块之前生效
+- Anthropic 带 `input_schema` 的 `web_search` 或 `google_search` 是函数工具
+- 不同 `namespace` 中的同名工具在协议说明中写成 `命名空间.名称`，输出项的 `namespace` 与 `name` 分开返回
+- `previous_response_id` 指向的响应与本次请求的 `instructions` 不同时，以重建的完整历史新建网页会话
+- Anthropic `tool_result` 的 `is_error` 为真且内容为空时写为“（执行失败，没有输出）”；历史中的 `refusal` 内容段与 Chat `refusal` 字段按助手正文写入提示词
 - 工具结果中的图片与文件作为附件上传，结果文字中写入附件标号：Anthropic `tool_result.content` 的 `image` 与 `document` 块，Gemini `functionResponse.parts` 的 `inlineData` 与 `fileData`
 - Gemini `parameters`、`responseSchema` 与 `responseFormat.text.schema` 按 Gemini Schema 转为 JSON Schema：类型名转小写，`nullable` 的节点转为该节点的完整 Schema 与 `{"type":"null"}` 的 `anyOf`，字符串形式的 `minItems` 等计数字段转为整数
 - Gemini 原生请求的字段名按 proto3 JSON 规则同时接受下划线与驼峰写法，例如 `system_instruction`、`generation_config.response_mime_type`
@@ -1369,10 +1383,10 @@ Responses 流式入口在根级图片状态 `1`、`4` 到达时实时发送 `res
 
 | 输入 | 网页强度 |
 | --- | --- |
-| 未指定、`none`、`minimal`、`low`、`auto`、Claude `disabled`、`thinkingBudget=0`、`thinkingBudget=-1` | Low |
-| `medium` | Medium |
-| `high`、`xhigh`、`max`、`thinkingBudget>0` | High |
-| 要求回传思考摘要而未指定强度：Gemini `includeThoughts`、Chat `include_reasoning` 或 `include_thoughts`、Responses `reasoning.summary`、Claude `enabled`/`adaptive` 未给 effort | High |
+| 未指定、`none`、`minimal`、`low`、`auto`、Claude `disabled`、预算不超过 1024（含 `0` 与 `-1`） | Low |
+| `medium`、预算 1025 至 8192 | Medium |
+| `high`、`xhigh`、`max`、预算超过 8192 | High |
+| 要求回传思考摘要而未指定强度：Gemini `includeThoughts`、Chat `include_reasoning` 或 `include_thoughts`、Responses `reasoning.summary`、Claude `enabled`/`adaptive`/`between_tools` 未给 effort | High |
 
 `none`、`disabled` 与 `thinkingBudget=0` 同时关闭思考摘要回传。`thinkingBudget=-1` 与 Chat `thinking_budget=-1` 为动态预算，对应官网默认的 Low，是否回传思考摘要由 `includeThoughts` 与 `include_thoughts` 决定。Chat 的 `include_reasoning` 为 `false` 时不回传思考摘要。
 
@@ -1393,7 +1407,7 @@ Chat 的 `extra_body.google.thinking_config` 与 Gemini `thinkingConfig` 同义�
 | 完整隐藏思考 | 网页端不可观测 |
 | Google 内置工具内部上下文 | 网页端不可观测 |
 
-本地计数使用内嵌 Gemini SentencePiece 模型：
+本地计数使用内嵌 Gemini SentencePiece 模型，长文本按换行分段计数，相同分段的结果在进程内记忆：
 
 ```text
 prompt_tokens = previous_session_context + 1 + tokenize(prompt) + attachment_estimate
@@ -1423,9 +1437,11 @@ total_tokens = prompt_tokens + completion_tokens + thought_tokens
 
 账号会话失效或续签失败（上游 `401`、`403`、模型目录 `1016`、OAuthMultilogin 拒绝续签），且没有其他账号能完成请求时，返回 `503`，消息以“Gemini 账号会话失效”开头并写明上游原因；`401` 只表示本服务的 API key 错误（见「鉴权与跨域」）。
 
-流式响应在首个事件前最多暂存 10 秒：期间失败时返回与非流式请求相同的 HTTP 状态码与 JSON 错误对象；超过 10 秒或已写出事件后，静默每达到 10 秒写入该协议的保活帧（OpenAI 为 `: ping` 注释，Anthropic 为 `ping` 事件，Gemini 为空行），错误写成流内错误事件。
+流式响应在首个事件前最多暂存 10 秒：期间失败时返回与非流式请求相同的 HTTP 状态码与 JSON 错误对象；超过 10 秒或已写出事件后，静默每达到 10 秒写入该协议的保活帧（Chat Completions 为 `: ping` 注释，Responses 重发序号为 1 的 `response.in_progress` 事件，Anthropic 为 `ping` 事件，Gemini 为空行），错误写成流内错误事件。Responses 的 `response.failed` 中 `error.code` 为 `rate_limit_exceeded`（`error.message` 末尾写明 `Please try again in <秒数>s.`）、`context_length_exceeded` 或 `server_error`。
 
-管理端取消进行中的请求时，客户端收到 499，OpenAI `code` 为 `request_cancelled`，消息为 `request cancelled by the service administrator`；已收到的正文按本地计数记入用量。429 与 503 带 `Retry-After`，取值为请求模型最早结束冷却的账号剩余秒数，没有冷却中的账号时不写。错误正文去掉上游请求 URL、查询串（含 `f.sid`、`_reqid`）与账号 ID。Gemini 原生入口中官网没有的方法返回与官方相同的 404 `NOT_FOUND`；`streamGenerateContent` 不带 `alt=sse` 时与官方一样输出 JSON 数组。
+`NONSTREAM_KEEPALIVE=true` 时，Chat Completions、Completions、Responses、Messages、Gemini `generateContent` 与图片生成的非流式请求在 10 秒内没有结果时先写出 `200`、`Content-Type: application/json` 与 `X-Accel-Buffering: no`，之后每 10 秒写出一个换行，结果就绪后写出 JSON 正文；此后的错误以各协议的错误对象作为正文，访问日志与请求账本记录错误的 HTTP 状态。`FAKE_STREAM=true` 时流式请求收齐全部上游事件后再按各协议的流式事件输出，中途中断时换号重新生成，等待期间写入上述保活帧。
+
+管理端取消进行中的请求时，客户端收到 499，OpenAI `code` 为 `request_cancelled`，消息为 `request cancelled by the service administrator`；已收到的正文按本地计数记入用量。429 与 503 带 `Retry-After`，取值为请求模型最早结束冷却的账号剩余秒数，有未冷却的登录账号或没有冷却中的账号时不写。错误正文去掉上游请求 URL、查询串（含 `f.sid`、`_reqid`）与账号 ID。Gemini 原生入口中官网没有的方法返回与官方相同的 404 `NOT_FOUND`；`streamGenerateContent` 不带 `alt=sse` 时与官方一样输出 JSON 数组。
 
 ### 附属端点
 
@@ -1459,7 +1475,7 @@ Anthropic Messages 的 `messages` 可以为空，只有 `system` 时按 system �
 
 | 协议 | 未带 key | key 错误 |
 | --- | --- | --- |
-| Gemini（`/v1beta/`、`/upload/v1beta/`、`/ws/google.ai.generativelanguage.*`） | `403 PERMISSION_DENIED` | `400 INVALID_ARGUMENT`，`API_KEY_INVALID` |
+| Gemini（`/v1beta/`、`/upload/`、`/ws/google.ai.generativelanguage.*`，`/v1/models/{model}:{method}`，带 `x-goog-api-key` 的 `/v1/` 请求） | `403 PERMISSION_DENIED` | `400 INVALID_ARGUMENT`，`API_KEY_INVALID` |
 | OpenAI | `401 invalid_request_error`，`code` 为 null | `401 invalid_request_error`，`invalid_api_key` |
 | Anthropic（`/v1/messages`） | `401 authentication_error` | `401 authentication_error` |
 

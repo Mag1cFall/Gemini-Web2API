@@ -271,6 +271,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	pool.SetStrategy(cfg.RoutingStrategy)
 	pool.SetAPIKeyAccounts(cfg.APIKeyAccounts)
 	adapter.SetFirstEventHedge(firstEventHedge(cfg))
+	adapter.SetResponseModes(cfg.NonstreamKeepalive, cfg.FakeStream)
 	settings := admin.NewSettings(envPath, cfg, func(next config.Config) {
 		config.SetModelMapping(next.ModelMapping)
 		pool.SetTimings(next.AccountCooldown, next.SessionTTL)
@@ -285,6 +286,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		pool.SetStrategy(next.RoutingStrategy)
 		pool.SetAPIKeyAccounts(next.APIKeyAccounts)
 		adapter.SetFirstEventHedge(firstEventHedge(next))
+		adapter.SetResponseModes(next.NonstreamKeepalive, next.FakeStream)
 		manager.SetSettings(accounts.Settings{
 			InitTimeout: next.InitTimeout, RetryInterval: next.AccountCooldown, Proxy: next.ProxyURL,
 			SaveHistory: next.SaveHistory, AuthDir: authDirectory, Concurrency: next.PerAccountConcurrency,
@@ -337,7 +339,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	case status.Total == 0:
 		logging.Warn(logging.SourceService, "没有账号", "", unavailable+"；在管理端导入账号，或运行 gemini-web2api setup")
 	case status.Available == 0:
-		logging.Warn(logging.SourceService, "没有可用账号", "", unavailable+"，失败的账号按 ACCOUNT_COOLDOWN 间隔继续初始化")
+		logging.Warn(logging.SourceService, "没有可用账号", "", unavailable+"，失败的账号继续初始化")
 	}
 
 	select {

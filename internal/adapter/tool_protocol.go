@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 )
 
 // callStartPattern 匹配调用块的开头，上游以 Markdown 转义方括号时前面带反斜杠
@@ -27,6 +29,9 @@ var callEndPattern = regexp.MustCompile(`^\\?\[\s*\\?/\s*Call\s*\\?\]`)
 // structureAnywherePattern 在任意位置匹配参数段开头、参数段结尾或调用块结尾
 var structureAnywherePattern = regexp.MustCompile(`\\?\[\s*(?:Arg\s*\\?:|\\?/\s*(?:Arg|Call)\s*\\?\])`)
 
+// backtickRunPattern 匹配连续的反引号串
+var backtickRunPattern = regexp.MustCompile("`+")
+
 // callBlock 是回答中的一个调用块：工具名称与按出现顺序排列的参数原文
 type callBlock struct {
 	Name string
@@ -39,18 +44,51 @@ type callArg struct {
 	Value string
 }
 
-// splitCallBlocks 把回答分为调用块之前的文字、调用块与之后的文字；找到调用块开头时 found 为真，调用块没有写完时返回错误
-func splitCallBlocks(text string) (before string, blocks []callBlock, after string, found bool, err error) {
-	location := callStartPattern.FindStringIndex(text)
+// firstCallStart 返回第一个位于代码以外的调用块开头的字节区间，位于所在行的行内代码或围栏代码块内的是示例
+func firstCallStart(text string) []int {
+	for _, location := range callStartPattern.FindAllStringIndex(text, -1) {
+		if inside, _ := codeSpanAt(text, location[0]); !inside && !gemini.InFencedCode(text, location[0]) {
+			return location
+		}
+	}
+	return nil
+}
+
+// codeSpanAt 按所在行判断字节位置与行内代码的关系，反引号串与其后第一个长度相同的反引号串构成行内代码：inside 表示位置在行内代码中，unclosed 表示位置之前有该行没有闭合的反引号串
+func codeSpanAt(text string, position int) (inside, unclosed bool) {
+	start := strings.LastIndexByte(text[:position], '\n') + 1
+	end := len(text)
+	if newline := strings.IndexByte(text[position:], '\n'); newline >= 0 {
+		end = position + newline
+	}
+	runs := backtickRunPattern.FindAllStringIndex(text[start:end], -1)
+	for index := 0; index < len(runs) && runs[index][0]+start < position; index++ {
+		size := runs[index][1] - runs[index][0]
+		closing := slices.IndexFunc(runs[index+1:], func(run []int) bool { return run[1]-run[0] == size })
+		if closing < 0 {
+			unclosed = true
+			continue
+		}
+		index += closing + 1
+		if runs[index][0]+start >= position {
+			return true, unclosed
+		}
+	}
+	return false, unclosed
+}
+
+// splitCallBlocks 把回答分为调用块之前的文字与连续的调用块，之后的内容丢弃；找到调用块开头时 found 为真，调用块没有写完时返回错误
+func splitCallBlocks(text string) (before string, blocks []callBlock, found bool, err error) {
+	location := firstCallStart(text)
 	if location == nil {
-		return "", nil, "", false, nil
+		return "", nil, false, nil
 	}
 	before = strings.TrimRightFunc(text[:location[0]], unicode.IsSpace)
 	rest := text[location[0]:]
 	for {
 		start := callStartPattern.FindStringSubmatchIndex(rest)
 		if start == nil || start[0] != 0 {
-			return before, blocks, strings.TrimSpace(rest), true, nil
+			return before, blocks, true, nil
 		}
 		block := callBlock{Name: strings.TrimSpace(rest[start[2]:start[3]])}
 		rest = rest[start[1]:]
@@ -66,10 +104,10 @@ func splitCallBlocks(text string) (before string, blocks []callBlock, after stri
 			arg := argStartPattern.FindStringSubmatchIndex(rest)
 			if arg == nil {
 				head := []rune(rest)
-				return before, nil, "", true, fmt.Errorf("工具 %q 的调用块不完整；剩余内容开头：%q", block.Name, string(head[:min(len(head), 200)]))
+				return before, nil, true, fmt.Errorf("工具 %q 的调用块不完整；剩余内容开头：%q", block.Name, string(head[:min(len(head), 200)]))
 			}
 			value, remaining := argValue(rest[arg[1]:])
-			block.Args = append(block.Args, callArg{Name: strings.TrimSpace(rest[arg[2]:arg[3]]), Value: value})
+			block.Args = append(block.Args, callArg{Name: strings.TrimSpace(rest[arg[2]:arg[3]]), Value: restoreMarkers(value)})
 			rest = strings.TrimLeftFunc(remaining, unicode.IsSpace)
 			if end := argEndPattern.FindStringIndex(rest); end != nil {
 				rest = rest[end[1]:]
@@ -157,19 +195,42 @@ func (b ToolBridge) resolveCalls(blocks []callBlock) ([]ToolCall, error) {
 
 // typedArguments 把参数原文按参数 Schema 组成 JSON 对象
 func typedArguments(parameters json.RawMessage, args []callArg) (json.RawMessage, error) {
-	var schema struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-	}
-	_ = json.Unmarshal(parameters, &schema)
 	object := make(map[string]json.RawMessage, len(args))
 	for _, arg := range args {
-		value, err := typedValue(parameters, schema.Properties[arg.Name], arg.Value)
+		value, err := typedValue(parameters, propertySchema(parameters, parameters, arg.Name, map[string]bool{}), arg.Value)
 		if err != nil {
 			return nil, fmt.Errorf("参数 %q %w", arg.Name, err)
 		}
 		object[arg.Name] = value
 	}
 	return marshalJSON(object)
+}
+
+// propertySchema 返回 Schema 中参数 name 的子 Schema：先取 properties，再展开本地 $ref 与 allOf，最后取 additionalProperties，seen 是已展开的引用
+func propertySchema(root, schema json.RawMessage, name string, seen map[string]bool) json.RawMessage {
+	var node struct {
+		Properties           map[string]json.RawMessage `json:"properties"`
+		Ref                  string                     `json:"$ref"`
+		AllOf                []json.RawMessage          `json:"allOf"`
+		AdditionalProperties json.RawMessage            `json:"additionalProperties"`
+	}
+	if json.Unmarshal(schema, &node) != nil {
+		return nil
+	}
+	if property, ok := node.Properties[name]; ok {
+		return property
+	}
+	branches := node.AllOf
+	if node.Ref != "" && !seen[node.Ref] {
+		seen[node.Ref] = true
+		branches = append(branches, schemaRef(root, node.Ref))
+	}
+	for _, branch := range branches {
+		if property := propertySchema(root, branch, name, seen); property != nil {
+			return property
+		}
+	}
+	return node.AdditionalProperties
 }
 
 // marshalJSON 按 JSON.stringify 编码，HTML 字符保持原样
@@ -347,8 +408,34 @@ func startBlock(builder *strings.Builder) {
 	}
 }
 
-// fenced 返回包住原文的代码块，标记比原文中最长的反引号串多一个且不少于三个
+var (
+	// transcriptMarker 匹配转录轮次标记
+	transcriptMarker = regexp.MustCompile(`<\|im_(start|end)\|>`)
+	// markerEntity 匹配写成实体的轮次标记，第一组是原文字面实体多转义的 amp; 层
+	markerEntity = regexp.MustCompile(`&((?:amp;)*)lt;\|im_(start|end)\|&gt;`)
+)
+
+// escapeMarkers 把原文中的字面实体多转义一层，再把轮次标记写成实体
+func escapeMarkers(text string) string {
+	text = markerEntity.ReplaceAllString(text, "&amp;${1}lt;|im_${2}|&gt;")
+	return transcriptMarker.ReplaceAllString(text, "&lt;|im_${1}|&gt;")
+}
+
+// restoreMarkers 把模型写在工具参数中的实体还原为轮次标记，多转义的字面实体去掉一层
+func restoreMarkers(text string) string {
+	return markerEntity.ReplaceAllStringFunc(text, func(entity string) string {
+		if rest, layered := strings.CutPrefix(entity, "&amp;"); layered {
+			return "&" + rest
+		}
+		return "<" + entity[len("&lt;"):len(entity)-len("&gt;")] + ">"
+	})
+}
+
+// fenced 返回包住原文的代码块，原文中的轮次标记写成实体，标记比原文中最长的反引号串多一个且不少于三个
 func fenced(text string) string {
+	if strings.Contains(text, "|im_") {
+		text = escapeMarkers(text)
+	}
 	longest, run := 0, 0
 	for _, char := range text {
 		if char == '`' {

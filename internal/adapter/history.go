@@ -117,7 +117,7 @@ func responsesHistoryTurns(raw json.RawMessage) []historyTurn {
 	if err != nil {
 		return nil
 	}
-	messages, err := responsesMessages(input)
+	messages, err := responsesMessages(input, nil)
 	if err != nil {
 		return nil
 	}

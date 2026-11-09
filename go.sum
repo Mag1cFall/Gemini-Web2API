@@ -245,6 +245,8 @@ github.com/twitchyliquid64/golang-asm v0.15.1/go.mod h1:a1lVb/DtPvCB8fslRZhAngC2
 github.com/ugorji/go/codec v1.3.0 h1:Qd2W2sQawAfG8XSvzwhBeoGq71zXOC/Q1E9y/wUcsUA=
 github.com/ugorji/go/codec v1.3.0/go.mod h1:pRBVtBSKl77K30Bv8R2P+cLSGaTtex6fsA2Wjqmfxj4=
 github.com/ulikunitz/xz v0.5.15/go.mod h1:nbz6k7qbPmH4IRqmfOplQw/tblSgqTqBwxkY0oWt/14=
+github.com/vearutop/statigz v1.5.0 h1:FuWwZiT82yBw4xbWdWIawiP2XFTyEPhIo8upRxiKLqk=
+github.com/vearutop/statigz v1.5.0/go.mod h1:oHmjFf3izfCO804Di1ZjB666P3fAlVzJEx2k6jNt/Gk=
 github.com/wailsapp/task/v3 v3.40.1-patched3/go.mod h1:jIP48r8ftoSQNlxFP4+aEnkvGQqQXqCnRi/B7ROaecE=
 github.com/wailsapp/wails/v3 v3.0.0-beta.29 h1:oJbXasfieQmMkYtqPlFSPnDe0RwpzA5BKiov8WPD5lo=
 github.com/wailsapp/wails/v3 v3.0.0-beta.29/go.mod h1:5DR/EG5FHU8+BNV7tQYQ/rJMjoFsVlYpM+0gp1+gcTI=

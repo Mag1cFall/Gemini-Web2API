@@ -25,6 +25,7 @@ type ChatMessage struct {
 	ToolCallID      string            `json:"tool_call_id,omitempty"`
 	ToolCalls       []OpenAIToolCall  `json:"tool_calls,omitempty"`
 	FunctionCall    *OpenAIFunction   `json:"function_call,omitempty"`
+	Refusal         string            `json:"refusal,omitempty"`
 	TranscriptItems []json.RawMessage `json:"-"`
 }
 
@@ -73,6 +74,7 @@ type ChatRequest struct {
 	ToolChoice          json.RawMessage    `json:"tool_choice,omitempty"`
 	Functions           json.RawMessage    `json:"functions,omitempty"`
 	FunctionCall        json.RawMessage    `json:"function_call,omitempty"`
+	ParallelToolCalls   *bool              `json:"parallel_tool_calls,omitempty"`
 	ResponseFormat      json.RawMessage    `json:"response_format,omitempty"`
 	ReasoningEffort     string             `json:"reasoning_effort,omitempty"`
 	Reasoning           json.RawMessage    `json:"reasoning,omitempty"`
@@ -177,7 +179,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		responseID := fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())
 		created := time.Now().Unix()
 
-		generate := func(choice int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
+		generate := func(choice int, onEvent func(gemini.Event) error, projection *streamProjection) (generationResult, error) {
 			key, keyPolicy := sessionKey, policy
 			if choice > 0 {
 				key, keyPolicy = "", sessionCreate
@@ -187,7 +189,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
 					return buildOpenAIChatPrompt(c, client, request, continuation, bridge.declared(continuation && isHistoryKey(key)))
 				},
-				onEvent, hasVisibleOutput,
+				onEvent, projection,
 			)
 			c.Set("account_id", accountID)
 			return result, err
@@ -226,16 +228,14 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 								delta = gin.H{"reasoning_content": event.Delta}
 							}
 							return writeOpenAIDelta(c.Writer, responseID, created, streamModel, choice, delta)
-						}, func(err error) error {
-							return writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "upstream_rewrite", err)
 						})
 					},
-					projection.hasVisibleOutput,
+					projection,
 				)
 				if err != nil {
 					if stream.reject() {
 						writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
-					} else if !projection.errorSent {
+					} else {
 						_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
 					}
 					return
@@ -270,6 +270,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 
+		defer startNonstreamKeepalive(c)()
 		var response gin.H
 		for choice := range n {
 			result, err := generate(choice, nil, nil)
@@ -288,6 +289,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			}
 			if choice == 0 {
 				rememberHistory(pool, result, "", bridge, turns)
+				c.Header("X-Conversation-ID", result.ConversationID)
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
 			if response == nil {
@@ -375,7 +377,7 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 		if role == "tool" {
 			writeResultBlock(&builder, cmp.Or(toolNames[message.ToolCallID], message.Name, message.ToolCallID), content)
 		} else {
-			builder.WriteString(speakerText(message.Name, content))
+			builder.WriteString(speakerText(message.Name, cmp.Or(content, message.Refusal)))
 		}
 		for _, item := range message.TranscriptItems {
 			appendTranscriptObject(&builder, item)
@@ -639,7 +641,7 @@ func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 	if err != nil {
 		return ToolBridge{}, err
 	}
-	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), LegacyFunctions: request.legacyFunctions, Stop: stop}
+	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), LegacyFunctions: request.legacyFunctions, Stop: stop, SingleCall: request.ParallelToolCalls != nil && !*request.ParallelToolCalls}
 	if len(request.WebSearchOptions) > 0 && string(request.WebSearchOptions) != "null" {
 		bridge.WebSearch = true
 	}
@@ -687,7 +689,7 @@ func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 			return ToolBridge{}, fmt.Errorf("不支持的 response_format.type %q", responseFormat.Type)
 		}
 	}
-	return bridge, nil
+	return bridge, bridge.checkExplicitTool()
 }
 
 func openAIToolChoice(raw json.RawMessage) string {
@@ -705,17 +707,17 @@ func openAIToolChoice(raw json.RawMessage) string {
 		} `json:"custom"`
 	}
 	if json.Unmarshal(raw, &object) == nil && object.Function.Name != "" {
-		return object.Function.Name
+		return explicitChoicePrefix + object.Function.Name
 	}
 	if object.Custom.Name != "" {
-		return object.Custom.Name
+		return explicitChoicePrefix + object.Custom.Name
 	}
 	var flat struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
 	}
 	if json.Unmarshal(raw, &flat) == nil && flat.Name != "" {
-		return flat.Name
+		return explicitChoicePrefix + flat.Name
 	}
 	if flat.Type != "" && flat.Type != "function" {
 		return flat.Type

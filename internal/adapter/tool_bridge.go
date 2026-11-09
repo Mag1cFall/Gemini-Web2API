@@ -36,10 +36,12 @@ type ToolBridge struct {
 	JSONSchema             json.RawMessage
 	CodeExecution          bool
 	WebSearch              bool
+	URLContext             bool
 	ImageGeneration        bool
 	RequireCodeExecution   bool
 	RequireWebSearch       bool
 	RequireImageGeneration bool
+	RequireHostedTool      bool
 	// AspectRatio 为生图请求的宽高比
 	AspectRatio string
 	// Enum 为 text/x.enum 响应可选的取值
@@ -52,6 +54,8 @@ type ToolBridge struct {
 	SchemaUnchecked bool
 	// Stop 是请求的停止序列，正文在首个命中处截断
 	Stop []string
+	// SingleCall 表示一次回答只调用一个工具
+	SingleCall bool
 }
 
 // declared 返回标记工具定义是否已在会话中发送的副本
@@ -74,20 +78,22 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 			available = string(definitions)
 		}
 
-		choice := strings.TrimSpace(b.Choice)
+		choice := strings.TrimPrefix(strings.TrimSpace(b.Choice), explicitChoicePrefix)
 		if choice == "" {
 			choice = "auto"
 		}
+		count := "一次可以写多个调用。"
+		if b.SingleCall {
+			count = "一次只调用一个工具。"
+		}
 		rule, otherwise := "需要调用工具时", "。无需调用工具时，直接输出正常回答"
-		switch strings.ToLower(choice) {
-		case "required", "any":
+		if name := b.explicitTool(); name != "" {
+			rule, otherwise = fmt.Sprintf("必须调用工具 %s", name), ""
+		} else if mode := strings.ToLower(choice); mode == "required" || mode == "any" {
 			rule, otherwise = "必须调用一个可用工具", ""
-		case "auto":
-		default:
-			rule, otherwise = fmt.Sprintf("必须调用工具 %s", choice), ""
 		}
 
-		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。新建源代码或文本文件、整文件复制时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。一次可以写多个调用。\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]%s", available, choice, rule, otherwise))
+		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。新建源代码或文本文件、整文件复制时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。%s\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]%s", available, choice, rule, count, otherwise))
 	}
 
 	if len(b.Enum) > 0 {
@@ -109,6 +115,9 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 		if b.WebSearch {
 			sections = append(sections, "本次请求可使用 Gemini Web 内置 Google 搜索；涉及实时或外部信息时搜索并保留来源")
 		}
+		if b.URLContext {
+			sections = append(sections, "本次请求可读取网页；用户给出网页地址时先打开并读取该地址，只根据读到的网页内容作答，不凭记忆回答")
+		}
 		if b.ImageGeneration {
 			sections = append(sections, "本次请求可使用 Gemini Web 内置图片生成；仅在用户请求生成或编辑图片时使用")
 		}
@@ -121,6 +130,9 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 		if b.RequireImageGeneration {
 			sections = append(sections, "本次请求必须使用 Gemini Web 内置图片生成")
 		}
+		if b.RequireHostedTool {
+			sections = append(sections, "本次请求必须至少使用一个上述 Gemini Web 内置工具")
+		}
 	} else {
 		sections = append(sections, "本次请求根据对话和已有工具结果直接回答；禁止调用函数工具、代码执行、Google 搜索和图片生成")
 	}
@@ -131,10 +143,10 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 	return "\n\n" + strings.Join(sections, "\n\n"), nil
 }
 
-// Parse 解析工具调用并验证结构化输出，调用块之前与之后的文字作为正文与调用一起返回
+// Parse 解析工具调用并验证结构化输出，调用块组之前的文字作为正文与调用一起返回，调用块组之后的内容丢弃
 func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	if len(b.Definitions) > 0 {
-		before, blocks, after, found, err := splitCallBlocks(text)
+		before, blocks, found, err := splitCallBlocks(text)
 		if found {
 			if strings.EqualFold(strings.TrimSpace(b.Choice), "none") {
 				return "", nil, fmt.Errorf("模型在 tool_choice=none 时返回了工具调用")
@@ -142,11 +154,14 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 			if err != nil {
 				return "", nil, err
 			}
+			if b.SingleCall {
+				blocks = blocks[:1]
+			}
 			calls, err := b.resolveCalls(blocks)
 			if err != nil {
 				return "", nil, err
 			}
-			return strings.Join(slices.DeleteFunc([]string{before, after}, func(part string) bool { return part == "" }), "\n\n"), calls, nil
+			return before, calls, nil
 		}
 	}
 	trimmed := stripJSONFence(strings.TrimSpace(text))
@@ -280,6 +295,9 @@ func validateHostedOutput(output CandidateOutput, bridge ToolBridge) error {
 	if bridge.RequireImageGeneration && !hasGeneratedImage(output) {
 		return fmt.Errorf("Gemini Web 未执行必需的图片生成工具")
 	}
+	if bridge.RequireHostedTool && len(output.Codes) == 0 && len(output.Citations) == 0 && !hasGeneratedImage(output) {
+		return fmt.Errorf("Gemini Web 未执行必需的内置工具")
+	}
 	return nil
 }
 
@@ -287,14 +305,28 @@ func (b ToolBridge) disallowsHostedTools() bool {
 	return strings.EqualFold(strings.TrimSpace(b.Choice), "none")
 }
 
+// explicitChoicePrefix 是 Choice 中指定函数名的前缀，与 auto、none、required 等选择模式区分
+const explicitChoicePrefix = "function:"
+
 func (b ToolBridge) explicitTool() string {
 	choice := strings.TrimSpace(b.Choice)
+	if name, ok := strings.CutPrefix(choice, explicitChoicePrefix); ok {
+		return name
+	}
 	switch strings.ToLower(choice) {
 	case "", "auto", "none", "required", "any":
 		return ""
 	default:
 		return choice
 	}
+}
+
+// checkExplicitTool 在 tool_choice 指定了未声明的函数工具时返回错误
+func (b ToolBridge) checkExplicitTool() error {
+	if name := b.explicitTool(); name != "" && len(b.Definitions) > 0 && !b.hasTool(name) {
+		return fmt.Errorf("tool_choice 选择了未声明的工具 %q", name)
+	}
+	return nil
 }
 
 func stripJSONFence(text string) string {

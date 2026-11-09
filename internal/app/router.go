@@ -52,8 +52,9 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.POST("/v1/responses", adapter.ResponsesHandler(pool, deps.Store))
 	api.POST("/v1/images/generations", adapter.ImageGenerationHandler(pool))
 	api.POST("/v1/images/edits", adapter.ImageEditHandler(pool))
-	api.GET("/v1/models", adapter.ListModelsHandler(pool))
-	api.GET("/v1/models/:model", adapter.RetrieveModelHandler(pool))
+	api.GET("/v1/models", adapter.GeminiOr(adapter.GeminiListModelsHandler(pool), adapter.ListModelsHandler(pool)))
+	api.GET("/v1/models/:model", adapter.GeminiOr(adapter.GeminiGetModelHandler(pool), adapter.RetrieveModelHandler(pool)))
+	api.POST("/v1/models/*action", adapter.GeminiRouterHandler(pool, deps.Store))
 	api.POST("/v1/messages", adapter.ClaudeMessagesHandler(pool))
 	api.POST("/v1/messages/count_tokens", adapter.ClaudeCountTokensHandler(pool))
 	api.POST("/v1beta/models/*action", adapter.GeminiRouterHandler(pool, deps.Store))
@@ -67,15 +68,16 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.POST("/v1/responses/compact", adapter.ResponsesCompactHandler(pool, deps.Store))
 	api.POST("/v1/completions", adapter.CompletionHandler(pool))
 	api.POST("/v1/files", adapter.FileUploadHandler(deps.Store))
-	api.GET("/v1/files", adapter.FileListHandler(deps.Store))
-	api.GET("/v1/files/:file", adapter.FileRetrieveHandler(deps.Store))
-	api.DELETE("/v1/files/:file", adapter.FileDeleteHandler(deps.Store))
+	api.GET("/v1/files", adapter.GeminiOr(adapter.GeminiFileListHandler(deps.Store), adapter.FileListHandler(deps.Store)))
+	api.GET("/v1/files/:file", adapter.GeminiOr(adapter.GeminiFileGetHandler(deps.Store), adapter.FileRetrieveHandler(deps.Store)))
+	api.DELETE("/v1/files/:file", adapter.GeminiOr(adapter.GeminiFileDeleteHandler(deps.Store), adapter.FileDeleteHandler(deps.Store)))
 	api.GET("/v1/files/:file/content", adapter.FileContentHandler(deps.Store))
+	api.POST("/upload/v1/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.POST("/upload/v1beta/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.PUT("/upload/v1beta/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.GET("/v1beta/files", adapter.GeminiFileListHandler(deps.Store))
-	api.GET("/v1beta/files/:name", adapter.GeminiFileGetHandler(deps.Store))
-	api.DELETE("/v1beta/files/:name", adapter.GeminiFileDeleteHandler(deps.Store))
+	api.GET("/v1beta/files/:file", adapter.GeminiFileGetHandler(deps.Store))
+	api.DELETE("/v1beta/files/:file", adapter.GeminiFileDeleteHandler(deps.Store))
 	api.POST("/v1/videos", adapter.VideoCreateHandler(pool, deps.Store))
 	api.GET("/v1/videos", adapter.VideoListHandler(deps.Store))
 	api.GET("/v1/videos/:video", adapter.VideoRetrieveHandler(deps.Store))
@@ -85,6 +87,8 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.POST("/v1/videos/extensions", adapter.VideoExtensionHandler(pool, deps.Store))
 	api.GET("/v1beta/models/:model/operations/:operation", adapter.GeminiOperationHandler(deps.Store))
 	api.GET("/v1beta/operations/:operation", adapter.GeminiOperationHandler(deps.Store))
+	api.GET("/v1/models/:model/operations/:operation", adapter.GeminiOperationHandler(deps.Store))
+	api.GET("/v1/operations/:operation", adapter.GeminiOperationHandler(deps.Store))
 	api.POST("/v1/audio/speech", adapter.SpeechHandler(pool))
 	api.POST("/v1/audio/transcriptions", adapter.TranscriptionHandler(pool))
 	api.POST("/v1/audio/translations", adapter.TranslationHandler(pool))
@@ -107,7 +111,7 @@ func NewRouter(deps Deps) *gin.Engine {
 	router.NoRoute(adapter.CORSMiddleware(), adapter.RequestMiddleware(deps.Store), func(c *gin.Context) {
 		path := c.Request.URL.Path
 		switch {
-		case strings.HasPrefix(path, "/v1beta/"), strings.HasPrefix(path, "/upload/"):
+		case adapter.IsGeminiRequest(c):
 			adapter.WriteGeminiNotFound(c)
 		case strings.HasPrefix(path, "/v1/"):
 			adapter.WriteOpenAINotFound(c)

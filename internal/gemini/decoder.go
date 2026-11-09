@@ -39,7 +39,9 @@ type FrameDecoder struct {
 	metadata        EventMetadataData
 	sawComplete     bool
 	sawError        bool
-	sawEnd          bool
+	// rpcStatus 是生成流中没有载荷的记录携带的 RPC 状态
+	rpcStatus []any
+	sawEnd    bool
 	// background 表示生成流以后台生成记录或运行中的 Task 状态结束，成品由 hNvQHb 读取
 	background bool
 	// awaitIncomplete 表示生成流没有完成的候选时按后台生成处理，用于 Deep Research 计划轮
@@ -104,6 +106,7 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 			}
 			encoded, _ := stringAt(record, 2)
 			if encoded == "" {
+				d.rpcStatus, _ = arrayAt(record, 5)
 				return nil
 			}
 			var payload []any
@@ -172,7 +175,11 @@ func (d *FrameDecoder) decodeTurn(payload []any, state *ConversationState, emit 
 // finish 在回答结束时发布剩余正文与结束原因
 func (d *FrameDecoder) finish(state *ConversationState, emit func(Event) error) error {
 	if !d.sawComplete && !d.sawError {
-		return retryableProtocolError("gemini protocol ended without a completed candidate", nil)
+		message := "gemini protocol ended without a completed candidate"
+		if d.rpcStatus != nil {
+			message = fmt.Sprintf("%s, rpc status %v", message, d.rpcStatus)
+		}
+		return retryableProtocolError(message, nil)
 	}
 	for candidateIndex := range d.texts {
 		if err := d.flushText(candidateIndex, emit); err != nil {
@@ -239,6 +246,7 @@ func (d *FrameDecoder) reset() {
 	d.metadata = EventMetadataData{}
 	d.sawComplete = false
 	d.sawError = false
+	d.rpcStatus = nil
 	d.sawEnd = false
 	d.background = false
 }
@@ -457,11 +465,25 @@ func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit f
 	return nil
 }
 
+// transcriptEnd 是提示词转录的轮次结束标记，模型有时在回答末尾仿写
+const transcriptEnd = "<|im_end|>"
+
+// trimTranscriptEnd 去掉回答末尾的轮次结束标记及其尚未写完的开头
+func trimTranscriptEnd(text string) string {
+	for size := len(transcriptEnd); size > 1; size-- {
+		if strings.HasSuffix(text, transcriptEnd[:size]) {
+			return text[:len(text)-size]
+		}
+	}
+	return text
+}
+
 // visibleContent 把候选正文原文 raw 转为输出的正文与代码块，返回正文、代码块与引用标记指向的网页来源，代码块偏移为它在正文中的 rune 位置
 func visibleContent(candidate []any, raw string) (string, []codeSnapshot, []Citation) {
 	raw = stripFollowUps(expandImageResults(candidate, renderWidgets(candidate, stripContentCards(candidate, raw))))
 	tables := citationTables(candidate)
 	text, codes := parseStructuredContent(markCitations(restoreAutolinks(expandDocuments(candidate, stripChameleon(raw))), tables))
+	text = trimTranscriptEnd(text)
 	for index, code := range codes {
 		prefix, _ := takeCitations(string([]rune(text)[:code.Offset]), tables)
 		codes[index].Offset = utf8.RuneCountInString(prefix)
@@ -532,9 +554,13 @@ func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, session 
 		}
 	}
 	if raw, ok := richContentField(candidate, 86); ok {
-		file, _ := valuePath(raw, 0, 1)
+		audio, _ := valuePath(raw, 0, 1)
 		placeholder, _ := stringPath(raw, 6, 0)
-		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedAudio, file, placeholder, emit); err != nil {
+		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedAudio, audio, placeholder, emit); err != nil {
+			return err
+		}
+		video, _ := valuePath(raw, 1, 1)
+		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedVideo, video, "", emit); err != nil {
 			return err
 		}
 	}
@@ -582,6 +608,9 @@ var (
 )
 
 func parseStructuredContent(raw string) (string, []codeSnapshot) {
+	if !strings.Contains(raw, "&code_event_index=") {
+		return normalizeSnapshot(stripArtifacts(raw)), nil
+	}
 	var text strings.Builder
 	codes := make([]codeSnapshot, 0)
 	cursor := 0
@@ -615,13 +644,21 @@ func parseStructuredContent(raw string) (string, []codeSnapshot) {
 		} else {
 			cursor = len(raw)
 		}
-		visiblePrefix := normalizeSnapshot(artifactPattern.ReplaceAllString(text.String(), ""))
+		visiblePrefix := normalizeSnapshot(stripArtifacts(text.String()))
 		codes = append(codes, codeSnapshot{
 			Index: index, Type: CodeEventType(typeName), Language: language,
 			Content: content, Offset: utf8.RuneCountInString(visiblePrefix), Complete: complete,
 		})
 	}
-	return normalizeSnapshot(artifactPattern.ReplaceAllString(text.String(), "")), codes
+	return normalizeSnapshot(stripArtifacts(text.String())), codes
+}
+
+// stripArtifacts 去掉正文中的生成内容占位行
+func stripArtifacts(text string) string {
+	if !strings.Contains(text, "googleusercontent.com/") {
+		return text
+	}
+	return artifactPattern.ReplaceAllString(text, "")
 }
 
 func parseCitations(raw any) []Citation {
@@ -952,9 +989,12 @@ var autolinkPattern = regexp.MustCompile(`\[([^\[\]\s]+)\]\(([^()\s]+)\)`)
 // pendingLinkPattern 匹配正文末尾尚未写完的 Markdown 链接
 var pendingLinkPattern = regexp.MustCompile(`\[[^\[\]\s]*(?:\](?:\([^()\s]*)?)?$`)
 
-// restoreAutolinks 把代码以外官网自动改写的 [http 或 https 地址](地址)、[域名路径](https://域名路径) 与 [邮箱](mailto:邮箱) 还原为原文
+// restoreAutolinks 把围栏代码块以外官网自动改写的 [http 或 https 地址](地址)、[域名路径](https://域名路径) 与 [邮箱](mailto:邮箱) 还原为原文，行内代码中的地址官网同样改写
 func restoreAutolinks(text string) string {
-	return outsideCode(text, func(prose string) string {
+	if !strings.Contains(text, "](") {
+		return text
+	}
+	return transformRanges(text, markdownRanges(text, false), func(prose string) string {
 		return autolinkPattern.ReplaceAllStringFunc(prose, func(link string) string {
 			match := autolinkPattern.FindStringSubmatch(link)
 			for _, scheme := range []string{"https://", "http://", "mailto:"} {
@@ -969,12 +1009,17 @@ func restoreAutolinks(text string) string {
 
 // pendingLinkStart 返回代码以外正文末尾尚未写完的 Markdown 链接的起点，写完后它可能还原为原文，没有时返回正文长度
 func pendingLinkStart(text string) int {
-	for _, span := range proseRanges(text) {
+	tail := strings.LastIndexAny(text, " \t\n\f\r") + 1
+	if strings.IndexByte(text[tail:], '[') < 0 {
+		return len(text)
+	}
+	for _, span := range markdownRanges(text, false) {
 		if span[1] != len(text) {
 			continue
 		}
-		if location := pendingLinkPattern.FindStringIndex(text[span[0]:]); location != nil {
-			return span[0] + location[0]
+		start := max(span[0], tail)
+		if location := pendingLinkPattern.FindStringIndex(text[start:]); location != nil {
+			return start + location[0]
 		}
 	}
 	return len(text)
@@ -982,9 +1027,14 @@ func pendingLinkStart(text string) int {
 
 // outsideCode 对代码以外的各段正文调用 transform，代码原样保留
 func outsideCode(text string, transform func(string) string) string {
+	return transformRanges(text, proseRanges(text), transform)
+}
+
+// transformRanges 对 spans 中的各段文字调用 transform，其余内容原样保留
+func transformRanges(text string, spans [][2]int, transform func(string) string) string {
 	var result strings.Builder
 	cursor := 0
-	for _, span := range proseRanges(text) {
+	for _, span := range spans {
 		result.WriteString(text[cursor:span[0]])
 		result.WriteString(transform(text[span[0]:span[1]]))
 		cursor = span[1]
@@ -995,6 +1045,11 @@ func outsideCode(text string, transform func(string) string) string {
 
 // proseRanges 返回 Markdown 正文中围栏代码块与行内代码以外的字节区间，未闭合的围栏延伸到正文末尾，未闭合的行内代码延伸到段落末尾
 func proseRanges(text string) [][2]int {
+	return markdownRanges(text, true)
+}
+
+// markdownRanges 返回围栏代码块以外的字节区间，inline 为真时同时排除行内代码；inline 为假时按官网的判定，围栏内的任何围栏行都结束代码块
+func markdownRanges(text string, inline bool) [][2]int {
 	var ranges [][2]int
 	prose, fence, ticks := 0, "", 0
 	for start := 0; start < len(text); {
@@ -1007,7 +1062,7 @@ func proseRanges(text string) [][2]int {
 		line := text[start:end]
 		switch {
 		case fence != "":
-			if closesFence(line, fence) {
+			if closesFence(line, fence) || !inline && fenceOpening(line) != "" {
 				fence, prose = "", end
 			}
 		case fenceOpening(line) != "":
@@ -1019,7 +1074,7 @@ func proseRanges(text string) [][2]int {
 			if ticks > 0 {
 				ticks, prose = 0, start
 			}
-		default:
+		case inline:
 			for index := 0; index < len(line); {
 				if line[index] != '`' {
 					index++
@@ -1065,6 +1120,27 @@ func closesFence(line string, fence string) bool {
 	return len(trimmed)-len(rest) >= len(fence) && strings.TrimSpace(rest) == ""
 }
 
+// InFencedCode 判断字节位置是否在 Markdown 围栏代码块内，未闭合的围栏延伸到正文末尾
+func InFencedCode(text string, position int) bool {
+	fence := ""
+	for start := 0; start <= position; {
+		end := strings.IndexByte(text[start:], '\n')
+		if end < 0 {
+			end = len(text)
+		} else {
+			end += start
+		}
+		line := text[start:end]
+		if fence == "" {
+			fence = fenceOpening(line)
+		} else if closesFence(line, fence) {
+			fence = ""
+		}
+		start = end + 1
+	}
+	return fence != ""
+}
+
 // mediaPlaceholderOffset 返回媒体占位链接在输出正文中的 rune 位置，没有占位链接时返回 -1
 func mediaPlaceholderOffset(candidate []any, placeholder string) int {
 	if placeholder == "" {
@@ -1083,45 +1159,60 @@ func diffSnapshot(kind EventKind, candidate int, previous, current string) (Even
 	if previous == current {
 		return Event{}, false
 	}
-	previousRunes := []rune(previous)
-	currentRunes := []rune(current)
-	prefix := 0
-	for prefix < len(previousRunes) && prefix < len(currentRunes) && previousRunes[prefix] == currentRunes[prefix] {
-		prefix++
-	}
+	prefix := commonPrefix(previous, current)
 	operation := SnapshotReplace
-	if prefix == len(previousRunes) {
+	if prefix == len(previous) {
 		operation = SnapshotAppend
-	} else if prefix == len(currentRunes) {
+	} else if prefix == len(current) {
 		operation = SnapshotTruncate
 	}
 	return Event{
 		Kind:         kind,
 		Candidate:    candidate,
 		Operation:    operation,
-		Delta:        string(currentRunes[prefix:]),
+		Delta:        current[prefix:],
 		Snapshot:     current,
-		PrefixLength: prefix,
+		PrefixLength: utf8.RuneCountInString(current[:prefix]),
 	}, true
+}
+
+// commonPrefix 返回两段文本相同前缀的字节长度，结尾落在 UTF-8 字符边界上
+func commonPrefix(left, right string) int {
+	prefix := 0
+	for prefix < len(left) && prefix < len(right) && left[prefix] == right[prefix] {
+		prefix++
+	}
+	for prefix > 0 && (prefix < len(left) && !utf8.RuneStart(left[prefix]) || prefix < len(right) && !utf8.RuneStart(right[prefix])) {
+		prefix--
+	}
+	return prefix
 }
 
 func scanProtocolRecords(reader io.Reader, handle func([]any) error) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), maxProtocolFrameSize)
+	pending := ""
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		line = strings.TrimPrefix(line, ")]}'")
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+		if pending == "" {
+			line = strings.TrimSpace(strings.TrimPrefix(line, ")]}'"))
+			if line == "" {
+				continue
+			}
+			if _, err := strconv.ParseUint(line, 10, 64); err == nil {
+				continue
+			}
 		}
-		if _, err := strconv.ParseUint(line, 10, 64); err == nil {
-			continue
-		}
+		pending += line
 		var frame []any
-		if err := json.Unmarshal([]byte(line), &frame); err != nil {
+		if err := json.Unmarshal([]byte(pending), &frame); err != nil {
+			var syntax *json.SyntaxError
+			if errors.As(err, &syntax) && syntax.Error() == "unexpected end of JSON input" {
+				continue
+			}
 			return fmt.Errorf("decode protocol frame: %w", err)
 		}
+		pending = ""
 		for _, rawRecord := range frame {
 			record, ok := rawRecord.([]any)
 			if ok {
@@ -1187,6 +1278,10 @@ func firstString(value any) (string, bool) {
 
 var snapshotReplacer = strings.NewReplacer(`\<`, `<`, `\>`, `>`, `\_`, `_`, `\[`, `[`, `\]`, `]`)
 
+// normalizeSnapshot 去掉代码以外正文中的 Markdown 转义
 func normalizeSnapshot(value string) string {
-	return snapshotReplacer.Replace(value)
+	if !strings.Contains(value, `\`) {
+		return value
+	}
+	return outsideCode(value, snapshotReplacer.Replace)
 }

@@ -47,7 +47,7 @@ build/               桌面版图标、Windows 清单与版本信息、macOS 与
 
 ## 管理端前端
 
-管理端网页在 `web/` 用 pnpm 开发，构建产物输出到 `internal/webui/dist`，由 `go:embed` 内嵌进可执行文件；`/api`、`/v1`、`/v1beta`、`/upload` 之外的 GET 请求回落到 `index.html`，入口页的 `<base>` 按请求路径写成回到管理端根目录的相对地址，前端的资源、接口与路由都相对它解析，因此可挂在反向代理的子路径下。开发用以下命令：
+管理端网页在 `web/` 用 pnpm 开发，构建产物输出到 `internal/webui/dist`，由 `go:embed` 内嵌进可执行文件，除入口页外的静态资源以 gzip 构建产物内嵌，接受 gzip 的客户端直接收到压缩产物，其余客户端收到解压后的内容；`/api`、`/v1`、`/v1beta`、`/upload` 之外的 GET 请求回落到 `index.html`，入口页的 `<base>` 按请求路径写成回到管理端根目录的相对地址，前端的资源、接口与路由都相对它解析，因此可挂在反向代理的子路径下。开发用以下命令：
 
 ```powershell
 cd web
@@ -143,9 +143,9 @@ Release 的 Windows 包是只含桌面版 `gemini-web2api.exe` 的 zip，`setup`
 
 - **请求跟踪**：`RequestMiddleware` 用 `logging.NewRequest` 为每个公开请求创建跟踪对象并放进请求 context；处理函数用 `logging.FromContext` 取出，调用 `Begin` 标记为生成请求，之后在各阶段调用 `Stage`、`AccountReady`、`AttemptFailed`、`SetUsage`、`SetResult`、`Fail`
 - **控制台与管理端**：`internal/logging` 把阶段与结果写到控制台，并经 `logging.Subscribe` 推送给管理端 `/api/events`；日志格式与各条消息见 [logging.md](logging.md)
-- **账本写入**：请求结束时 `RequestMiddleware` 调用 `Finish` 取得结果，调用过 `Begin` 的请求由 `requestdb.Store.Record` 写入 `data/requests.db`；`REQUEST_BODY_LOG=true` 时同时写入截断的请求与响应正文
+- **账本写入**：请求结束时 `RequestMiddleware` 调用 `Finish` 取得结果，调用过 `Begin` 的请求由 `requestdb.Store.Record` 写入 `data/requests.db`；`REQUEST_BODY_LOG=true` 时同时写入截断的请求与响应正文；写入协程把 200 ms 内到达的记录与会话合并为一个事务，写入用单连接，查询用 4 个只读连接，查询前先提交排队的内容
 - **其他数据**：同一数据库保存 Responses、文件、视频任务与会话登记，分别在 `internal/requestdb` 的 `responses.go`、`files.go`、`videos.go`、`sessions.go`
-- **保留与收缩**：`prune` 启动时与每小时删除过期的请求记录与汇总（90 天）、Responses（30 天）、视频任务与生成文件（48 小时）和到期的上传文件，再以 `incremental_vacuum` 交还空闲页、`wal_checkpoint(TRUNCATE)` 截短 WAL；`Open` 把非增量收缩的库整理为增量收缩，按 `schema` 补上缺少的列并删除定义之外的表、索引、视图与触发器（`schema.go`）
+- **保留与收缩**：`prune` 启动时与每小时删除过期的请求记录与汇总（90 天）、Responses（30 天）、视频任务与生成文件（48 小时）和到期的上传文件，再以 `incremental_vacuum` 交还空闲页、`wal_checkpoint(PASSIVE)` 写回 WAL，WAL 达到 4096 帧且已全部写回时截短文件；`Open` 把非增量收缩的库整理为增量收缩，按 `schema` 补上缺少的列并删除定义之外的表、索引、视图与触发器（`schema.go`）
 - **管理端查询**：`/api/usage`、`/api/usage/records`、`/api/usage/records.csv` 与 `/api/requests/:id/body` 由 `internal/requestdb/http.go` 提供，费用按 `internal/pricing` 的单价计算
 
 ## 常见修改

@@ -39,6 +39,24 @@ func catalogError(modelName string, availability balancer.ModelAvailability, not
 	return &gemini.ProtocolError{HTTPStatus: http.StatusNotFound, Message: notFound}
 }
 
+// cooldownError 是支持该模型的账号全部冷却时的 429 错误
+func cooldownError(modelName string, wait time.Duration, reasons []string) error {
+	message := fmt.Sprintf("模型 %q 的账号都在冷却，%s 后恢复", modelName, wait.Round(time.Second))
+	if len(reasons) > 0 {
+		message += "：" + strings.Join(reasons, "；")
+	}
+	return &gemini.ProtocolError{HTTPStatus: http.StatusTooManyRequests, Message: message}
+}
+
+// noAccountError 返回没有账号可用时的错误：全部冷却时为带恢复时间的 429，否则为可重试的 503
+func noAccountError(ctx context.Context, pool *balancer.AccountPool, modelName string) error {
+	recoverAt := pool.RetryAfter(ctx, modelName)
+	if recoverAt.IsZero() {
+		return &gemini.ProtocolError{HTTPStatus: http.StatusServiceUnavailable, Message: "没有可用账号", Retryable: true}
+	}
+	return cooldownError(modelName, time.Until(recoverAt), pool.ModelAvailability(ctx, modelName).Reasons)
+}
+
 // awaitModel 判断模型能否调度：识别失败按 modelKnown，支持该模型的账号都未就绪时为 503 并列出原因，全部冷却时最早恢复的账号在 modelRecoveryWindow 内恢复则等待，否则为 429
 func awaitModel(c *gin.Context, pool *balancer.AccountPool, modelName string) error {
 	modelID := config.MapModel(modelName)
@@ -60,7 +78,7 @@ func awaitModel(c *gin.Context, pool *balancer.AccountPool, modelName string) er
 		}
 		wait := time.Until(recoverAt)
 		if wait > modelRecoveryWindow {
-			return &gemini.ProtocolError{HTTPStatus: http.StatusTooManyRequests, Message: fmt.Sprintf("模型 %q 的账号都在冷却，%s 后恢复：%s", modelName, wait.Round(time.Second), strings.Join(availability.Reasons, "；"))}
+			return cooldownError(modelName, wait, availability.Reasons)
 		}
 		timer := time.NewTimer(wait)
 		select {

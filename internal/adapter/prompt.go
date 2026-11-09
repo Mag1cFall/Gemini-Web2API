@@ -55,6 +55,10 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			var value string
 			_ = json.Unmarshal(part["text"], &value)
 			writeTextSegment(&builder, value)
+		case "refusal":
+			var value string
+			_ = json.Unmarshal(part["refusal"], &value)
+			writeTextSegment(&builder, value)
 		case "image_url", "input_image", "image":
 			label, file, err := decodeImagePart(ctx, part, client)
 			if err != nil {
@@ -120,6 +124,11 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 				return "", nil, err
 			}
 			files = append(files, attachments...)
+			var failed bool
+			_ = json.Unmarshal(part["is_error"], &failed)
+			if failed && strings.TrimSpace(content) == "" {
+				content = "（执行失败，没有输出）"
+			}
 			writeResultBlock(&builder, cmp.Or(toolNames[id], id), content)
 		case "thinking", "redacted_thinking":
 		default:

@@ -18,9 +18,19 @@ type reasoningOptions struct {
 
 // geminiThinkingConfig 表示 Gemini 原生思考配置
 type geminiThinkingConfig struct {
-	ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
-	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
-	IncludeThoughts bool   `json:"includeThoughts,omitempty"`
+	ThinkingBudget  *protoInt `json:"thinkingBudget,omitempty"`
+	ThinkingLevel   string    `json:"thinkingLevel,omitempty"`
+	IncludeThoughts bool      `json:"includeThoughts,omitempty"`
+}
+
+// protoInt 是 proto3 JSON 的整数字段，接受数字与字符串两种写法
+type protoInt int
+
+// UnmarshalJSON 解码数字或十进制字符串
+func (value *protoInt) UnmarshalJSON(raw []byte) error {
+	parsed, err := strconv.Atoi(strings.Trim(string(raw), `"`))
+	*value = protoInt(parsed)
+	return err
 }
 
 // reasoningEffortLevel 将外部思考强度映射到网页模型菜单的三档思考强度
@@ -150,15 +160,16 @@ func claudeThinkingSettings(request claude.ClaudeRequest) (gemini.ThinkingLevel,
 	switch strings.ToLower(strings.TrimSpace(request.Thinking.Type)) {
 	case "disabled":
 		return gemini.ThinkingLow, false, nil
-	case "enabled", "adaptive":
+	case "enabled", "adaptive", "between_tools":
+		includeThoughts := request.Thinking.Display != "omitted"
 		if request.OutputConfig == nil || request.OutputConfig.Effort == "" {
 			if request.Thinking.BudgetTokens != nil {
-				return thinkingBudgetLevel(*request.Thinking.BudgetTokens), true, nil
+				return thinkingBudgetLevel(*request.Thinking.BudgetTokens), includeThoughts, nil
 			}
-			return gemini.ThinkingHigh, true, nil
+			return gemini.ThinkingHigh, includeThoughts, nil
 		}
 		mode, err := reasoningEffortLevel(request.OutputConfig.Effort)
-		return mode, err == nil, err
+		return mode, includeThoughts && err == nil, err
 	default:
 		return gemini.ThinkingLow, false, fmt.Errorf("不支持的 thinking.type %q", request.Thinking.Type)
 	}
@@ -186,7 +197,7 @@ func geminiRequestThinkingSettings(request GeminiGenerateContentRequest) (gemini
 		return mode, config.ThinkingConfig.IncludeThoughts && err == nil, err
 	}
 	if budget := config.ThinkingConfig.ThinkingBudget; budget != nil {
-		return thinkingBudgetLevel(*budget), config.ThinkingConfig.IncludeThoughts && *budget != 0, nil
+		return thinkingBudgetLevel(int(*budget)), config.ThinkingConfig.IncludeThoughts && *budget != 0, nil
 	}
 	return unspecifiedThinkingLevel(config.ThinkingConfig.IncludeThoughts), config.ThinkingConfig.IncludeThoughts, nil
 }

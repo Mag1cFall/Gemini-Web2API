@@ -36,6 +36,11 @@ export const connectMessages = defineMessages({
     codexConfig: '写入 Codex 配置文件',
     codexEnv: '在终端中设置 key 后运行 codex',
     opencodeConfig: '写入 OpenCode 配置文件，在 OpenCode 中选择 Gemini-Web2API 下的模型',
+    openclawConfig: '写入 OpenClaw 配置文件，默认模型为所选模型',
+    ompModels: '写入 omp 的模型配置文件',
+    ompRun: '在终端中设置 key 后运行 omp',
+    magpieImport: '在终端运行以下命令，把本服务导入 Magpie',
+    magpieManual: '或在 Magpie 中添加自定义提供商，按下面填写',
     cherrySteps: '在 Cherry Studio 的“设置 › 模型服务”中添加提供商，按下面填写',
     cherryType: '提供商类型',
     cherryTypeValue: 'OpenAI',
@@ -96,6 +101,11 @@ export const connectMessages = defineMessages({
     codexConfig: '寫入 Codex 設定檔',
     codexEnv: '在終端機中設定 key 後執行 codex',
     opencodeConfig: '寫入 OpenCode 設定檔，在 OpenCode 中選擇 Gemini-Web2API 下的模型',
+    openclawConfig: '寫入 OpenClaw 設定檔，預設模型為所選模型',
+    ompModels: '寫入 omp 的模型設定檔',
+    ompRun: '在終端機中設定 key 後執行 omp',
+    magpieImport: '在終端機執行以下命令，把本服務匯入 Magpie',
+    magpieManual: '或在 Magpie 中新增自訂供應商，依下列內容填寫',
     cherrySteps: '在 Cherry Studio 的「設定 › 模型服務」中新增供應商，依下列填寫',
     cherryType: '供應商類型',
     cherryTypeValue: 'OpenAI',
@@ -160,6 +170,11 @@ export const connectMessages = defineMessages({
     codexEnv: 'Set the key in a terminal, then run codex',
     opencodeConfig:
       'Write the OpenCode configuration file, then pick a model under Gemini-Web2API in OpenCode',
+    openclawConfig: 'Write the OpenClaw configuration file; the selected model becomes the default',
+    ompModels: 'Write the omp model configuration file',
+    ompRun: 'Set the key in a terminal, then run omp',
+    magpieImport: 'Run this command in a terminal to import this service into Magpie',
+    magpieManual: 'Or add a custom provider in Magpie with these values',
     cherrySteps: 'In Cherry Studio, add a provider under Settings › Model Provider and fill in',
     cherryType: 'Provider type',
     cherryTypeValue: 'OpenAI',
@@ -225,6 +240,11 @@ export const connectMessages = defineMessages({
     codexEnv: 'ターミナルでキーを設定してから codex を実行します',
     opencodeConfig:
       'OpenCode の設定ファイルに書き込み、OpenCode で Gemini-Web2API のモデルを選びます',
+    openclawConfig: 'OpenClaw の設定ファイルに書き込みます。選択したモデルが既定になります',
+    ompModels: 'omp のモデル設定ファイルに書き込みます',
+    ompRun: 'ターミナルで key を設定してから omp を実行します',
+    magpieImport: 'ターミナルで次のコマンドを実行し、このサービスを Magpie にインポートします',
+    magpieManual: 'または Magpie でカスタムプロバイダーを追加し、次の内容を入力します',
     cherrySteps:
       'Cherry Studio の「設定 › モデルサービス」でプロバイダーを追加し、次のとおり入力します',
     cherryType: 'プロバイダーの種類',
@@ -291,6 +311,11 @@ export const connectMessages = defineMessages({
     codexConfig: 'Codex 설정 파일에 넣습니다',
     codexEnv: '터미널에서 키를 설정한 뒤 codex를 실행합니다',
     opencodeConfig: 'OpenCode 설정 파일에 넣고 OpenCode에서 Gemini-Web2API의 모델을 고릅니다',
+    openclawConfig: 'OpenClaw 설정 파일에 넣습니다. 선택한 모델이 기본 모델이 됩니다',
+    ompModels: 'omp 모델 설정 파일에 넣습니다',
+    ompRun: '터미널에서 key를 설정한 뒤 omp를 실행합니다',
+    magpieImport: '터미널에서 다음 명령을 실행해 이 서비스를 Magpie로 가져옵니다',
+    magpieManual: '또는 Magpie에서 사용자 지정 제공자를 추가하고 다음과 같이 입력합니다',
     cherrySteps:
       'Cherry Studio의 “설정 › 모델 서비스”에서 공급자를 추가하고 아래와 같이 입력합니다',
     cherryType: '공급자 유형',
@@ -359,6 +384,12 @@ export const connectMessages = defineMessages({
     codexEnv: 'Définissez la clé dans un terminal, puis lancez codex',
     opencodeConfig:
       'Écrivez le fichier de configuration d’OpenCode, puis choisissez un modèle sous Gemini-Web2API dans OpenCode',
+    openclawConfig:
+      'Écrivez le fichier de configuration d’OpenClaw ; le modèle choisi devient le modèle par défaut',
+    ompModels: 'Écrivez le fichier de configuration des modèles d’omp',
+    ompRun: 'Définissez la clé dans un terminal, puis lancez omp',
+    magpieImport: 'Exécutez cette commande dans un terminal pour importer ce service dans Magpie',
+    magpieManual: 'Ou ajoutez un fournisseur personnalisé dans Magpie avec ces valeurs',
     cherrySteps:
       'Dans Cherry Studio, ajoutez un fournisseur dans Paramètres › Fournisseur de modèles et renseignez',
     cherryType: 'Type de fournisseur',
@@ -429,6 +460,12 @@ export const connectMessages = defineMessages({
     codexEnv: 'Schlüssel im Terminal setzen, dann codex ausführen',
     opencodeConfig:
       'In die Konfigurationsdatei von OpenCode schreiben und in OpenCode ein Modell unter Gemini-Web2API wählen',
+    openclawConfig:
+      'In die Konfigurationsdatei von OpenClaw schreiben; das gewählte Modell wird zum Standardmodell',
+    ompModels: 'In die Modellkonfigurationsdatei von omp schreiben',
+    ompRun: 'Den Key im Terminal setzen und dann omp starten',
+    magpieImport: 'Diesen Befehl im Terminal ausführen, um den Dienst in Magpie zu importieren',
+    magpieManual: 'Oder in Magpie einen eigenen Anbieter mit diesen Werten anlegen',
     cherrySteps:
       'In Cherry Studio unter Einstellungen › Modellanbieter einen Anbieter hinzufügen und wie folgt ausfüllen',
     cherryType: 'Anbietertyp',

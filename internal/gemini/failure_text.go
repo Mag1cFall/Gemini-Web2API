@@ -67,6 +67,9 @@ func (g *failureTextGuard) Emit(event Event) error {
 	case event.Kind == EventMedia && event.Candidate == 0:
 		g.media = true
 	}
+	if g.decided && event.Kind == EventText && event.Candidate == 0 && event.Operation != SnapshotAppend && (g.flagged || isFailureTextPrefix(g.text)) {
+		g.decided = false
+	}
 	if g.decided {
 		if event.Kind == EventDone && g.failed() {
 			return failureTextError(g.text)

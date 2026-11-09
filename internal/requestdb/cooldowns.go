@@ -38,7 +38,7 @@ func (store *Store) Cooldowns(ctx context.Context, now time.Time) ([]StoredCoold
 	if _, err := store.db.ExecContext(ctx, `DELETE FROM cooldowns WHERE until < ?`, now.UnixMilli()); err != nil {
 		return nil, err
 	}
-	rows, err := store.db.QueryContext(ctx, `SELECT account,model,until,reason FROM cooldowns`)
+	rows, err := store.reads.QueryContext(ctx, `SELECT account,model,until,reason FROM cooldowns`)
 	if err != nil {
 		return nil, err
 	}

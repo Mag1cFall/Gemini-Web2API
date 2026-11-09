@@ -135,7 +135,7 @@ func openAIModelObject(model CatalogModel) gin.H {
 	object := gin.H{
 		"id": model.ID, "object": "model", "created": 0, "owned_by": owner, "default": model.Default,
 		"display_name": model.DisplayName, "description": model.Description,
-		"context_window": model.MaxInputTokenLimit, "min_context_window": model.MinInputTokenLimit,
+		"context_window": model.MaxInputTokenLimit, "context_length": model.MaxInputTokenLimit, "min_context_window": model.MinInputTokenLimit,
 		"max_context_window": model.MaxInputTokenLimit, "available_account_count": model.AccountCount,
 		"thinking_levels": thinkingLevelNames(model.ThinkingLevels),
 	}

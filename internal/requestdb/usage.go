@@ -304,7 +304,7 @@ func (store *Store) scan(ctx context.Context, part segment, filters UsageFilters
 	table, column := part.source.table()
 	value := &entry{}
 	if part.source != fromRequests {
-		rows, err := store.db.QueryContext(ctx, `SELECT start, model, account, protocol, state, status, requests,
+		rows, err := store.reads.QueryContext(ctx, `SELECT start, model, account, protocol, state, status, requests,
  input_tokens, reasoning_tokens, reply_tokens, total_tokens, duration_ms, first_event_ms, first_events, queue_ms,
  duration_hist, first_event_hist, last_time FROM `+table+` WHERE `+column+` >= ? AND `+column+` < ?`+clause, args...)
 		if err != nil {
@@ -328,7 +328,7 @@ func (store *Store) scan(ctx context.Context, part segment, filters UsageFilters
 		}
 		return errors.Join(rows.Err(), rows.Close())
 	}
-	rows, err := store.db.QueryContext(ctx, `SELECT time, model, account, protocol, state, status,
+	rows, err := store.reads.QueryContext(ctx, `SELECT time, model, account, protocol, state, status,
  duration_ms, first_event_ms, queue_ms, input_tokens, reasoning_tokens, reply_tokens, total_tokens
  FROM requests WHERE time >= ? AND time < ?`+clause, args...)
 	if err != nil {
@@ -371,7 +371,7 @@ type costs struct {
 // scanCost 从原始记录逐条按实际处理模型的单价累加 [from, to) 内符合筛选的费用，starts 非空时同时累加到各分桶
 func (store *Store) scanCost(ctx context.Context, from, to int64, starts []int64, filters UsageFilters) (costs, error) {
 	clause, filterArgs := filterSQL(filters)
-	rows, err := store.db.QueryContext(ctx, `SELECT time, CASE WHEN provider_model != '' THEN provider_model ELSE model END,
+	rows, err := store.reads.QueryContext(ctx, `SELECT time, CASE WHEN provider_model != '' THEN provider_model ELSE model END,
  input_tokens, reasoning_tokens + reply_tokens FROM requests WHERE time >= ? AND time < ?`+clause,
 		append([]any{from, to}, filterArgs...)...)
 	if err != nil {
@@ -404,6 +404,7 @@ var usageDimensions = append(slices.Clone(UsageDimensions), "status")
 
 // Usage 返回时间范围内的汇总、上一周期、等价费用、逐桶趋势、堆叠序列、分项与筛选候选
 func (store *Store) Usage(ctx context.Context, query UsageQuery) (UsageReport, error) {
+	store.flush()
 	location := query.Location
 	if location == nil {
 		location = time.UTC
@@ -495,7 +496,7 @@ func (store *Store) Usage(ctx context.Context, query UsageQuery) (UsageReport, e
 	})
 	report.Series = stackSeries(report.Groups[query.Stack], stack, len(starts))
 	var latest sql.NullInt64
-	if err := store.db.QueryRowContext(ctx, `SELECT MAX(time) FROM requests`).Scan(&latest); err != nil {
+	if err := store.reads.QueryRowContext(ctx, `SELECT MAX(time) FROM requests`).Scan(&latest); err != nil {
 		return UsageReport{}, err
 	}
 	if latest.Valid {
@@ -560,7 +561,7 @@ func (store *Store) options(ctx context.Context, segments []segment) (map[string
 	}
 	for _, part := range segments {
 		table, column := part.source.table()
-		rows, err := store.db.QueryContext(ctx, `SELECT DISTINCT `+strings.Join(UsageDimensions, ", ")+` FROM `+table+
+		rows, err := store.reads.QueryContext(ctx, `SELECT DISTINCT `+strings.Join(UsageDimensions, ", ")+` FROM `+table+
 			` WHERE `+column+` >= ? AND `+column+` < ?`, part.from, part.to)
 		if err != nil {
 			return nil, err

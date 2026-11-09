@@ -57,13 +57,27 @@ func customToolInput(arguments json.RawMessage) string {
 	return string(arguments)
 }
 
+// qualifyNamespaces 给重名的命名空间工具加上命名空间前缀，模型按限定名调用
+func qualifyNamespaces(definitions []ToolDefinition) {
+	total := map[string]int{}
+	for _, definition := range definitions {
+		total[definition.Name]++
+	}
+	for index, definition := range definitions {
+		if total[definition.Name] > 1 && definition.Namespace != "" {
+			definitions[index].Name = definition.Namespace + "." + definition.Name
+		}
+	}
+}
+
 // responsesCallItem 按声明的工具类型把工具调用投影为 Responses 输出项
 func responsesCallItem(call ToolCall, bridge ToolBridge) gin.H {
 	item := gin.H{"id": "fc_" + call.ID, "status": "completed", "call_id": call.ID}
 	definition := bridge.tool(call.Name)
+	name := strings.TrimPrefix(call.Name, definition.Namespace+".")
 	switch definition.Kind {
 	case "custom":
-		item["type"], item["name"], item["input"] = "custom_tool_call", call.Name, customToolInput(call.Arguments)
+		item["type"], item["name"], item["input"] = "custom_tool_call", name, customToolInput(call.Arguments)
 	case "local_shell":
 		action := map[string]any{}
 		_ = json.Unmarshal(call.Arguments, &action)
@@ -79,7 +93,7 @@ func responsesCallItem(call ToolCall, bridge ToolBridge) gin.H {
 	case "apply_patch":
 		item["type"], item["operation"] = "apply_patch_call", json.RawMessage(call.Arguments)
 	default:
-		item["type"], item["name"], item["arguments"] = "function_call", call.Name, string(call.Arguments)
+		item["type"], item["name"], item["arguments"] = "function_call", name, string(call.Arguments)
 	}
 	if definition.Namespace != "" {
 		item["namespace"] = definition.Namespace

@@ -167,12 +167,12 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return gin.H{"id": id, "object": "text_completion", "created": created, "model": model, "choices": choices}
 		}
 		var usage gemini.Usage
-		generate := func(index int, onEvent func(gemini.Event) error, hasVisibleOutput func() bool) (generationResult, error) {
+		generate := func(index int, onEvent func(gemini.Event) error, projection *streamProjection) (generationResult, error) {
 			transcript := completionTranscript(prompts[index], request.Suffix)
 			result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionCreate, request.Model, fmt.Sprintf("%s-%d", id, index), generationMedia{}, gemini.ThinkingLow, ToolBridge{Stop: sequences},
 				func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 					return transcript, nil, nil
-				}, onEvent, hasVisibleOutput)
+				}, onEvent, projection)
 			c.Set("account_id", accountID)
 			if err == nil && result.Accumulator.Usage != nil {
 				usage.PromptTokens += result.Accumulator.Usage.PromptTokens
@@ -183,6 +183,7 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 
 		if !request.Stream {
+			defer startNonstreamKeepalive(c)()
 			choices := make([]gin.H, 0, len(prompts))
 			for index := range prompts {
 				result, err := generate(index, nil, nil)
@@ -224,14 +225,12 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				}
 				return projection.project(event, func(event gemini.Event) error {
 					return writeSSEJSON(c.Writer, chunk([]gin.H{completionChoice(index, event.Delta, nil)}))
-				}, func(err error) error {
-					return writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "upstream_rewrite", err)
 				})
-			}, projection.hasVisibleOutput)
+			}, projection)
 			if err != nil {
 				if stream.reject() {
 					writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
-				} else if !projection.errorSent {
+				} else {
 					_ = writeOpenAIStreamError(c.Writer, upstreamStatus(err), openAIUpstreamCode(err), streamFailure(c, err))
 				}
 				return

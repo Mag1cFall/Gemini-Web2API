@@ -24,6 +24,7 @@ var Defaults = map[string]string{
 	"LOG_LEVEL": "info", "LOG_FORMAT": "text", "REQUEST_BODY_LOG": "false", "LOG_FILE": "true", "LOG_MAX_TOTAL_MB": "500",
 	"PER_ACCOUNT_CONCURRENCY": "1", "ROUTING_STRATEGY": "round-robin", "ADMIN_AUTH_ENABLED": "false", "ADMIN_USERNAME": "admin",
 	"ADMIN_PASSWORD": "", "API_KEY_ACCOUNTS": "", "FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-argon",
+	"NONSTREAM_KEEPALIVE": "true", "FAKE_STREAM": "false",
 }
 
 // InvalidValue 是加载时取值无效、改用默认值的配置项，含 API key 的 API_KEY_ACCOUNTS 不记 Value
@@ -44,9 +45,13 @@ type Config struct {
 	InitTimeout     time.Duration
 	ModelMapping    map[string]string
 	SaveHistory     bool
-	LogLevel        string
-	LogFormat       string
-	RequestBodyLog  bool
+	// NonstreamKeepalive 为真时非流式请求等待结果期间每 10 秒写出一个换行
+	NonstreamKeepalive bool
+	// FakeStream 为真时流式请求收齐完整结果后再按流式输出
+	FakeStream     bool
+	LogLevel       string
+	LogFormat      string
+	RequestBodyLog bool
 	// LogFile 为 true 时日志同时写入数据目录的轮转文件，LogMaxTotalMB 是日志目录总量上限
 	LogFile       bool
 	LogMaxTotalMB int
@@ -104,6 +109,7 @@ func Load() Config {
 	for key, target := range map[string]*bool{
 		"GEMINI_SAVE_HISTORY": &cfg.SaveHistory, "REQUEST_BODY_LOG": &cfg.RequestBodyLog,
 		"ADMIN_AUTH_ENABLED": &cfg.AdminAuthEnabled, "LOG_FILE": &cfg.LogFile,
+		"NONSTREAM_KEEPALIVE": &cfg.NonstreamKeepalive, "FAKE_STREAM": &cfg.FakeStream,
 	} {
 		*target, _ = strconv.ParseBool(Defaults[key])
 		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {

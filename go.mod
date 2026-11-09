@@ -16,6 +16,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/thesyncim/gopus v0.1.2
 	github.com/tphakala/go-aac v0.7.0
+	github.com/vearutop/statigz v1.5.0
 	github.com/wailsapp/wails/v3 v3.0.0-beta.29
 	golang.org/x/mod v0.38.0
 	golang.org/x/net v0.56.0

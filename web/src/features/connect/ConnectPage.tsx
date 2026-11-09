@@ -1,6 +1,8 @@
 import cherryStudioIcon from '@lobehub/icons-static-svg/icons/cherrystudio-color.svg'
 import claudeCodeIcon from '@lobehub/icons-static-svg/icons/claudecode-color.svg'
 import codexIcon from '@lobehub/icons-static-svg/icons/codex-color.svg'
+import magpieIcon from '@lobehub/icons-static-svg/icons/magpie.svg'
+import openClawIcon from '@lobehub/icons-static-svg/icons/openclaw-color.svg'
 import opencodeIcon from '@lobehub/icons-static-svg/icons/opencode.svg'
 import sillyTavernIcon from '@lobehub/icons-static-svg/icons/sillytavern.svg'
 import { CircleAlert, CircleCheck, Terminal } from 'lucide-react'
@@ -18,6 +20,7 @@ import { Select } from '@/components/ui/select'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { connectMessages } from '@/features/connect/messages'
+import ompIcon from '@/features/connect/omp.svg'
 import {
   claudeEnv,
   claudeSettings,
@@ -26,6 +29,10 @@ import {
   curlAnthropic,
   curlGemini,
   curlOpenai,
+  magpieImport,
+  ompEnv,
+  ompModels,
+  openclawConfig,
   opencodeConfig,
   type Shell,
   type SnippetInput,
@@ -45,6 +52,9 @@ const clients = [
   'claude-code',
   'codex',
   'opencode',
+  'openclaw',
+  'omp',
+  'magpie',
   'cherry-studio',
   'sillytavern',
   'curl',
@@ -56,6 +66,9 @@ const clientNames: Record<Client, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   opencode: 'OpenCode',
+  openclaw: 'OpenClaw',
+  omp: 'omp',
+  magpie: 'Magpie',
   'cherry-studio': 'Cherry Studio',
   sillytavern: 'SillyTavern',
   curl: 'curl',
@@ -64,19 +77,30 @@ const clientNames: Record<Client, string> = {
 // ClientIcon 是客户端标签前的图标，单色图标以遮罩跟随文字颜色
 function ClientIcon({ client }: { client: Client }) {
   if (client === 'curl') return <Terminal size={16} aria-hidden />
-  if (client === 'opencode' || client === 'sillytavern')
+  if (
+    client === 'opencode' ||
+    client === 'sillytavern' ||
+    client === 'omp' ||
+    client === 'magpie'
+  ) {
+    const mask = {
+      opencode: opencodeIcon,
+      sillytavern: sillyTavernIcon,
+      omp: ompIcon,
+      magpie: magpieIcon,
+    }[client]
     return (
       <span
         aria-hidden
         className="size-4 bg-current"
-        style={{
-          mask: `url("${client === 'opencode' ? opencodeIcon : sillyTavernIcon}") center / contain no-repeat`,
-        }}
+        style={{ mask: `url("${mask}") center / contain no-repeat` }}
       />
     )
+  }
   const src = {
     'claude-code': claudeCodeIcon,
     codex: codexIcon,
+    openclaw: openClawIcon,
     'cherry-studio': cherryStudioIcon,
   }[client]
   return <img src={src} alt="" className="size-4" />
@@ -448,7 +472,7 @@ function ClientConfigs() {
       >
         <TabsList
           aria-label={m.clientLabel}
-          className="max-sm:grid max-sm:w-full max-sm:grid-cols-2"
+          className="flex-wrap gap-y-1 max-sm:grid max-sm:w-full max-sm:grid-cols-2"
         >
           {clients.map((item) => (
             <TabsTrigger key={item} value={item} className="gap-2 max-sm:justify-start">
@@ -500,6 +524,40 @@ function ClientConfigs() {
           {notes}
           {step(m.opencodeConfig)}
           {block('~/.config/opencode/opencode.json', opencodeConfig(input))}
+        </TabsContent>
+        <TabsContent value="openclaw" className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-start gap-4">
+            {modelSelect}
+            {keySelect}
+          </div>
+          {notes}
+          {step(m.openclawConfig)}
+          {block('~/.openclaw/openclaw.json', openclawConfig(input))}
+        </TabsContent>
+        <TabsContent value="omp" className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-start gap-4">
+            {modelSelect}
+            {keySelect}
+            {shellSelect}
+          </div>
+          {notes}
+          {step(m.ompModels)}
+          {block('~/.omp/agent/models.yml', ompModels(input))}
+          {step(m.ompRun)}
+          {block(terminal, ompEnv(input, shell))}
+        </TabsContent>
+        <TabsContent value="magpie" className="flex flex-col gap-4">
+          {keySelect && <div className="flex flex-wrap items-start gap-4">{keySelect}</div>}
+          {notes}
+          {step(m.magpieImport)}
+          {block(terminal, magpieImport(input))}
+          {step(m.magpieManual)}
+          {fields([
+            ['Name', 'Gemini-Web2API'],
+            [m.openai + ' base URL', origin + '/v1'],
+            [m.anthropic + ' base URL', origin],
+            ['API key', key],
+          ])}
         </TabsContent>
         <TabsContent value="cherry-studio" className="flex flex-col gap-4">
           {keySelect && <div className="flex flex-wrap items-start gap-4">{keySelect}</div>}

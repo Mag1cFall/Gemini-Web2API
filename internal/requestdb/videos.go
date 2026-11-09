@@ -40,7 +40,7 @@ func (store *Store) SaveVideoSession(ctx context.Context, id string, session jso
 
 // Video 返回视频任务，不存在时返回 ErrNotFound
 func (store *Store) Video(ctx context.Context, id string) (StoredVideo, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT `+videoColumns+` FROM videos WHERE id=?`, id)
+	rows, err := store.reads.QueryContext(ctx, `SELECT `+videoColumns+` FROM videos WHERE id=?`, id)
 	if err != nil {
 		return StoredVideo{}, err
 	}
@@ -63,7 +63,7 @@ func (store *Store) Videos(ctx context.Context, protocol string, ascending bool,
 	where, args := "protocol=?", []any{protocol}
 	if after != "" {
 		var created int64
-		err := store.db.QueryRowContext(ctx, `SELECT created_at FROM videos WHERE id=?`, after).Scan(&created)
+		err := store.reads.QueryRowContext(ctx, `SELECT created_at FROM videos WHERE id=?`, after).Scan(&created)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, ErrNotFound
 		}
@@ -74,7 +74,7 @@ func (store *Store) Videos(ctx context.Context, protocol string, ascending bool,
 		args = append(args, created, created, after)
 	}
 	args = append(args, limit+1)
-	rows, err := store.db.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM videos WHERE %s ORDER BY created_at %s, id %s LIMIT ?`, videoColumns, where, order, order), args...)
+	rows, err := store.reads.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM videos WHERE %s ORDER BY created_at %s, id %s LIMIT ?`, videoColumns, where, order, order), args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -130,7 +130,7 @@ func scanVideos(rows *sql.Rows) ([]StoredVideo, error) {
 
 // UnfinishedVideos 返回状态为 queued 或 in_progress 的视频任务
 func (store *Store) UnfinishedVideos(ctx context.Context) ([]StoredVideo, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT `+videoColumns+` FROM videos WHERE status IN ('queued','in_progress')`)
+	rows, err := store.reads.QueryContext(ctx, `SELECT `+videoColumns+` FROM videos WHERE status IN ('queued','in_progress')`)
 	if err != nil {
 		return nil, err
 	}

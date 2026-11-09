@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 )
 
 // StoredFile 是文件接口保存的文件元数据，内容位于数据目录的 files/<ID>
@@ -45,10 +47,30 @@ type FileQuery struct {
 // FilesDir 返回文件内容目录，位于请求账本所在目录的 files
 func (store *Store) FilesDir() (string, error) {
 	var path string
-	if err := store.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&path); err != nil {
+	if err := store.reads.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&path); err != nil {
 		return "", err
 	}
 	return filepath.Join(filepath.Dir(path), "files"), nil
+}
+
+// removeInterruptedUploads 删除进程中断时留下的上传临时文件
+func (store *Store) removeInterruptedUploads() {
+	dir, err := store.FilesDir()
+	if err != nil {
+		logging.Warn(logging.SourceService, "清理上传临时文件失败", "错误", err)
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".part") {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				logging.Warn(logging.SourceService, "清理上传临时文件失败", "错误", err)
+			}
+		}
+	}
 }
 
 // filePath 返回文件内容路径，ID 只能含字母、数字、连字符与下划线
@@ -117,7 +139,7 @@ func (store *Store) UpdateFile(ctx context.Context, file StoredFile) error {
 // File 返回未过期文件的元数据，不存在时返回 ErrNotFound
 func (store *Store) File(ctx context.Context, id string) (StoredFile, error) {
 	store.purgeExpiredFiles(ctx)
-	rows, err := store.db.QueryContext(ctx, `SELECT `+fileColumns+` FROM files WHERE id=?`, id)
+	rows, err := store.reads.QueryContext(ctx, `SELECT `+fileColumns+` FROM files WHERE id=?`, id)
 	if err != nil {
 		return StoredFile{}, err
 	}
@@ -178,7 +200,7 @@ func (store *Store) Files(ctx context.Context, query FileQuery) ([]StoredFile, b
 	}
 	if query.After != "" {
 		var created int64
-		err := store.db.QueryRowContext(ctx, `SELECT created_at FROM files WHERE id=?`, query.After).Scan(&created)
+		err := store.reads.QueryRowContext(ctx, `SELECT created_at FROM files WHERE id=?`, query.After).Scan(&created)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, ErrNotFound
 		}
@@ -193,7 +215,7 @@ func (store *Store) Files(ctx context.Context, query FileQuery) ([]StoredFile, b
 		limit = 10000
 	}
 	args = append(args, limit+1)
-	rows, err := store.db.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM files WHERE %s ORDER BY created_at %s, id %s LIMIT ?`, fileColumns, strings.Join(where, " AND "), order, order), args...)
+	rows, err := store.reads.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM files WHERE %s ORDER BY created_at %s, id %s LIMIT ?`, fileColumns, strings.Join(where, " AND "), order, order), args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -250,7 +272,7 @@ func scanFiles(rows *sql.Rows) ([]StoredFile, error) {
 // purgeExpiredFiles 删除已过期的文件与生成超过 GeneratedRetention 的生成文件
 func (store *Store) purgeExpiredFiles(ctx context.Context) {
 	now := time.Now()
-	rows, err := store.db.QueryContext(ctx, `SELECT id FROM files WHERE expires_at > 0 AND expires_at < ? OR source = 'generated' AND created_at < ?`,
+	rows, err := store.reads.QueryContext(ctx, `SELECT id FROM files WHERE expires_at > 0 AND expires_at < ? OR source = 'generated' AND created_at < ?`,
 		now.UnixMilli(), now.Add(-GeneratedRetention).UnixMilli())
 	if err != nil {
 		return

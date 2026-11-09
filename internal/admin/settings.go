@@ -47,6 +47,8 @@ type ServiceConfig struct {
 	ProxyAPIKey      string   `json:"proxy_api_key"`
 	Proxy            string   `json:"proxy"`
 	SaveHistory      bool     `json:"save_history"`
+	Keepalive        bool     `json:"nonstream_keepalive"`
+	FakeStream       bool     `json:"fake_stream"`
 	ModelMapping     string   `json:"model_mapping"`
 	AccountCooldown  string   `json:"account_cooldown"`
 	SessionTTL       string   `json:"session_ttl"`
@@ -81,6 +83,8 @@ type ConfigUpdate struct {
 	ProxyAPIKey      *string `json:"proxy_api_key"`
 	Proxy            *string `json:"proxy"`
 	SaveHistory      *bool   `json:"save_history"`
+	Keepalive        *bool   `json:"nonstream_keepalive"`
+	FakeStream       *bool   `json:"fake_stream"`
 	ModelMapping     *string `json:"model_mapping"`
 	AccountCooldown  *string `json:"account_cooldown"`
 	SessionTTL       *string `json:"session_ttl"`
@@ -109,6 +113,7 @@ func (s *Settings) View() ServiceConfig {
 	cfg := s.current
 	view := ServiceConfig{
 		ProxyAPIKey: cfg.ProxyAPIKey, Proxy: cfg.ProxyURL, SaveHistory: cfg.SaveHistory,
+		Keepalive: cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream,
 		ModelMapping: config.FormatModelMapping(cfg.ModelMapping), AccountCooldown: shortDuration(cfg.AccountCooldown),
 		SessionTTL: shortDuration(cfg.SessionTTL), InitTimeout: shortDuration(cfg.InitTimeout), LogLevel: cfg.LogLevel,
 		RequestBodyLog: cfg.RequestBodyLog, LogFile: cfg.LogFile, LogMaxTotalMB: cfg.LogMaxTotalMB, Concurrency: cfg.PerAccountConcurrency, RoutingStrategy: cfg.RoutingStrategy,
@@ -180,6 +185,8 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		env["PROXY"] = proxy
 	}
 	setBool(update.SaveHistory, "GEMINI_SAVE_HISTORY", &next.SaveHistory)
+	setBool(update.Keepalive, "NONSTREAM_KEEPALIVE", &next.NonstreamKeepalive)
+	setBool(update.FakeStream, "FAKE_STREAM", &next.FakeStream)
 	if update.ModelMapping != nil {
 		mapping, err := config.ParseModelMapping(*update.ModelMapping)
 		if err != nil {

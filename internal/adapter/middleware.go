@@ -229,6 +229,24 @@ func thinkingLevelNames(levels []gemini.ThinkingLevel) []string {
 	return names
 }
 
+// IsGeminiRequest 判断请求是否属于 Gemini 协议，/v1 上的请求以模型方法路径或 x-goog-api-key 头识别
+func IsGeminiRequest(c *gin.Context) bool {
+	path := c.Request.URL.Path
+	return strings.HasPrefix(path, "/v1beta/") || strings.HasPrefix(path, "/upload/") || strings.HasPrefix(path, "/ws/google.ai.generativelanguage.") ||
+		strings.HasPrefix(path, "/v1/models/") && strings.Contains(path, ":") || c.GetHeader("x-goog-api-key") != ""
+}
+
+// GeminiOr 在 Gemini 与 OpenAI 共用的路径上按请求协议选择处理函数
+func GeminiOr(gemini, openAI gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if IsGeminiRequest(c) {
+			gemini(c)
+			return
+		}
+		openAI(c)
+	}
+}
+
 // writeAuthError 按请求协议写与官方同形的鉴权错误，provided 表示请求带了 API key；Gemini 路由的无效 key 带 ErrorInfo 与 LocalizedMessage，不带 alt=sse 的 streamGenerateContent 外层为数组
 func writeAuthError(c *gin.Context, provided bool) {
 	c.Set(authFailedKey, true)
@@ -237,7 +255,7 @@ func writeAuthError(c *gin.Context, provided bool) {
 	var message string
 	var body gin.H
 	switch {
-	case strings.HasPrefix(path, "/v1beta/") || strings.HasPrefix(path, "/upload/v1beta/") || strings.HasPrefix(path, "/ws/google.ai.generativelanguage."):
+	case IsGeminiRequest(c):
 		if provided {
 			status, message = http.StatusBadRequest, "API key not valid. Please pass a valid API key."
 			body = gin.H{"error": gin.H{"code": status, "message": message, "status": "INVALID_ARGUMENT", "details": []gin.H{{

@@ -29,6 +29,11 @@ export const settingsMessages = defineMessages({
     poolHealthy: '可用',
     poolUnhealthy: '不可用',
     poolUnchecked: '未检测',
+    nonstreamKeepalive: '非流式保活',
+    nonstreamKeepaliveHint:
+      '非流式请求等待结果期间定时写出换行，经反向代理的长请求不被断开；10 秒后的错误以响应正文返回',
+    fakeStream: '假流式',
+    fakeStreamHint: '流式请求收齐完整结果后再输出，中途中断时换账号重新生成，首字等到回答完成',
     saveHistory: '保存官网历史',
     saveHistoryHint: '对话写入 Gemini 官网的历史记录；修改后账号重新初始化',
     modelMapping: '模型映射',
@@ -135,6 +140,11 @@ export const settingsMessages = defineMessages({
     poolHealthy: '可用',
     poolUnhealthy: '無法使用',
     poolUnchecked: '未檢測',
+    nonstreamKeepalive: '非串流保活',
+    nonstreamKeepaliveHint:
+      '非串流請求等待結果期間定時寫出換行，經反向代理的長請求不被中斷；10 秒後的錯誤以回應內文傳回',
+    fakeStream: '假串流',
+    fakeStreamHint: '串流請求收齊完整結果後再輸出，中途中斷時換帳號重新產生，首字等到回答完成',
     saveHistory: '儲存官網紀錄',
     saveHistoryHint: '對話寫入 Gemini 官網的歷史紀錄；修改後帳號重新初始化',
     modelMapping: '模型對應',
@@ -241,6 +251,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: 'Available',
     poolUnhealthy: 'Unavailable',
     poolUnchecked: 'Not checked',
+    nonstreamKeepalive: 'Non-streaming keepalive',
+    nonstreamKeepaliveHint:
+      'Write a newline periodically while a non-streaming request waits, so reverse proxies keep long requests open; errors after 10 seconds are returned in the response body',
+    fakeStream: 'Fake streaming',
+    fakeStreamHint:
+      'Collect the complete result before sending a streaming response and regenerate on another account if it is interrupted; the first text arrives when the answer is finished',
     saveHistory: 'Save official history',
     saveHistoryHint:
       'Conversations are written to Gemini history; accounts re-initialize on change',
@@ -357,6 +373,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: '利用可能',
     poolUnhealthy: '利用不可',
     poolUnchecked: '未確認',
+    nonstreamKeepalive: '非ストリーミングのキープアライブ',
+    nonstreamKeepaliveHint:
+      '非ストリーミングのリクエストが結果を待つ間、定期的に改行を送信し、リバースプロキシで長いリクエストが切断されないようにします。10 秒以降のエラーはレスポンス本文で返します',
+    fakeStream: '疑似ストリーミング',
+    fakeStreamHint:
+      'ストリーミングのリクエストで完全な結果を受け取ってから出力します。途中で中断した場合は別のアカウントで再生成し、最初の文字は回答の完了時に届きます',
     saveHistory: '公式の履歴に保存',
     saveHistoryHint: '会話を Gemini の履歴に書き込みます。変更するとアカウントは再初期化されます',
     modelMapping: 'モデルの対応付け',
@@ -471,6 +493,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: '사용 가능',
     poolUnhealthy: '사용 불가',
     poolUnchecked: '확인 전',
+    nonstreamKeepalive: '비스트리밍 연결 유지',
+    nonstreamKeepaliveHint:
+      '비스트리밍 요청이 결과를 기다리는 동안 주기적으로 줄바꿈을 보내 리버스 프록시가 긴 요청을 끊지 않게 합니다. 10초 이후의 오류는 응답 본문으로 반환됩니다',
+    fakeStream: '가짜 스트리밍',
+    fakeStreamHint:
+      '스트리밍 요청의 전체 결과를 받은 뒤 출력합니다. 중간에 끊기면 다른 계정으로 다시 생성하며 첫 글자는 답변이 완료될 때 도착합니다',
     saveHistory: '공식 기록에 저장',
     saveHistoryHint: '대화를 Gemini 기록에 남깁니다. 변경하면 계정이 다시 초기화됩니다',
     modelMapping: '모델 매핑',
@@ -584,6 +612,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: 'Disponible',
     poolUnhealthy: 'Indisponible',
     poolUnchecked: 'Non vérifié',
+    nonstreamKeepalive: 'Maintien de connexion hors streaming',
+    nonstreamKeepaliveHint:
+      'Envoie périodiquement un saut de ligne pendant qu’une requête sans streaming attend son résultat, afin que les proxys inverses ne coupent pas les longues requêtes ; les erreurs après 10 secondes sont renvoyées dans le corps de la réponse',
+    fakeStream: 'Pseudo-streaming',
+    fakeStreamHint:
+      'Reçoit le résultat complet avant d’envoyer une réponse en streaming et régénère sur un autre compte en cas d’interruption ; le premier texte arrive à la fin de la réponse',
     saveHistory: 'Enregistrer l’historique officiel',
     saveHistoryHint:
       'Les conversations sont écrites dans l’historique Gemini ; les comptes se réinitialisent après modification',
@@ -703,6 +737,12 @@ export const settingsMessages = defineMessages({
     poolHealthy: 'Verfügbar',
     poolUnhealthy: 'Nicht verfügbar',
     poolUnchecked: 'Nicht geprüft',
+    nonstreamKeepalive: 'Keepalive ohne Streaming',
+    nonstreamKeepaliveHint:
+      'Sendet regelmäßig einen Zeilenumbruch, während eine Anfrage ohne Streaming auf ihr Ergebnis wartet, damit Reverse-Proxys lange Anfragen nicht trennen; Fehler nach 10 Sekunden stehen im Antworttext',
+    fakeStream: 'Pseudo-Streaming',
+    fakeStreamHint:
+      'Empfängt das vollständige Ergebnis, bevor eine Streaming-Antwort gesendet wird, und generiert bei einem Abbruch mit einem anderen Konto neu; der erste Text kommt, wenn die Antwort fertig ist',
     saveHistory: 'Offiziellen Verlauf speichern',
     saveHistoryHint:
       'Unterhaltungen werden im Gemini-Verlauf gespeichert; Konten werden nach einer Änderung neu initialisiert',

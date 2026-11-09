@@ -9,28 +9,20 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/vearutop/statigz"
 )
 
 //go:embed all:dist
 var embedded embed.FS
 
-// Files 返回管理端构建产物
-func Files() fs.FS {
-	files, err := fs.Sub(embedded, "dist")
-	if err != nil {
-		panic(err)
-	}
-	return files
-}
-
-// Handler 返回管理端静态资源处理器：assets 下带哈希的文件长期缓存，未知页面路径回落到入口页，入口页的 <base> 指向管理端根目录
+// Handler 返回管理端静态资源处理器：gzip 构建产物直接返回给接受 gzip 的客户端，assets 下带哈希的文件长期缓存，未知页面路径回落到入口页，入口页的 <base> 指向管理端根目录
 func Handler() http.Handler {
-	files := Files()
-	index, err := fs.ReadFile(files, "index.html")
+	index, err := fs.ReadFile(embedded, "dist/index.html")
 	if err != nil {
 		panic(err)
 	}
-	static := http.FileServerFS(files)
+	static := statigz.FileServer(embedded, statigz.FSPrefix("dist"))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -39,7 +31,7 @@ func Handler() http.Handler {
 		}
 		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		asset := strings.HasPrefix(name, "assets/")
-		if info, err := fs.Stat(files, name); err == nil && !info.IsDir() && name != "index.html" {
+		if name != "" && name != "index.html" && static.Found(r) {
 			if asset {
 				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 			} else {

@@ -72,6 +72,29 @@ func applyRequestFields(response gin.H, request ResponsesRequest) {
 	if request.Instructions != "" {
 		response["instructions"] = request.Instructions
 	}
+	if request.PreviousResponseID != "" {
+		response["previous_response_id"] = request.PreviousResponseID
+	}
+	for field, value := range map[string]json.RawMessage{"text": request.Text, "reasoning": request.Reasoning, "tool_choice": request.ToolChoice} {
+		if len(value) > 0 && string(value) != "null" {
+			response[field] = value
+		}
+	}
+	if request.Tools != nil {
+		response["tools"] = request.Tools
+	}
+	if request.ParallelToolCalls != nil {
+		response["parallel_tool_calls"] = *request.ParallelToolCalls
+	}
+	if request.MaxOutputTokens != nil {
+		response["max_output_tokens"] = *request.MaxOutputTokens
+	}
+	if request.Temperature != nil {
+		response["temperature"] = *request.Temperature
+	}
+	if request.TopP != nil {
+		response["top_p"] = *request.TopP
+	}
 }
 
 // responsesInputItems 把请求输入整理为带 ID 的输入项：字符串输入与字符串内容转为内容数组，缺少 ID 的项按位置编号
@@ -178,7 +201,7 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 		if err != nil {
 			status = upstreamStatus(err)
 			response = responseShell(run.id, config.MapModel(request.Model), run.created, "failed")
-			response["error"] = gin.H{"code": "server_error", "message": publicMessage(background, err.Error())}
+			response["error"] = gin.H{"code": responsesErrorCode(err), "message": publicMessage(background, err.Error())}
 			trace.Fail(status, err.Error())
 		}
 		applyRequestFields(response, request)
@@ -219,12 +242,12 @@ func failInterruptedResponses(store *requestdb.Store) {
 }
 
 // saveFailedResponse 保存以错误结束的响应
-func saveFailedResponse(ctx context.Context, store *requestdb.Store, request ResponsesRequest, id string, created int64, err error) {
+func saveFailedResponse(ctx context.Context, store *requestdb.Store, request ResponsesRequest, id string, created int64, failure gin.H) {
 	if finishResponseJob(id) {
 		return
 	}
 	response := responseShell(id, config.MapModel(request.Model), created, "failed")
-	response["error"] = gin.H{"code": "server_error", "message": err.Error()}
+	response["error"] = failure
 	applyRequestFields(response, request)
 	saveResponse(ctx, store, request, id, created, response)
 }
@@ -469,27 +492,32 @@ func itemID(raw json.RawMessage) string {
 	return head.ID
 }
 
-// rebuiltResponsesRequest 返回把 previous_response_id 的已保存响应链与本次输入合并为完整输入的请求，前序响应没有保存时返回 nil
-func rebuiltResponsesRequest(ctx context.Context, store *requestdb.Store, request ResponsesRequest) *ResponsesRequest {
+// rebuiltResponsesRequest 返回把 previous_response_id 的已保存响应链与本次输入合并为完整输入的请求，以及 instructions 是否与前序响应不同，前序响应没有保存时请求为 nil
+func rebuiltResponsesRequest(ctx context.Context, store *requestdb.Store, request ResponsesRequest) (*ResponsesRequest, bool) {
 	if store == nil || request.PreviousResponseID == "" {
-		return nil
+		return nil, false
 	}
 	previous, err := store.Response(ctx, request.PreviousResponseID)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	var input []json.RawMessage
 	_ = json.Unmarshal(responsesInputItems(request.Input, ""), &input)
 	items, _ := json.Marshal(slices.Concat(responseChainItems(ctx, store, previous), responseItems(previous), input))
 	rebuilt := request
 	rebuilt.PreviousResponseID, rebuilt.Input = "", items
-	return &rebuilt
+	var stored struct {
+		Instructions string `json:"instructions"`
+	}
+	_ = json.Unmarshal(previous.Response, &stored)
+	return &rebuilt, stored.Instructions != request.Instructions
 }
 
 // responseChainItems 返回生成该响应时的全部输入项：续接链上各前序响应的输入与输出，以及本次输入
 func responseChainItems(ctx context.Context, store *requestdb.Store, stored requestdb.StoredResponse) []json.RawMessage {
 	var items []json.RawMessage
 	_ = json.Unmarshal(stored.Input, &items)
+	segments := [][]json.RawMessage{items}
 	seen := map[string]bool{stored.ID: true}
 	for previous := stored.PreviousID; previous != "" && !seen[previous]; {
 		seen[previous] = true
@@ -499,10 +527,11 @@ func responseChainItems(ctx context.Context, store *requestdb.Store, stored requ
 		}
 		var input []json.RawMessage
 		_ = json.Unmarshal(parent.Input, &input)
-		items = slices.Concat(input, responseItems(parent), items)
+		segments = append(segments, responseItems(parent), input)
 		previous = parent.PreviousID
 	}
-	return items
+	slices.Reverse(segments)
+	return slices.Concat(segments...)
 }
 
 // ResponseInputItemsHandler 按 after、before、limit 与 order 分页返回生成该响应时的输入项，未知的游标返回空页

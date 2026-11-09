@@ -28,6 +28,7 @@ type ClaudeRequest struct {
 type ThinkingConfig struct {
 	Type         string `json:"type"`
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"`
 }
 
 // OutputConfig 表示 Claude 输出强度与结构化输出配置
@@ -88,7 +89,7 @@ func (t Tool) IsWebSearch() bool {
 	if t.Type != nil && strings.HasPrefix(*t.Type, "web_search") {
 		return true
 	}
-	if t.Name != nil && (*t.Name == "web_search" || *t.Name == "google_search") {
+	if t.Name != nil && (*t.Name == "web_search" || *t.Name == "google_search") && len(t.InputSchema) == 0 {
 		return true
 	}
 	return false
@@ -101,7 +102,7 @@ type ClaudeResponse struct {
 	Model          string         `json:"model"`
 	Content        []ContentBlock `json:"content"`
 	StopReason     string         `json:"stop_reason"`
-	StopSequence   *string        `json:"stop_sequence,omitempty"`
+	StopSequence   *string        `json:"stop_sequence"`
 	Usage          *Usage         `json:"usage,omitempty"`
 	ConversationID string         `json:"conversation_id,omitempty"`
 }

@@ -80,6 +80,9 @@ func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, mod
 	return nil
 }
 
+// uploadLimit 是同一请求同时上传的附件数，与官网的附件数量上限相同
+const uploadLimit = 10
+
 // uploadFile 按官网断点续传协议上传附件内容，返回带上传路径与 MIME 类型的附件
 func (c *Client) uploadFile(ctx context.Context, bootstrap Bootstrap, file FileData) (FileData, error) {
 	data, filename := file.Data, file.FileName

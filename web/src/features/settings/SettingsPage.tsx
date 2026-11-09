@@ -35,6 +35,8 @@ const editableKeys = [
   'proxy_api_key',
   'proxy',
   'save_history',
+  'nonstream_keepalive',
+  'fake_stream',
   'model_mapping',
   'account_cooldown',
   'session_ttl',
@@ -63,6 +65,8 @@ const envNames: Record<string, string> = {
   proxy_api_key: 'PROXY_API_KEY',
   proxy: 'PROXY',
   save_history: 'GEMINI_SAVE_HISTORY',
+  nonstream_keepalive: 'NONSTREAM_KEEPALIVE',
+  fake_stream: 'FAKE_STREAM',
   model_mapping: 'MODEL_MAPPING',
   account_cooldown: 'ACCOUNT_COOLDOWN',
   session_ttl: 'SESSION_TTL',
@@ -286,6 +290,8 @@ export function SettingsPage() {
     proxy: m.proxy,
     auth_states: m.authStates,
     save_history: m.saveHistory,
+    nonstream_keepalive: m.nonstreamKeepalive,
+    fake_stream: m.fakeStream,
     model_mapping: m.modelMapping,
     per_account_concurrency: m.perAccountConcurrency,
     routing_strategy: m.routingStrategy,
@@ -405,6 +411,28 @@ export function SettingsPage() {
               checked={value.save_history}
               onCheckedChange={(next) => {
                 set('save_history', next)
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            id="nonstream_keepalive"
+            label={m.nonstreamKeepalive}
+            hint={m.nonstreamKeepaliveHint}
+          >
+            <SwitchControl
+              id="nonstream_keepalive"
+              checked={value.nonstream_keepalive}
+              onCheckedChange={(next) => {
+                set('nonstream_keepalive', next)
+              }}
+            />
+          </SettingRow>
+          <SettingRow id="fake_stream" label={m.fakeStream} hint={m.fakeStreamHint}>
+            <SwitchControl
+              id="fake_stream"
+              checked={value.fake_stream}
+              onCheckedChange={(next) => {
+                set('fake_stream', next)
               }}
             />
           </SettingRow>

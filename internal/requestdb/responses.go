@@ -40,7 +40,7 @@ func (store *Store) Response(ctx context.Context, id string) (StoredResponse, er
 	response := StoredResponse{ID: id}
 	var created int64
 	var body, input string
-	err := store.db.QueryRowContext(ctx, `SELECT created_at,previous_id,background,status,response,input FROM responses WHERE id=?`, id).
+	err := store.reads.QueryRowContext(ctx, `SELECT created_at,previous_id,background,status,response,input FROM responses WHERE id=?`, id).
 		Scan(&created, &response.PreviousID, &response.Background, &response.Status, &body, &input)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredResponse{}, ErrNotFound
@@ -65,7 +65,7 @@ func (store *Store) DeleteResponse(ctx context.Context, id string) (bool, error)
 
 // UnfinishedResponses 返回状态为 queued 或 in_progress 的后台响应
 func (store *Store) UnfinishedResponses(ctx context.Context) ([]StoredResponse, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT id,created_at,previous_id,background,status,response,input FROM responses WHERE background=1 AND status IN ('queued','in_progress')`)
+	rows, err := store.reads.QueryContext(ctx, `SELECT id,created_at,previous_id,background,status,response,input FROM responses WHERE background=1 AND status IN ('queued','in_progress')`)
 	if err != nil {
 		return nil, err
 	}

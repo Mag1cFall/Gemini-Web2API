@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"golang.org/x/sync/errgroup"
 )
 
 // CodeOutput 保存一段 Google 已执行代码的权威快照
@@ -192,30 +193,38 @@ func hasGeneratedImage(output CandidateOutput) bool {
 	return false
 }
 
+// mediaDownloadLimit 是同一请求同时下载的生成媒体数
+const mediaDownloadLimit = 4
+
 func inlineResultMedia(ctx context.Context, result *generationResult) error {
 	if result == nil || result.Client == nil || result.Accumulator == nil {
 		return nil
 	}
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(mediaDownloadLimit)
 	for _, candidate := range result.Accumulator.Candidates {
 		for index := range candidate.Media {
 			media := &candidate.Media[index]
 			if media.URL == "" || strings.HasPrefix(media.URL, "data:") {
 				continue
 			}
-			data, err := result.Client.FetchMediaContent(ctx, *media)
-			if err != nil {
-				return fmt.Errorf("下载生成媒体失败: %w", err)
-			}
-			mimeType := http.DetectContentType(data)
-			if mimeType == "application/octet-stream" && strings.TrimSpace(media.MIMEType) != "" {
-				mimeType = strings.TrimSpace(media.MIMEType)
-			}
-			media.MIMEType = mimeType
-			media.SizeBytes = len(data)
-			media.URL = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+			group.Go(func() error {
+				data, err := result.Client.FetchMediaContent(groupCtx, *media)
+				if err != nil {
+					return fmt.Errorf("下载生成媒体失败: %w", err)
+				}
+				mimeType := http.DetectContentType(data)
+				if mimeType == "application/octet-stream" && strings.TrimSpace(media.MIMEType) != "" {
+					mimeType = strings.TrimSpace(media.MIMEType)
+				}
+				media.MIMEType = mimeType
+				media.SizeBytes = len(data)
+				media.URL = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+				return nil
+			})
 		}
 	}
-	return nil
+	return group.Wait()
 }
 
 func renderCodeMarkdown(code CodeOutput) string {
