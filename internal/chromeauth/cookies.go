@@ -37,6 +37,42 @@ func parseCookies(input string) ([]auth.StateCookie, error) {
 	return cookies, nil
 }
 
+// parseCookieHeader 解析一行 Cookie Header，__Host- 前缀的 Cookie 归 gemini.google.com，其余归 .google.com
+func parseCookieHeader(header string) ([]auth.StateCookie, error) {
+	header = strings.TrimSpace(header)
+	if len(header) >= len("Cookie:") && strings.EqualFold(header[:len("Cookie:")], "Cookie:") {
+		header = strings.TrimSpace(header[len("Cookie:"):])
+	}
+	if header == "" || strings.ContainsAny(header, "\r\n") {
+		return nil, fmt.Errorf("cookie 必须是一行 Cookie Header")
+	}
+	cookies := make([]auth.StateCookie, 0)
+	names := make(map[string]struct{})
+	for _, item := range strings.Split(header, ";") {
+		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+			return nil, fmt.Errorf("Cookie Header 项 %q 格式无效", strings.TrimSpace(item))
+		}
+		name := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		if value == "" {
+			return nil, fmt.Errorf("Cookie %s 的值为空", name)
+		}
+		if _, exists := names[name]; exists {
+			continue
+		}
+		names[name] = struct{}{}
+		domain := ".google.com"
+		if strings.HasPrefix(name, "__Host-") {
+			domain = "gemini.google.com"
+		}
+		cookies = append(cookies, auth.StateCookie{
+			Name: name, Value: value, Domain: domain, Path: "/", Secure: true,
+		})
+	}
+	return cookies, nil
+}
+
 // googleDomain 报告 Cookie 域是否为 google.com 或其子域
 func googleDomain(domain string) bool {
 	domain = strings.ToLower(strings.TrimPrefix(domain, "."))

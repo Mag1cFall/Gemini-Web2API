@@ -43,6 +43,9 @@ const shutdownGrace = 10 * time.Second
 // dataDir 是请求账本与实例锁所在目录
 const dataDir = "data"
 
+// lockPath 是运行中的服务持有的实例锁
+var lockPath = filepath.Join(dataDir, "gemini-web2api.lock")
+
 // envPath 是管理端写回配置的文件
 const envPath = ".env"
 
@@ -66,7 +69,7 @@ func Main(args []string) error {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			attachConsole(cancel)
-			return chromeauth.RunSetup(ctx, args[1:], os.Stdin, os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdin.Fd())))
+			return chromeauth.RunSetup(ctx, args[1:], os.Stdin, os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdin.Fd())), servedAuthPaths())
 		case "version", "--version", "-version":
 			attachConsole(nil)
 			fmt.Println("Gemini-Web2API " + Version())
@@ -77,6 +80,17 @@ func Main(args []string) error {
 		attachConsole(nil)
 	}
 	return runDefault(args)
+}
+
+// servedAuthPaths 返回当前数据目录中运行的服务按配置读取的认证路径与导入账号的目录，没有服务在运行时为空
+func servedAuthPaths() []string {
+	lock := flock.New(lockPath)
+	if locked, err := lock.TryLock(); err != nil || locked {
+		_ = lock.Unlock()
+		return nil
+	}
+	paths := config.Load().AuthStatePaths
+	return append(paths, authDir(paths))
 }
 
 // loadDotenv 把 .env 中进程环境没有的变量写入进程环境并记入 dotenvKeys
@@ -185,13 +199,13 @@ func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, err
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据目录: %w", err)
 	}
-	lock := flock.New(filepath.Join(dataDir, "gemini-web2api.lock"))
+	lock := flock.New(lockPath)
 	locked, err := lock.TryLock()
 	if err != nil {
 		return nil, fmt.Errorf("获取实例锁: %w", err)
 	}
 	if !locked {
-		return nil, fmt.Errorf("同一目录已有 Gemini-Web2API 实例在运行（%s）", filepath.Join(dataDir, "gemini-web2api.lock"))
+		return nil, fmt.Errorf("同一目录已有 Gemini-Web2API 实例在运行（%s）", lockPath)
 	}
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
 	reserved := ""
@@ -367,11 +381,11 @@ func logStartup(cfg config.Config, accountCount int) {
 	logging.Info(logging.SourceService, "Gemini-Web2API 启动", "版本", Version(), "Go", strings.TrimPrefix(runtime.Version(), "go"), "系统", runtime.GOOS+"/"+runtime.GOARCH)
 	proxies := config.SplitList(cfg.ProxyURL)
 	for index, proxy := range proxies {
-		proxies[index] = maskProxy(proxy)
+		proxies[index] = proxypool.Redact(proxy)
 	}
 	proxy := strings.Join(proxies, ",")
 	if proxy == "" {
-		proxy = cmp.Or(maskProxy(proxypool.System()), "无")
+		proxy = cmp.Or(proxypool.Redact(proxypool.System()), "无")
 	}
 	key := "未设置"
 	if cfg.ProxyAPIKey != "" {
@@ -412,18 +426,6 @@ func authDir(paths []string) string {
 		}
 	}
 	return "auth"
-}
-
-// maskProxy 隐藏代理 URL 中的密码
-func maskProxy(value string) string {
-	if at := strings.LastIndex(value, "@"); at > 0 {
-		if scheme := strings.Index(value, "://"); scheme >= 0 && scheme < at {
-			if user, _, found := strings.Cut(value[scheme+3:at], ":"); found {
-				return value[:scheme+3] + user + ":***" + value[at:]
-			}
-		}
-	}
-	return value
 }
 
 // newHTTPServer 创建 HTTP 服务，活动请求在停机时先等待结束

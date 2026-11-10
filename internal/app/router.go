@@ -26,11 +26,15 @@ type Deps struct {
 	Admin *admin.Deps
 }
 
+// localProxies 是可以代客户端声明来源地址的对端：只有本机的反向代理转发的 X-Forwarded-For 计入客户端地址
+var localProxies = []string{"127.0.0.1", "::1"}
+
 // NewRouter 注册就绪检查与全部兼容 API
 func NewRouter(deps Deps) *gin.Engine {
 	pool := deps.Pool
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
+	_ = router.SetTrustedProxies(localProxies)
 	router.Use(gin.Recovery(), securityHeaders)
 
 	router.GET("/readyz", func(c *gin.Context) {

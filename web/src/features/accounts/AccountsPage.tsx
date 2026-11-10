@@ -13,7 +13,6 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { AccountTasks } from '@/features/accounts/AccountTasks'
 import { runBatch } from '@/features/accounts/batch'
 import { accountsMessages, accountStateMessages } from '@/features/accounts/messages'
-import { fixedProxy } from '@/features/accounts/proxy'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { ProxyValue } from '@/features/accounts/ProxyValue'
 import { accountsKey, useAccounts } from '@/features/accounts/queries'
@@ -45,7 +44,7 @@ function applyBatch({ action, proxy = '' }: BatchRequest, account: Account) {
     case 'verify':
       return api(path + '/verify', { method: 'POST' })
     case 'proxy':
-      return proxy === fixedProxy(account)
+      return proxy === (account.fixed_proxy ?? '')
         ? Promise.resolve()
         : api(path, { method: 'PUT', json: { proxy } })
     default:

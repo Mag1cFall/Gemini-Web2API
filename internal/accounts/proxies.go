@@ -43,7 +43,7 @@ func fixedProxy(account auth.LoadedAccount) string {
 	if account.File == nil {
 		return ""
 	}
-	return strings.TrimSpace(account.File.Proxy())
+	return strings.TrimSpace(account.File.Metadata().Proxy)
 }
 
 // importProxy 返回导入时没有指定账号代理的请求使用的代理
@@ -124,7 +124,7 @@ func (m *Manager) rebind(accountID string) {
 		return
 	}
 	stopped.account.ProxyURL, _ = m.accountProxy(stopped.account)
-	logging.Info(accountID, "账号代理切换", "原代理", cmp.Or(maskProxy(previous), "直连"), "新代理", cmp.Or(maskProxy(stopped.account.ProxyURL), "直连"))
+	logging.Info(accountID, "账号代理切换", "原代理", cmp.Or(proxypool.Redact(previous), "直连"), "新代理", cmp.Or(proxypool.Redact(stopped.account.ProxyURL), "直连"))
 	_ = m.restart(stopped.account)
 }
 
@@ -133,11 +133,5 @@ func (m *Manager) relaunchGuest() {
 	m.guestMu.Lock()
 	defer m.guestMu.Unlock()
 	m.stopGuest()
-	done := make(chan struct{})
-	var once sync.Once
-	m.launchGuest(func() { once.Do(func() { close(done) }) })
-	select {
-	case <-done:
-	case <-m.ctx.Done():
-	}
+	_ = m.await(m.launchGuest)
 }

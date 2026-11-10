@@ -89,7 +89,7 @@ func (store *sessionStore) clear() {
 	store.mu.Unlock()
 }
 
-// loginAttempts 记录各来源地址一分钟窗口内的登录失败次数
+// loginAttempts 记录各客户端地址一分钟窗口内的登录失败次数
 type loginAttempts struct {
 	mu      sync.Mutex
 	entries map[string]loginAttempt
@@ -149,7 +149,7 @@ func (h *handler) guard(c *gin.Context) {
 	}
 	cfg := h.settings.Snapshot()
 	if !cfg.AdminAuthEnabled {
-		if !loopbackRequest(c.Request) {
+		if !loopbackRequest(c) {
 			writeError(c, http.StatusForbidden, "admin_remote_forbidden", "管理端只接受本机访问；远程访问需设置 ADMIN_AUTH_ENABLED=true 与 ADMIN_PASSWORD")
 			return
 		}
@@ -206,7 +206,7 @@ func (h *handler) login(c *gin.Context) {
 		c.JSON(http.StatusOK, sessionView{Enabled: false, Authenticated: true, Username: cfg.AdminUsername})
 		return
 	}
-	peer, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
+	peer := c.ClientIP()
 	now := time.Now()
 	if h.attempts.blocked(peer, now) {
 		c.Header("Retry-After", "60")
@@ -246,12 +246,8 @@ func sameOrigin(request *http.Request) bool {
 	return err == nil && strings.EqualFold(parsed.Host, request.Host)
 }
 
-// loopbackRequest 报告请求来自本机且 Host 为回环地址，防止 DNS 重绑定
-func loopbackRequest(request *http.Request) bool {
-	host, _, err := net.SplitHostPort(request.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback() && adapter.LoopbackHost(request.Host)
+// loopbackRequest 报告请求的客户端在本机且 Host 为回环地址，防止 DNS 重绑定；经本机反向代理转发的请求以它转发的来源地址为客户端
+func loopbackRequest(c *gin.Context) bool {
+	ip := net.ParseIP(c.ClientIP())
+	return ip != nil && ip.IsLoopback() && adapter.LoopbackHost(c.Request.Host)
 }

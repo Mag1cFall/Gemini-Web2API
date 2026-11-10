@@ -132,13 +132,13 @@ Cookie 来自登录了多个 Google 账号的浏览器时，用 `--authuser` 指
 .\gemini-web2api.exe setup --email "name@example.com" --remote https://example.com
 ```
 
-`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。Chrome 导入还会保存浏览器退出后续签所需的 OAuth 续签材料。日常启动只需运行：
+`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。Chrome 导入还会保存浏览器退出后续签所需的 OAuth 续签材料。服务已在运行时，账号从管理端“导入账号”页导入；`setup` 要写入的 `auth` 目录正被运行中的服务使用时，`setup` 退出并给出提示。日常启动只需运行：
 
 ```powershell
 .\gemini-web2api.exe
 ```
 
-默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以在现有 Cookie 有效期内使用已经生成的 `auth` 目录；续签仍需在原 Windows 设备执行。
+默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以使用已经生成的 `auth` 目录：`storage-state.json` 带 `wrappedBindingKey`（续签材料绑定在原设备上）的账号在现有 Cookie 有效期内使用，续签在原 Windows 设备执行；其余 Chrome 导入的账号在任何系统上自动续签。
 
 服务运行期间每 10 分钟为每个账号轮换一次登录 Cookie，与 Gemini 网页相同；响应中变化的 Cookie 写回 `auth/<账号>/storage-state.json`，重启后直接沿用。Chrome 导入的账号在登录态失效时自动续签。
 
@@ -282,11 +282,11 @@ GET  /readyz
 浏览器打开 `http://127.0.0.1:8007/` 进入管理端，页面使用 `/api/*` 接口。
 
 - **接入**：“接入”页列出三种协议的 base URL，并按所选模型给出 Claude Code、Codex、OpenCode、OpenClaw、omp、Magpie、Cherry Studio、SillyTavern 与 curl 的现成配置；“连通测试”用所选 API key 读取模型列表并向所选模型发一条最短的请求，逐条显示结果、耗时与错误原因
-- **导入账号**：粘贴 Cookie 后自动识别其中登录的账号，勾选后导入；导入在服务端后台运行，离开页面后继续，页面显示每个账号的进度与失败原因
+- **导入账号**：粘贴 Cookie 后自动识别其中登录的账号，勾选后导入；导入在服务端后台运行，离开页面后继续，页面显示每个账号的进度与失败原因；已导入的账号重新导入时沿用停用状态，代理一栏留空时沿用原有固定代理
 - **预热**：“全部账号”页的“预热”对选中的账号与模型各发一条最小生成请求，逐行显示结果、耗时与失败原因，请求计入请求记录
 - **监听端口**：配置的端口落在 Windows 的系统保留端口段（Hyper-V、WSL2、Docker）时，服务改用其后第一个可用端口，管理端顶部显示实际地址
-- **远程访问**：默认只接受本机访问；设置 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`，并让 `LISTEN_ADDR` 监听对外地址后，可从其他设备登录；登录连续失败 5 次后，60 秒内的登录返回 429 并带 `Retry-After`
-- **反向代理**：代理需把浏览器请求的原始 `Host` 头透传给服务，nginx 写 `proxy_set_header Host $http_host;`；也可挂在子路径下，例如 nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_buffering off; }`，管理端从 `/gemini/` 打开，客户端的 Base URL 带上同一前缀
+- **远程访问**：默认只接受本机访问；设置 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`，并让 `LISTEN_ADDR` 监听对外地址后，可从其他设备登录；同一客户端登录连续失败 5 次后，60 秒内它的登录返回 429 并带 `Retry-After`
+- **反向代理**：代理需把浏览器请求的原始 `Host` 头透传给服务，并以 `X-Forwarded-For` 转发客户端地址，nginx 写 `proxy_set_header Host $http_host;` 与 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`；本机反向代理转发的客户端地址用于本机访问判定、登录限流与请求记录；也可挂在子路径下，例如 nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_buffering off; }`，管理端从 `/gemini/` 打开，客户端的 Base URL 带上同一前缀
 - **设置生效**：设置页修改的配置写回 `.env`，与默认值相同的项从 `.env` 中删去；监听地址、认证路径与日志格式重启后生效，其余立即生效；`.env` 中取值无效的项按默认值运行并在设置页顶部列出；由进程环境变量或 `--auth`、`--listen` 决定的项在设置页标出来源且不可修改
 - **在线更新**：“关于”页显示 GitHub 最新发行版本与更新内容，命令行版与桌面版确认后下载当前平台的发行包、校验 SHA-256、替换可执行文件并重启到新版本，更新期间显示下载进度，新版本启动时删除被替换的旧文件；下载经 `PROXY` 的第一个代理发出，未设置时使用系统代理；Docker 部署随镜像更新
 

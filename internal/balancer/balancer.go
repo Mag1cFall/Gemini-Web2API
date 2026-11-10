@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
-	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
 )
 
 // SourceGuest 是访客会话的来源
@@ -81,6 +81,7 @@ type AccountStatus struct {
 	Profile          string            `json:"profile,omitempty"`
 	Proxy            string            `json:"proxy,omitempty"`
 	ProxySource      string            `json:"proxy_source,omitempty"`
+	FixedProxy       string            `json:"fixed_proxy,omitempty"`
 	Tier             string            `json:"tier,omitempty"`
 	ContextWindow    int               `json:"context_window,omitempty"`
 	Models           []string          `json:"models"`
@@ -949,8 +950,14 @@ func (p *AccountPool) Usage(ctx context.Context, refresh bool) PoolUsageStatus {
 func (e *accountEntry) status(now time.Time) AccountStatus {
 	status := AccountStatus{
 		AccountID: e.AccountID, State: e.State, Enabled: e.State != StateDisabled, Source: e.Info.Source, Profile: e.Info.Profile,
-		Proxy: maskProxy(e.Info.Proxy), ProxySource: e.Info.ProxySource, Models: []string{}, ConsecutiveFails: e.ConsecutiveFails, LastError: e.LastError,
+		Proxy: proxypool.Redact(e.Info.Proxy), ProxySource: e.Info.ProxySource, Models: []string{}, ConsecutiveFails: e.ConsecutiveFails, LastError: e.LastError,
 		LastUsed: timePointer(e.LastUsed), ReadyAt: timePointer(e.ReadyAt), LastErrorAt: timePointer(e.LastErrorAt),
+	}
+	switch e.Info.ProxySource {
+	case "fixed":
+		status.FixedProxy = e.Info.Proxy
+	case "direct":
+		status.FixedProxy = proxypool.Direct
 	}
 	if e.State == StateReady && now.Before(e.Cooldown.until) {
 		status.State = StateCooldown
@@ -1000,18 +1007,6 @@ func timePointer(value time.Time) *time.Time {
 	}
 	copy := value
 	return &copy
-}
-
-// maskProxy 隐藏代理 URL 中的密码
-func maskProxy(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.User == nil {
-		return value
-	}
-	if _, ok := parsed.User.Password(); ok {
-		parsed.User = url.UserPassword(parsed.User.Username(), "***")
-	}
-	return parsed.String()
 }
 
 func errorText(err error) string {

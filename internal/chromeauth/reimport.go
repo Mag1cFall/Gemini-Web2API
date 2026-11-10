@@ -26,20 +26,19 @@ func FindChromeMaterial(gaiaID string, profile string) (ChromeMaterial, error) {
 	if err != nil {
 		return ChromeMaterial{}, err
 	}
-	selected := ""
-	for _, account := range accounts {
-		if account.Importable && account.GaiaID == gaiaID && (selected == "" || account.Profile == profile) {
-			selected = account.Profile
+	var selected *Account
+	for index, account := range accounts {
+		if account.Importable && account.GaiaID == gaiaID && (selected == nil || account.Profile == profile) {
+			selected = &accounts[index]
 		}
 	}
-	if selected == "" {
+	if selected == nil {
 		return ChromeMaterial{}, fmt.Errorf("Chrome 中没有可导入的同一账号")
 	}
-	_, encrypted, wrappedKey, err := readTokenService(root, selected, gaiaID)
-	if err != nil {
-		return ChromeMaterial{}, err
-	}
-	return ChromeMaterial{Profile: selected, Encrypted: encrypted, chromeRoot: root, gaiaID: gaiaID, wrappedKey: wrappedKey}, nil
+	return ChromeMaterial{
+		Profile: selected.Profile, Encrypted: selected.token.encryptedToken,
+		chromeRoot: root, gaiaID: gaiaID, wrappedKey: selected.token.bindingKey,
+	}, nil
 }
 
 // Decrypt 以 Chrome App-Bound 主密钥解密 refresh token，返回可保存的续签材料
@@ -47,9 +46,6 @@ func (m ChromeMaterial) Decrypt() (auth.OAuthMaterial, error) {
 	masterKey, err := retrieveV20Key(m.chromeRoot)
 	if err != nil {
 		return auth.OAuthMaterial{}, err
-	}
-	if len(masterKey) != 32 {
-		return auth.OAuthMaterial{}, fmt.Errorf("Chrome v20 主密钥长度异常")
 	}
 	token, err := decryptV20Token(masterKey, m.Encrypted)
 	if err != nil {

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -168,6 +169,15 @@ func accountIDFromPath(path string) string {
 	return name
 }
 
+// Inherit 让本次导入的 metadata 沿用 path 处已导入账号的停用标记与未重新填写的固定代理
+func Inherit(path string, metadata Metadata) Metadata {
+	if previous, err := Load(path); err == nil {
+		metadata.Disabled = previous.state.Metadata.Disabled
+		metadata.Proxy = cmp.Or(metadata.Proxy, previous.state.Metadata.Proxy)
+	}
+	return metadata
+}
+
 // New 创建一个待写入的认证状态文件
 func New(path string, state StorageState) (*File, error) {
 	absPath, err := filepath.Abs(strings.TrimSpace(path))
@@ -204,7 +214,7 @@ func (f *File) Account() LoadedAccount {
 	proxyURL := strings.TrimSpace(f.state.Metadata.Proxy)
 	source := gemini.AccountSource{
 		ID:       f.state.Metadata.ID,
-		Cookies:  toGeminiCookies(f.state.Cookies),
+		Cookies:  GeminiCookies(f.state.Cookies),
 		Language: f.state.Metadata.Language,
 		AuthUser: f.state.Metadata.AuthUser,
 	}
@@ -219,6 +229,13 @@ func (f *File) Account() LoadedAccount {
 // Path 返回认证状态文件的绝对路径
 func (f *File) Path() string {
 	return f.path
+}
+
+// Metadata 返回账号固定身份
+func (f *File) Metadata() Metadata {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state.Metadata
 }
 
 // SetDisabled 修改账号停用标记并写回
@@ -237,13 +254,6 @@ func (f *File) SetProxy(proxy string) error {
 	return f.writeLocked()
 }
 
-// Proxy 返回账号固定代理
-func (f *File) Proxy() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.state.Metadata.Proxy
-}
-
 // SetOAuth 更新续签材料与来源 Profile 并写回
 func (f *File) SetOAuth(material OAuthMaterial, profile string) error {
 	f.mu.Lock()
@@ -257,7 +267,7 @@ func (f *File) SetOAuth(material OAuthMaterial, profile string) error {
 func (f *File) SaveCookies(cookies []gemini.Cookie) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.state.Cookies = toStateCookies(cookies)
+	f.state.Cookies = StateCookies(cookies)
 	return f.writeLocked()
 }
 
@@ -307,39 +317,25 @@ func validateOAuthMaterial(material *OAuthMaterial) error {
 	return nil
 }
 
-func toGeminiCookies(cookies []StateCookie) []gemini.Cookie {
+// GeminiCookies 把认证状态中的 Cookie 转为协议客户端使用的 Cookie
+func GeminiCookies(cookies []StateCookie) []gemini.Cookie {
 	result := make([]gemini.Cookie, 0, len(cookies))
 	for _, cookie := range cookies {
-		path := cookie.Path
-		if path == "" {
-			path = "/"
-		}
 		result = append(result, gemini.Cookie{
-			Name:     cookie.Name,
-			Value:    cookie.Value,
-			Domain:   cookie.Domain,
-			Path:     path,
-			Expires:  int64(cookie.Expires),
-			HTTPOnly: cookie.HTTPOnly,
-			Secure:   cookie.Secure,
-			SameSite: cookie.SameSite,
+			Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: cookie.Path,
+			Expires: int64(cookie.Expires), HTTPOnly: cookie.HTTPOnly, Secure: cookie.Secure, SameSite: cookie.SameSite,
 		})
 	}
 	return result
 }
 
-func toStateCookies(cookies []gemini.Cookie) []StateCookie {
+// StateCookies 把协议客户端的 Cookie 转为认证状态中的 Cookie
+func StateCookies(cookies []gemini.Cookie) []StateCookie {
 	result := make([]StateCookie, 0, len(cookies))
 	for _, cookie := range cookies {
 		result = append(result, StateCookie{
-			Name:     cookie.Name,
-			Value:    cookie.Value,
-			Domain:   cookie.Domain,
-			Path:     cookie.Path,
-			Expires:  float64(cookie.Expires),
-			HTTPOnly: cookie.HTTPOnly,
-			Secure:   cookie.Secure,
-			SameSite: cookie.SameSite,
+			Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: cookie.Path,
+			Expires: float64(cookie.Expires), HTTPOnly: cookie.HTTPOnly, Secure: cookie.Secure, SameSite: cookie.SameSite,
 		})
 	}
 	return result

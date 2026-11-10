@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 )
 
@@ -32,7 +33,7 @@ func DiscoverCookieAccounts(ctx context.Context, text string, proxy string, fall
 	var accounts []CookieAccount
 	for authUser := range maxCookieAuthUsers {
 		source := gemini.AccountSource{
-			ID: "cookie", Cookies: stateCookiesToGemini(cookies), Language: defaultImportLanguage, AuthUser: authUser,
+			ID: "cookie", Cookies: auth.GeminiCookies(cookies), Language: defaultImportLanguage, AuthUser: authUser,
 			Save: func([]gemini.Cookie) error { return nil },
 		}
 		client, err := gemini.NewClient(source, requestProxy, false)
