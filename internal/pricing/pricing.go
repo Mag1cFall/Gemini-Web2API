@@ -18,6 +18,7 @@ var prices = map[string]price{
 	"gemini-3.5-flash-lite": {input: 0.30, output: 2.50},
 	"gemini-3.1-pro":        {input: 2, output: 12, longInput: 4, longOutput: 18},
 	"gemini-4-argon":        {input: 2, output: 10},
+	"gemini-4-carbon":       {input: 2, output: 10},
 }
 
 // Cost 返回一个请求按模型单价估算的美元费用与模型是否有单价，模型 ID 的 -task 后缀不影响单价，output 为思考与回复 token 之和

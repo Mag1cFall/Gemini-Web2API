@@ -63,6 +63,8 @@ type accountEntry struct {
 	Cooldown         cooldown
 	ModelCooldowns   map[string]cooldown
 	ConsecutiveFails int
+	// registered 是账号的登记序号
+	registered int
 }
 
 // ModelCooldown 是单个模型的冷却
@@ -165,6 +167,12 @@ type AccountPool struct {
 	persistMu sync.Mutex
 	// apiKeyAccounts 为各 API key 可用的账号 ID，未列出的 key 可用全部账号
 	apiKeyAccounts map[string][]string
+	// modelAccounts 为各模型可用的账号 ID，未列出的模型可用全部账号
+	modelAccounts map[string][]string
+	// order 为 fill-first 依次使用的账号 ID
+	order []string
+	// registered 是已登记的账号数，作为下一个账号的登记序号
+	registered int
 }
 
 // Cooldown 是一个账号或其某个模型的冷却，Model 为空表示整个账号
@@ -284,7 +292,9 @@ func (p *AccountPool) Register(accountID string, info AccountInfo, disabled bool
 		entry.Info, entry.State = info, state
 		return
 	}
-	p.entries = append(p.entries, &accountEntry{AccountID: accountID, Info: info, State: state, ModelCooldowns: make(map[string]cooldown)})
+	p.entries = append(p.entries, &accountEntry{AccountID: accountID, Info: info, State: state, ModelCooldowns: make(map[string]cooldown), registered: p.registered})
+	p.registered++
+	p.sortLocked()
 }
 
 // Add 添加一个已经完成协议初始化的账号
@@ -424,7 +434,7 @@ func (p *AccountPool) Client(accountID string) *gemini.Client {
 
 // AcquireForModel 选择可调度该模型的账号并占用一个请求槽，返回客户端、账号与释放函数；同一排队键的请求按到达顺序排队，队首在任一账号空出、就绪或状态变化后重新选择，没有可调度账号时客户端为空
 func (p *AccountPool) AcquireForModel(ctx context.Context, sessionKey string, modelID string, excludedAccountIDs map[string]struct{}) (*gemini.Client, string, func(), error) {
-	excludedAccountIDs = p.keyExcluded(ctx, excludedAccountIDs)
+	excludedAccountIDs = p.scopeExcluded(ctx, modelID, excludedAccountIDs)
 	key, wake := p.joinQueue(sessionKey, modelID, excludedAccountIDs)
 	defer p.leaveQueue(key, wake)
 	accountID := ""
@@ -555,9 +565,9 @@ func (p *AccountPool) SessionIdle(sessionKey string, modelID string) bool {
 	return entry != nil && entry.schedulable(now, modelID) && !entry.Client.Busy()
 }
 
-// RetryAfter 返回请求 API key 可用账号中目标模型最早结束冷却的时间，有未冷却的登录账号或没有冷却中的账号时为零值
+// RetryAfter 返回请求 API key 与目标模型可用账号中该模型最早结束冷却的时间，有未冷却的登录账号或没有冷却中的账号时为零值
 func (p *AccountPool) RetryAfter(ctx context.Context, modelID string) time.Time {
-	excluded := p.keyExcluded(ctx, nil)
+	excluded := p.scopeExcluded(ctx, modelID, nil)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -761,7 +771,7 @@ func (p *AccountPool) CatalogAccounts() []CatalogAccount {
 	return accounts
 }
 
-// ModelAccounts 返回每个模型当前可调度的账号数
+// ModelAccounts 返回每个模型当前可调度的账号数，模型绑定了账号时只计绑定的账号
 func (p *AccountPool) ModelAccounts() map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -772,6 +782,9 @@ func (p *AccountPool) ModelAccounts() map[string]int {
 			continue
 		}
 		for _, model := range entry.Client.Models() {
+			if scope, bound := p.modelAccounts[modelKey(model.ID)]; bound && !slices.Contains(scope, entry.AccountID) {
+				continue
+			}
 			if entry.blockedUntil(now, model.ID).IsZero() {
 				counts[model.ID]++
 			}
@@ -794,9 +807,9 @@ type ModelAvailability struct {
 	Pending []string
 }
 
-// ModelAvailability 按请求 API key 可用账号的模型目录返回目标模型的调度情况
+// ModelAvailability 按请求 API key 与目标模型可用账号的模型目录返回该模型的调度情况
 func (p *AccountPool) ModelAvailability(ctx context.Context, modelID string) ModelAvailability {
-	excluded := p.keyExcluded(ctx, nil)
+	excluded := p.scopeExcluded(ctx, modelID, nil)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -829,13 +842,17 @@ func (p *AccountPool) ModelAvailability(ctx context.Context, modelID string) Mod
 	return availability
 }
 
-// AccountReason 返回账号不能调度该模型的原因：不在请求 API key 的绑定账号中、冷却截止时间或账号状态
+// AccountReason 返回账号不能调度该模型的原因：不在请求 API key 或该模型的绑定账号中、冷却截止时间或账号状态
 func (p *AccountPool) AccountReason(ctx context.Context, accountID string, modelID string) string {
-	if _, outside := p.keyExcluded(ctx, nil)[accountID]; outside {
-		return accountID + " 不在当前 API key 的绑定账号中"
-	}
+	key, _ := ctx.Value(apiKeyContextKey{}).(string)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if scope, bound := p.apiKeyAccounts[key]; key != "" && bound && !slices.Contains(scope, accountID) {
+		return accountID + " 不在当前 API key 的绑定账号中"
+	}
+	if scope, bound := p.modelAccounts[modelKey(modelID)]; bound && !slices.Contains(scope, accountID) {
+		return accountID + " 不在模型 " + modelID + " 的绑定账号中"
+	}
 	if entry := p.entry(accountID); entry != nil {
 		return entry.unavailableReason(time.Now(), modelID)
 	}

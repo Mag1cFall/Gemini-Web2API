@@ -708,7 +708,7 @@ func runGenerationWithClient(
 		}
 		if event.Kind == gemini.EventMetadata && event.Metadata != nil {
 			metadata := *event.Metadata
-			metadata.ModelName = actualProviderModel(client, model.ID, event.Metadata)
+			metadata.ModelName = actualProviderModel(client, model, event.Metadata)
 			event.Metadata = &metadata
 		}
 		if err := accumulator.Apply(event); err != nil {
@@ -744,7 +744,11 @@ func runGenerationWithClient(
 		Files:         files,
 		Conversation:  conversation,
 		Branch:        branch,
+		ClientTools:   len(bridge.Definitions) > 0,
 	}, handle)
+	if len(bridge.Definitions) > 0 && client.TemporaryChats() && accumulator.Session.CID != "" {
+		conversations.markTemporary(accumulator.Session, accountID)
+	}
 	if err == nil {
 		if rest := aligner.finish(); rest != "" {
 			err = handle(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: rest, Snapshot: aligner.held})
@@ -820,7 +824,7 @@ func runGenerationWithClient(
 		accumulator.Session = snapshot
 	}
 
-	providerModel := actualProviderModel(client, model.ID, accumulator.Metadata)
+	providerModel := actualProviderModel(client, model, accumulator.Metadata)
 	for _, media := range accumulator.Primary().Media {
 		if media.Type == gemini.MediaGeneratedImage && media.Generator != "" {
 			providerModel = media.Generator
@@ -879,11 +883,18 @@ func isAccountContextError(err error) bool {
 	return errors.As(err, &contextErr)
 }
 
-func actualProviderModel(client *gemini.Client, requestedModel string, metadata *gemini.EventMetadataData) string {
+// actualProviderModel 返回上游实际回答的模型 ID：变体模型通过核对时取该变体的型号，其余按上游给出的模型名与 hash 在账号目录中查找
+func actualProviderModel(client *gemini.Client, requested gemini.Model, metadata *gemini.EventMetadataData) string {
+	requestedModel := requested.ID
 	if metadata == nil {
 		return requestedModel
 	}
-	for _, value := range []string{metadata.ModelHash, metadata.ModelName} {
+	if requested.Variant != "" && requested.ServedBy(*metadata) {
+		if model, err := client.ResolveModel(requested.Variant); err == nil {
+			return model.ID
+		}
+	}
+	for _, value := range []string{metadata.ModelName, metadata.ModelHash} {
 		if value == "" {
 			continue
 		}

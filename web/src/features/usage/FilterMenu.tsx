@@ -7,18 +7,20 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { usageMessages } from '@/features/usage/messages'
 import { useMessages } from '@/lib/i18n'
 
-// FilterMenu 是一个维度的多选筛选，浮层内可搜索取值，已选取值始终列在前面
+// FilterMenu 是一个维度的多选筛选，浮层内可搜索取值，已选取值始终列在前面，disabled 时取值不可修改
 export function FilterMenu({
   label,
   options,
   selected,
   format,
+  disabled = false,
   onChange,
 }: {
   label: string
   options: string[]
   selected: string[]
   format: (value: string) => string
+  disabled?: boolean
   onChange: (values: string[]) => void
 }) {
   const m = useMessages(usageMessages)
@@ -39,10 +41,13 @@ export function FilterMenu({
         <Button
           size="sm"
           className={
-            selected.length > 0 ? 'border-primary-border bg-primary-soft text-primary' : ''
+            'max-w-full ' +
+            (selected.length > 0 ? 'border-primary-border bg-primary-soft text-primary' : '')
           }
         >
-          {label}
+          <span className="min-w-0 truncate" title={label}>
+            {label}
+          </span>
           {selected.length > 0 && (
             <span className="rounded-sm bg-primary px-1 text-xs text-primary-foreground tabular-nums">
               {selected.length}
@@ -69,7 +74,7 @@ export function FilterMenu({
             className="h-control-sm pl-8"
           />
         </div>
-        <fieldset className="max-h-[256px] min-w-0 overflow-y-auto">
+        <fieldset disabled={disabled} className="max-h-[256px] min-w-0 overflow-y-auto">
           <legend className="sr-only">{label}</legend>
           {visible.length === 0 ? (
             <p className="px-2 py-3 text-center text-sm text-foreground-muted">{m.filterNone}</p>
@@ -106,6 +111,7 @@ export function FilterMenu({
               variant="ghost"
               size="sm"
               className="w-full justify-start"
+              disabled={disabled}
               onClick={() => {
                 onChange([])
               }}

@@ -1,12 +1,14 @@
-// Package requestdb 在本地 SQLite 中保存请求用量、小时与本地日汇总及可选的截断正文，并提供用量查询接口
+// Package requestdb 在本地 SQLite 中保存请求用量、小时与本地日汇总及可选的 gzip 压缩截断正文，并提供用量查询接口
 package requestdb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/klauspost/compress/gzip"
 	_ "modernc.org/sqlite"
 )
 
@@ -71,14 +74,14 @@ CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
 CREATE INDEX IF NOT EXISTS requests_state_time ON requests(state, time);
 CREATE TABLE IF NOT EXISTS hours (` + rollupColumns + `) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS days (` + rollupColumns + `) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS bodies (
+CREATE TABLE IF NOT EXISTS request_bodies (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, time INTEGER NOT NULL,
- request TEXT NOT NULL, request_size INTEGER NOT NULL, response TEXT NOT NULL, response_size INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS responses (
+ request BLOB NOT NULL, request_size INTEGER NOT NULL, response BLOB NOT NULL, response_size INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS stored_responses (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, previous_id TEXT NOT NULL, background INTEGER NOT NULL,
- status TEXT NOT NULL, response TEXT NOT NULL, input TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS responses_created ON responses(created_at);
-CREATE INDEX IF NOT EXISTS responses_unfinished ON responses(status) WHERE background=1 AND status IN ('queued','in_progress');
+ status TEXT NOT NULL, response BLOB NOT NULL, input BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS stored_responses_created ON stored_responses(created_at);
+CREATE INDEX IF NOT EXISTS stored_responses_unfinished ON stored_responses(status) WHERE background=1 AND status IN ('queued','in_progress');
 CREATE TABLE IF NOT EXISTS files (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, filename TEXT NOT NULL,
  mime_type TEXT NOT NULL, bytes INTEGER NOT NULL, purpose TEXT NOT NULL, sha256 TEXT NOT NULL, source TEXT NOT NULL);
@@ -368,8 +371,8 @@ func (store *Store) write(batch []write) (err error) {
 		}
 		if body := item.body; body != nil {
 			bodies = true
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`,
-				body.ID, body.Time.UnixMilli(), body.Request, body.RequestSize, body.Response, body.ResponseSize); err != nil {
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO request_bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`,
+				body.ID, body.Time.UnixMilli(), compress([]byte(body.Request)), body.RequestSize, compress([]byte(body.Response)), body.ResponseSize); err != nil {
 				return err
 			}
 		}
@@ -390,7 +393,7 @@ func (store *Store) write(batch []write) (err error) {
 		}
 	}
 	if bodies {
-		if _, err := tx.Exec(`DELETE FROM bodies WHERE seq <= (SELECT MAX(seq) FROM bodies) - ?`, bodyRetention); err != nil {
+		if _, err := tx.Exec(`DELETE FROM request_bodies WHERE seq <= (SELECT MAX(seq) FROM request_bodies) - ?`, bodyRetention); err != nil {
 			return err
 		}
 	}
@@ -436,7 +439,7 @@ func (store *Store) prune() {
 	_, requestsErr := store.db.Exec(`DELETE FROM requests WHERE time < ?`, hour)
 	_, hoursErr := store.db.Exec(`DELETE FROM hours WHERE start < ?`, hour)
 	_, daysErr := store.db.Exec(`DELETE FROM days WHERE start < ?`, day)
-	_, responsesErr := store.db.Exec(`DELETE FROM responses WHERE created_at < ?`, now.Add(-responseRetention).UnixMilli())
+	_, responsesErr := store.db.Exec(`DELETE FROM stored_responses WHERE created_at < ?`, now.Add(-responseRetention).UnixMilli())
 	_, videosErr := store.db.Exec(`DELETE FROM videos WHERE created_at < ?`, now.Add(-GeneratedRetention).UnixMilli())
 	store.purgeExpiredFiles(context.Background())
 	reclaimErr := reclaim(context.Background(), store.db)
@@ -507,16 +510,46 @@ func (store *Store) RequestBody(ctx context.Context, id string) (RequestBody, er
 	store.flush()
 	body := RequestBody{ID: id}
 	var at int64
-	err := store.reads.QueryRowContext(ctx, `SELECT time,request,request_size,response,response_size FROM bodies WHERE id=?`, id).
-		Scan(&at, &body.Request, &body.RequestSize, &body.Response, &body.ResponseSize)
+	var request, response []byte
+	err := store.reads.QueryRowContext(ctx, `SELECT time,request,request_size,response,response_size FROM request_bodies WHERE id=?`, id).
+		Scan(&at, &request, &body.RequestSize, &response, &body.ResponseSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RequestBody{}, ErrRequestBodyNotFound
 	}
 	if err != nil {
 		return RequestBody{}, err
 	}
-	body.Time = time.UnixMilli(at).UTC()
+	if request, err = decompress(request); err != nil {
+		return RequestBody{}, err
+	}
+	if response, err = decompress(response); err != nil {
+		return RequestBody{}, err
+	}
+	body.Time, body.Request, body.Response = time.UnixMilli(at).UTC(), string(request), string(response)
 	return body, nil
+}
+
+// gzipWriters 复用正文的 gzip 压缩器
+var gzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
+
+// compress 以 gzip 压缩一段正文
+func compress(data []byte) []byte {
+	var buffer bytes.Buffer
+	writer := gzipWriters.Get().(*gzip.Writer)
+	defer gzipWriters.Put(writer)
+	writer.Reset(&buffer)
+	_, _ = writer.Write(data)
+	_ = writer.Close()
+	return buffer.Bytes()
+}
+
+// decompress 还原 gzip 压缩的正文
+func decompress(data []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(reader)
 }
 
 // floorDiv 返回向负无穷取整的整数除法结果

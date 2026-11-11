@@ -40,7 +40,7 @@ import {
 import { useModels } from '@/features/models/queries'
 import type { Model } from '@/features/models/types'
 import { parseError } from '@/features/playground/protocols'
-import { maskKey, modelsForKey, parseKeyAccounts } from '@/features/settings/apiKeys'
+import { maskKey, modelsForKey, parseAccountBindings } from '@/features/settings/apiKeys'
 import { useConfig } from '@/features/settings/queries'
 import { appURL, serviceURL } from '@/lib/api'
 import { localizeError } from '@/lib/errorMessages'
@@ -344,7 +344,7 @@ function ClientConfigs() {
   const key = choice.key ?? keys[0] ?? 'gemini-web2api'
   const models = modelsForKey(
     (catalog.data?.models ?? []).filter((model) => !model.tool),
-    parseKeyAccounts(config.data?.api_key_accounts ?? '').get(key),
+    parseAccountBindings(config.data?.api_key_accounts ?? '').get(key),
   )
   const [shell, setShell] = useState<Shell>(
     navigator.userAgent.includes('Windows') ? 'windows' : 'unix',

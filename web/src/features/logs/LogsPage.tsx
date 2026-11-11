@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Trash } from 'lucide-react'
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { logsKey } from '@/app/events'
@@ -52,6 +52,36 @@ const timeFormat = new Intl.DateTimeFormat('en-GB', {
   second: '2-digit',
   hour12: false,
 })
+
+// LogLine 渲染一行日志或请求卡片，行的最新事件与事件数不变时不重新渲染
+const LogLine = memo(
+  function LogLine({ row }: { row: LogRow }) {
+    const level = row.entry.level
+    const time = row.events[0]?.time ?? row.entry.time
+    return (
+      <div
+        className={
+          'grid grid-cols-[auto_auto_minmax(0,1fr)] items-baseline gap-x-4 border-b border-l-2 border-b-border py-2 pr-5 pl-[18px] text-base select-text ' +
+          levelClass[level]
+        }
+      >
+        <time dateTime={time} className="font-mono text-sm text-foreground-subtle tabular-nums">
+          {timeFormat.format(new Date(time))}
+        </time>
+        <span className={'w-[44px] font-mono text-sm font-semibold ' + levelText[level]}>
+          {level}
+        </span>
+        {row.entry.request ? (
+          <RequestLogCard row={row} />
+        ) : (
+          <LogMessage source={row.entry.source} message={row.entry.message} />
+        )}
+      </div>
+    )
+  },
+  (prev, next) =>
+    prev.row.entry === next.row.entry && prev.row.events.length === next.row.events.length,
+)
 
 // LogsPage 显示实时日志：请求的生命周期合成卡片，按级别、来源与搜索词筛选，可跟随最新日志滚动
 export function LogsPage() {
@@ -228,36 +258,9 @@ export function LogsPage() {
                   </Button>
                 </div>
               )}
-              {visible.map((row) => {
-                const level = row.entry.level
-                const time = row.events[0]?.time ?? row.entry.time
-                return (
-                  <div
-                    key={row.key}
-                    className={
-                      'grid grid-cols-[auto_auto_minmax(0,1fr)] items-baseline gap-x-4 border-b border-l-2 border-b-border py-2 pr-5 pl-[18px] text-base select-text ' +
-                      levelClass[level]
-                    }
-                  >
-                    <time
-                      dateTime={time}
-                      className="font-mono text-sm text-foreground-subtle tabular-nums"
-                    >
-                      {timeFormat.format(new Date(time))}
-                    </time>
-                    <span
-                      className={'w-[44px] font-mono text-sm font-semibold ' + levelText[level]}
-                    >
-                      {level}
-                    </span>
-                    {row.entry.request ? (
-                      <RequestLogCard row={row} />
-                    ) : (
-                      <LogMessage source={row.entry.source} message={row.entry.message} />
-                    )}
-                  </div>
-                )
-              })}
+              {visible.map((row) => (
+                <LogLine key={row.key} row={row} />
+              ))}
             </>
           )}
         </div>

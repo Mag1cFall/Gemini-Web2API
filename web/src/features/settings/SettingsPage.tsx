@@ -15,8 +15,8 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
-import { useAccounts } from '@/features/accounts/queries'
-import { maskKey, parseKeyAccounts } from '@/features/settings/apiKeys'
+import { useAccountLabel, useAccounts } from '@/features/accounts/queries'
+import { maskKey, parseAccountBindings } from '@/features/settings/apiKeys'
 import { ListInput } from '@/features/settings/ListInput'
 import { settingsMessages } from '@/features/settings/messages'
 import { ProxyPoolCard } from '@/features/settings/ProxyPoolCard'
@@ -53,6 +53,8 @@ const editableKeys = [
   'auth_states',
   'log_format',
   'api_key_accounts',
+  'account_order',
+  'model_accounts',
   'first_event_hedge',
   'first_event_hedge_models',
 ] as const
@@ -84,6 +86,8 @@ const envNames: Record<string, string> = {
   auth_states: 'GEMINI_AUTH_STATES',
   log_format: 'LOG_FORMAT',
   api_key_accounts: 'API_KEY_ACCOUNTS',
+  account_order: 'ACCOUNT_ORDER',
+  model_accounts: 'MODEL_ACCOUNTS',
   first_event_hedge: 'FIRST_EVENT_HEDGE',
   first_event_hedge_models: 'FIRST_EVENT_HEDGE_MODELS',
 }
@@ -200,7 +204,7 @@ function KeyAccounts({
 }) {
   const m = useMessages(settingsMessages)
   const accounts = useAccounts().data?.accounts ?? []
-  const bindings = parseKeyAccounts(value)
+  const bindings = parseAccountBindings(value)
   if (keys.length === 0) {
     return <p className="text-sm text-foreground-muted">{m.keyAccountsNone}</p>
   }
@@ -247,6 +251,8 @@ export function SettingsPage() {
   const { section } = useParams()
   const tab: Tab = tabs.find((item) => item === section) ?? 'service'
   const config = useConfig()
+  const accounts = useAccounts().data?.accounts ?? []
+  const accountLabel = useAccountLabel()
   const [edited, setEdited] = useState<ServiceConfig | null>(null)
   const [password, setPassword] = useState('')
   const save = useMutation({
@@ -307,9 +313,12 @@ export function SettingsPage() {
     log_max_total_mb: m.logMaxTotal,
     request_body_log: m.requestBodyLog,
     api_key_accounts: m.keyAccounts,
+    account_order: m.accountOrder,
+    model_accounts: m.modelAccounts,
     first_event_hedge: m.firstEventHedge,
     first_event_hedge_models: m.hedgeModels,
   }
+  const accountOrder = value.account_order.split(',').filter(Boolean)
   const hedgeMode = ['off', 'auto'].includes(value.first_event_hedge)
     ? value.first_event_hedge
     : 'fixed'
@@ -447,16 +456,9 @@ export function SettingsPage() {
               rows={3}
               placeholder="gpt-4o:gemini-3.8-flash"
               aria-describedby="model_mapping-hint"
-              value={value.model_mapping.split(',').filter(Boolean).join('\n')}
+              value={value.model_mapping.split(',').join('\n')}
               onChange={(event) => {
-                set(
-                  'model_mapping',
-                  event.target.value
-                    .split('\n')
-                    .map((line) => line.trim())
-                    .filter(Boolean)
-                    .join(','),
-                )
+                set('model_mapping', event.target.value.split('\n').join(','))
               }}
             />
           </SettingRow>
@@ -491,6 +493,38 @@ export function SettingsPage() {
                 { value: 'round-robin', label: m.routingRoundRobin },
                 { value: 'fill-first', label: m.routingFillFirst },
               ]}
+            />
+          </SettingRow>
+          <SettingRow id="account_order" label={m.accountOrder} hint={m.accountOrderHint}>
+            <FilterMenu
+              label={
+                accountOrder.length === 0
+                  ? m.accountOrderImport
+                  : accountOrder.map(accountLabel).join(', ')
+              }
+              options={accounts.map((item) => item.account_id)}
+              selected={accountOrder}
+              format={accountLabel}
+              onChange={(next) => {
+                set('account_order', next.join(','))
+              }}
+            />
+          </SettingRow>
+          <SettingRow
+            id="model_accounts"
+            label={m.modelAccounts}
+            hint={m.modelAccountsHint}
+            align="start"
+          >
+            <Textarea
+              id="model_accounts"
+              rows={3}
+              placeholder="gemini-4-carbon:account-a|account-b"
+              aria-describedby="model_accounts-hint"
+              value={value.model_accounts.split(',').join('\n')}
+              onChange={(event) => {
+                set('model_accounts', event.target.value.split('\n').join(','))
+              }}
             />
           </SettingRow>
           <SettingRow id="account_cooldown" label={m.accountCooldown} hint={m.accountCooldownHint}>

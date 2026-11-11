@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -808,6 +810,12 @@ var followUpTags = []string{"<FollowUp ", "<Elicitation ", "<ElicitationsGroup "
 
 // stripFollowUps 去掉代码以外官网渲染为追问按钮的标记，尚未写完的标记从开头起截去，正文末尾可能是标记开始的片段一并去掉
 func stripFollowUps(raw string) string {
+	if !strings.Contains(raw, "<FollowUp") && !strings.Contains(raw, "<Elicitation") {
+		last := strings.LastIndexByte(raw, '<')
+		if last < 0 || !slices.ContainsFunc(followUpTags, func(tag string) bool { return strings.HasPrefix(tag, raw[last:]) }) {
+			return raw
+		}
+	}
 	raw = outsideCode(raw, func(prose string) string { return followUpPattern.ReplaceAllString(prose, "") })
 	for _, span := range proseRanges(raw) {
 		prose := raw[span[0]:span[1]]
@@ -1191,28 +1199,36 @@ func commonPrefix(left, right string) int {
 func scanProtocolRecords(reader io.Reader, handle func([]any) error) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), maxProtocolFrameSize)
-	pending := ""
+	var pending []byte
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if pending == "" {
-			line = strings.TrimSpace(strings.TrimPrefix(line, ")]}'"))
-			if line == "" {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(pending) == 0 {
+			line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte(")]}'")))
+			if len(line) == 0 {
 				continue
 			}
-			if _, err := strconv.ParseUint(line, 10, 64); err == nil {
-				continue
+			if len(line) <= 20 {
+				if _, err := strconv.ParseUint(string(line), 10, 64); err == nil {
+					continue
+				}
 			}
 		}
-		pending += line
+		if len(pending) > 0 {
+			pending = append(pending, line...)
+			line = pending
+		}
 		var frame []any
-		if err := json.Unmarshal([]byte(pending), &frame); err != nil {
+		if err := json.Unmarshal(line, &frame); err != nil {
 			var syntax *json.SyntaxError
 			if errors.As(err, &syntax) && syntax.Error() == "unexpected end of JSON input" {
+				if len(pending) == 0 {
+					pending = append(pending, line...)
+				}
 				continue
 			}
 			return fmt.Errorf("decode protocol frame: %w", err)
 		}
-		pending = ""
+		pending = nil
 		for _, rawRecord := range frame {
 			record, ok := rawRecord.([]any)
 			if ok {

@@ -346,7 +346,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	request.Gem = model.Gem
 	request.tools = bootstrap.Catalog.toolSelection(request.Feature, request.AspectRatio)
 	request.personalIntelligence = bootstrap.Catalog.personalIntelligence
-	temporaryChat := !c.guest && !c.saveHistory && !request.Feature.savedChatOnly()
+	temporaryChat := c.TemporaryChats() && !request.Feature.savedChatOnly() && !request.ClientTools
 	if allowRefresh && c.freeTier() {
 		if listed, signedIn, err := c.listAccountsSignedIn(ctx); err == nil && listed && !signedIn {
 			return c.restream(ctx, version, request, emit)
@@ -354,7 +354,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	}
 	taskTerms := false
 	if request.Feature == FeatureTask {
-		if taskTerms, err = c.onboardTask(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
+		if taskTerms, err = c.onboardTask(ctx, bootstrap, model, request.ThinkingLevel); err != nil {
 			return err
 		}
 	}
@@ -384,7 +384,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	}
 	if uploads > 0 {
 		trace.SetStage("接受上传条款")
-		if err := c.acceptUploadTerms(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
+		if err := c.acceptUploadTerms(ctx, bootstrap, model, request.ThinkingLevel); err != nil {
 			return uploadFailed(err)
 		}
 		trace.SetStage("上传附件")
@@ -448,7 +448,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if request.researchConfirm {
 		chatMode = nil
 	}
-	modelHeader, err := buildModelHeader(c.features(), model, chatMode, c.tierCode(), request.ThinkingLevel, c.clientID, bootstrap.BL, c.pageTiming())
+	modelHeader, err := buildModelHeader(c.features(), model, bootstrap.Language, chatMode, c.tierCode(), request.ThinkingLevel, c.clientID, bootstrap.BL, c.pageTiming())
 	if err != nil {
 		return err
 	}
@@ -485,7 +485,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		return protocolErr
 	}
 	if taskTerms {
-		if err := c.acceptTaskTerms(ctx, bootstrap, model.Mode, request.ThinkingLevel); err != nil {
+		if err := c.acceptTaskTerms(ctx, bootstrap, model, request.ThinkingLevel); err != nil {
 			return err
 		}
 	}
@@ -494,7 +494,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	decodeState := NewConversationStateFrom(next)
 	withDownload := func(event Event) error {
 		if event.Media != nil && event.Media.download != nil {
-			event.Media.download.mode, event.Media.download.level, event.Media.download.temporaryChat = model.Mode, request.ThinkingLevel, temporaryChat
+			event.Media.download.mode, event.Media.download.variant, event.Media.download.level, event.Media.download.temporaryChat = model.Mode, model.Variant, request.ThinkingLevel, temporaryChat
 		}
 		return emit(event)
 	}
@@ -508,12 +508,12 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	})
 	if idle := streamIdleError(streamCtx); idle != nil && ctx.Err() == nil {
 		snapshot := decodeState.Snapshot()
-		go c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model.Mode, request.ThinkingLevel)
+		go c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model, request.ThinkingLevel)
 		return idle
 	}
 	if ctx.Err() != nil {
 		snapshot := decodeState.Snapshot()
-		go c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model.Mode, request.ThinkingLevel)
+		go c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model, request.ThinkingLevel)
 		return ctx.Err()
 	}
 	if request.researchPlan != nil {
@@ -566,7 +566,7 @@ func (c *Client) restream(ctx context.Context, version uint64, request GenerateR
 const stopTimeout = 10 * time.Second
 
 // stopGeneration 在客户端取消后发送官网“停止回答”的 NkpXw 请求，参数为会话、回答标识与首帧的控制令牌
-func (c *Client) stopGeneration(bootstrap Bootstrap, cid string, rid string, token string, mode int, level ThinkingLevel) {
+func (c *Client) stopGeneration(bootstrap Bootstrap, cid string, rid string, token string, model Model, level ThinkingLevel) {
 	if cid == "" || rid == "" || token == "" {
 		return
 	}
@@ -578,13 +578,31 @@ func (c *Client) stopGeneration(bootstrap Bootstrap, cid string, rid string, tok
 	defer cancel()
 	started := time.Now()
 	_, err = c.batchExecute(ctx, bootstrap, batchRequest{
-		rpcID: "NkpXw", payload: string(payload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: mode, level: level,
+		rpcID: "NkpXw", payload: string(payload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: model.Mode, variant: model.Variant, level: level,
 	})
 	if err != nil {
 		logging.Warn(c.displayAccountID(), "通知上游停止生成失败", "原因", err)
 		return
 	}
 	logging.Info(c.displayAccountID(), "已通知上游停止生成", "耗时", time.Since(started))
+}
+
+// TemporaryChats 报告账号的生成请求是否默认使用 Temporary Chat，不写入网页历史
+func (c *Client) TemporaryChats() bool {
+	return !c.guest && !c.saveHistory
+}
+
+// DeleteConversation 从账号的网页历史中删除会话，mode 为会话所用模型的模式
+func (c *Client) DeleteConversation(ctx context.Context, cid string, mode int) error {
+	bootstrap, err := c.bootstrapSnapshot()
+	if err != nil {
+		return err
+	}
+	payload, _ := json.Marshal([]string{cid})
+	_, err = c.batchExecute(ctx, bootstrap, batchRequest{
+		rpcID: "GzXR5e", payload: string(payload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: mode,
+	})
+	return err
 }
 
 // Models 返回当前账号初始化得到的模型目录
@@ -687,7 +705,7 @@ func (c *Client) accountStatusError(status int) error {
 	return nil
 }
 
-// batchRequest 是一次 batchexecute RPC 的参数，mode 与 level 为页面当前选中的模型 mode 与思考强度，页面加载阶段为零
+// batchRequest 是一次 batchexecute RPC 的参数，mode、variant 与 level 为页面当前选中的模型 mode、变体键与思考强度，页面加载阶段为零值
 type batchRequest struct {
 	rpcID      string
 	payload    string
@@ -695,6 +713,7 @@ type batchRequest struct {
 	language   string
 	extension  string
 	mode       int
+	variant    string
 	level      ThinkingLevel
 	// conversation 表示会话内请求，请求头第 7 槽写 Temporary Chat 状态，功能编号与生成请求相同重复两遍
 	conversation  bool
@@ -721,13 +740,13 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 	c.applyXHRHeaders(req)
 	var timing []any
 	if call.untimed {
-		timing = []any{[]any{}, pageDuration(float64(time.Now().UnixMilli()))}
+		timing = []any{[]any{}, pageDuration(float64(time.Now().UnixMilli())), hostTimezone}
 	} else {
 		timing = c.pageTiming()
 	}
-	header := buildGenericHeader(c.features(), c.clientID, bootstrap.BL, call.mode, call.level, timing)
+	header := buildGenericHeader(c.features(), call.language, c.clientID, bootstrap.BL, call.mode, call.variant, call.level, timing)
 	if call.conversation {
-		header = buildConversationHeader(c.features(), c.clientID, bootstrap.BL, call.temporaryChat, call.mode, call.level, timing)
+		header = buildConversationHeader(c.features(), call.language, c.clientID, bootstrap.BL, call.temporaryChat, call.mode, call.variant, call.level, timing)
 	}
 	req.Header.Set("x-goog-ext-525001261-jspb", header)
 	req.Header.Set("x-goog-ext-73010989-jspb", call.extension)
@@ -796,7 +815,7 @@ var navigationHeaderOrder = []string{
 	"sec-ch-ua-platform", "sec-ch-ua-platform-version", "sec-ch-ua-model", "sec-ch-ua-bitness",
 	"sec-ch-ua-wow64", "sec-ch-ua-full-version-list", "sec-ch-ua-form-factors",
 	"upgrade-insecure-requests", "user-agent", "accept",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -809,7 +828,7 @@ var xhrHeaderOrder = []string{
 	"sec-ch-ua-full-version", "content-type", "x-goog-ext-525001261-jspb",
 	"x-goog-ext-525005358-jspb", "x-goog-ext-73010990-jspb", "user-agent",
 	"sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }

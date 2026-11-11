@@ -44,12 +44,30 @@ type callArg struct {
 	Value string
 }
 
-// firstCallStart 返回第一个位于代码以外的调用块开头的字节区间，位于所在行的行内代码或围栏代码块内的是示例
+// callStartAtPattern 匹配位于开头的调用块开头
+var callStartAtPattern = regexp.MustCompile(`^` + callStartPattern.String())
+
+// firstCallStart 返回第一个位于代码以外的调用块开头的字节区间，位于所在行的行内代码或围栏代码块内的是示例；只在方括号处尝试匹配
 func firstCallStart(text string) []int {
-	for _, location := range callStartPattern.FindAllStringIndex(text, -1) {
+	for from := 0; from < len(text); {
+		bracket := strings.IndexByte(text[from:], '[')
+		if bracket < 0 {
+			return nil
+		}
+		start := from + bracket
+		if start > from && text[start-1] == '\\' {
+			start--
+		}
+		match := callStartAtPattern.FindStringIndex(text[start:])
+		if match == nil {
+			from += bracket + 1
+			continue
+		}
+		location := []int{start, start + match[1]}
 		if inside, _ := codeSpanAt(text, location[0]); !inside && !gemini.InFencedCode(text, location[0]) {
 			return location
 		}
+		from = location[1]
 	}
 	return nil
 }

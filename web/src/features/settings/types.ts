@@ -23,6 +23,10 @@ export interface ServiceConfig {
   log_format: 'json' | 'text'
   // api_key_accounts 是 API key 可用账号的 .env 写法：key:账号|账号，逗号分隔
   api_key_accounts: string
+  // account_order 是 fill-first 依次使用的账号 ID，逗号分隔
+  account_order: string
+  // model_accounts 是模型可用账号的 .env 写法：模型 ID:账号|账号，逗号分隔
+  model_accounts: string
   // first_event_hedge 是首事件备用请求方式：off、auto 或等待秒数
   first_event_hedge: string
   first_event_hedge_models: string
@@ -66,6 +70,8 @@ export type ConfigPatch = Partial<{
   auth_states: string
   log_format: ServiceConfig['log_format']
   api_key_accounts: string
+  account_order: string
+  model_accounts: string
   first_event_hedge: string
   first_event_hedge_models: string
 }>

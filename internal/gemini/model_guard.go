@@ -3,12 +3,13 @@ package gemini
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrModelMismatch 表示上游实际回答的模型与请求的模型不同，常见于该模型额度用尽后的降级
 var ErrModelMismatch = errors.New("gemini web served a different model")
 
-// modelGuard 在公开任何上游事件前确认实际模型 hash
+// modelGuard 在公开任何上游事件前确认实际回答的模型
 type modelGuard struct {
 	expected  Model
 	emit      func(Event) error
@@ -30,7 +31,7 @@ func (g *modelGuard) Emit(event Event) error {
 		g.pending = append(g.pending, event)
 		return nil
 	}
-	if event.Metadata.ModelHash != g.expected.Hash {
+	if !g.expected.ServedBy(*event.Metadata) {
 		return modelMismatchError(g.expected, *event.Metadata)
 	}
 	g.pending = append(g.pending, event)
@@ -59,6 +60,18 @@ func (g *modelGuard) Complete() error {
 
 func (g *modelGuard) Emitted() bool {
 	return g.emitted
+}
+
+// ServedBy 报告上游元数据是否表明回答来自该模型：变体模型的响应带账号默认模型的 hash，按型号名核对，上游在 Low 以外的思考强度下于型号名后加档位名（如 4 Argon High）
+func (m Model) ServedBy(metadata EventMetadataData) bool {
+	if m.Variant == "" {
+		return metadata.ModelHash == m.Hash
+	}
+	name := m.DisplayName
+	if m.Feature == FeatureTask {
+		name = strings.TrimSuffix(name, " Task")
+	}
+	return metadata.ModelName == name || strings.HasPrefix(metadata.ModelName, name+" ")
 }
 
 func modelMismatchError(expected Model, actual EventMetadataData) *ProtocolError {

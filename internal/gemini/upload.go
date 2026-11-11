@@ -26,7 +26,7 @@ var uploadStartHeaderOrder = []string{
 	"sec-ch-ua-wow64", "x-goog-upload-protocol", "sec-ch-ua-arch", "sec-ch-ua-full-version",
 	"content-type", "x-goog-upload-header-content-length", "push-id", "x-client-pctx",
 	"x-goog-upload-command", "user-agent", "x-tenant-id", "sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -38,7 +38,7 @@ var uploadFinalizeHeaderOrder = []string{
 	"sec-ch-ua-wow64", "sec-ch-ua-arch", "sec-ch-ua-full-version", "content-type",
 	"push-id", "x-client-pctx", "x-goog-upload-command", "x-goog-upload-offset", "x-tenant-id",
 	"user-agent", "sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -49,13 +49,13 @@ var processFileHeaderOrder = []string{
 	"sec-ch-ua", "sec-ch-ua-bitness", "sec-ch-ua-model", "sec-ch-ua-mobile", "x-same-domain",
 	"sec-ch-ua-wow64", "sec-ch-ua-form-factors", "sec-ch-ua-arch", "sec-ch-ua-full-version",
 	"user-agent", "content-type", "sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
 
 // acceptUploadTerms 在账号的上传条款确认超过官网有效期时，按官网同意按钮把确认时间写入账号偏好
-func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, mode int, level ThinkingLevel) error {
+func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, model Model, level ThinkingLevel) error {
 	acceptedAt, _ := bootstrap.Preferences.Field(preferenceUploadTerms).(float64)
 	now := time.Now()
 	if bootstrap.UploadTermsWindow == 0 || time.Unix(int64(acceptedAt), 0).Add(bootstrap.UploadTermsWindow).After(now) {
@@ -68,7 +68,7 @@ func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, mod
 		return err
 	}
 	if _, err := c.batchExecute(ctx, bootstrap, batchRequest{
-		rpcID: "L5adhe", payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: mode, level: level,
+		rpcID: "L5adhe", payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: model.Mode, variant: model.Variant, level: level,
 	}); err != nil {
 		return err
 	}
@@ -205,10 +205,10 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	req.URL.RawQuery = c.frontendQuery(bootstrap, bootstrap.Language)
 	c.applyXHRHeaders(req)
 	req.Header[http.HeaderOrderKey] = processFileHeaderOrder
-	header, err := json.Marshal([]any{
-		1, nil, nil, nil, model.Hash, nil, nil, nil, c.features(), nil, nil, nil, nil, nil, model.Mode, int(level), c.clientID,
+	header, err := json.Marshal(withVariant([]any{
+		1, nil, nil, nil, model.Hash, nil, bootstrap.Language, nil, c.features(), nil, nil, nil, nil, nil, model.Mode, int(level), c.clientID,
 		[]string{bootstrap.BL}, nil, c.pageTiming(),
-	})
+	}, model.Variant))
 	if err != nil {
 		return "", err
 	}

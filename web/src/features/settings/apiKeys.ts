@@ -13,8 +13,8 @@ export function maskKey(key: string) {
   return key.length <= 12 ? key : key.slice(0, 4) + '…' + key.slice(-4)
 }
 
-// parseKeyAccounts 解析 API_KEY_ACCOUNTS 的 key:账号|账号 写法，返回各 key 绑定的账号
-export function parseKeyAccounts(value: string) {
+// parseAccountBindings 解析 API_KEY_ACCOUNTS 与 MODEL_ACCOUNTS 的 名称:账号|账号 写法，返回各名称绑定的账号
+export function parseAccountBindings(value: string) {
   return new Map(
     value
       .split(',')
@@ -24,6 +24,15 @@ export function parseKeyAccounts(value: string) {
         return [item.slice(0, index), item.slice(index + 1).split('|')] as const
       }),
   )
+}
+
+// formatAccountBindings 把各名称绑定的账号写成 .env 的 名称:账号|账号 写法，按名称排序，没有账号的名称不写
+export function formatAccountBindings(bindings: Map<string, readonly string[]>) {
+  return [...bindings]
+    .filter(([, ids]) => ids.length > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, ids]) => name + ':' + ids.join('|'))
+    .join(',')
 }
 
 // modelsForKey 返回 key 能请求的模型：绑定了账号的 key 只保留这些账号提供的模型，未绑定的 key 保留全部

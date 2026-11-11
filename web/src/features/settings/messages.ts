@@ -112,6 +112,13 @@ export const settingsMessages = defineMessages({
       '为 key 指定可用的账号，未指定的 key 可用全部账号；指定了账号的 key 不使用访客会话',
     keyAccountsAll: '全部账号',
     keyAccountsNone: '先在上方添加 API key',
+    accountOrder: '账号顺序',
+    accountOrderHint:
+      '填满优先先用上下文窗口最大的账号，窗口相同时按勾选顺序依次使用；未勾选的账号按导入顺序排在后面',
+    accountOrderImport: '按导入顺序',
+    modelAccounts: '模型可用账号',
+    modelAccountsHint:
+      '每行一条 模型 ID:账号|账号，该模型只在这些账号中选号，与 API key 可用账号同时生效；未列出的模型可用全部账号，也可在模型详情中勾选',
   },
   'zh-TW': {
     title: '設定',
@@ -223,6 +230,13 @@ export const settingsMessages = defineMessages({
       '為 key 指定可用的帳號，未指定的 key 可使用全部帳號；指定了帳號的 key 不使用訪客工作階段',
     keyAccountsAll: '全部帳號',
     keyAccountsNone: '請先在上方新增 API key',
+    accountOrder: '帳號順序',
+    accountOrderHint:
+      '前面優先會先使用上下文視窗最大的帳號，視窗相同時依勾選順序使用；未勾選的帳號依匯入順序排在後面',
+    accountOrderImport: '依匯入順序',
+    modelAccounts: '模型可用帳號',
+    modelAccountsHint:
+      '每行一組 模型 ID:帳號|帳號，此模型只在這些帳號中選用帳號，與 API key 可用帳號同時生效；未列出的模型可使用全部帳號，也可在模型詳細資料中勾選',
   },
   en: {
     title: 'Settings',
@@ -345,6 +359,13 @@ export const settingsMessages = defineMessages({
       'Limit a key to the chosen accounts; keys without a choice can use every account, and keys limited to accounts never use the guest session',
     keyAccountsAll: 'All accounts',
     keyAccountsNone: 'Add an API key above first',
+    accountOrder: 'Account order',
+    accountOrderHint:
+      'Fill first uses the accounts with the largest context window first, and accounts with the same window in the order you check them; unchecked accounts follow in import order',
+    accountOrderImport: 'Import order',
+    modelAccounts: 'Accounts per model',
+    modelAccountsHint:
+      'One model-id:account|account per line; the model uses only these accounts, together with accounts per API key. Unlisted models can use every account; you can also check accounts in the model details',
   },
   ja: {
     title: '設定',
@@ -465,6 +486,13 @@ export const settingsMessages = defineMessages({
       'キーが使えるアカウントを指定します。指定のないキーはすべてのアカウントを使え、アカウントを指定したキーはゲストセッションを使いません',
     keyAccountsAll: 'すべてのアカウント',
     keyAccountsNone: '先に上で API キーを追加してください',
+    accountOrder: 'アカウントの順序',
+    accountOrderHint:
+      '先頭優先はコンテキストウィンドウが最も大きいアカウントから使い、ウィンドウが同じアカウントはチェックした順に使います。チェックしていないアカウントはインポート順で後に続きます',
+    accountOrderImport: 'インポート順',
+    modelAccounts: 'モデルごとのアカウント',
+    modelAccountsHint:
+      '1 行に モデル ID:アカウント|アカウント を 1 つ。モデルはこれらのアカウントだけを使い、API キーごとのアカウントと同時に適用されます。記載のないモデルはすべてのアカウントを使え、モデルの詳細でもチェックできます',
   },
   ko: {
     title: '설정',
@@ -583,6 +611,13 @@ export const settingsMessages = defineMessages({
       '키가 사용할 계정을 지정합니다. 지정하지 않은 키는 모든 계정을 사용하고, 계정을 지정한 키는 게스트 세션을 사용하지 않습니다',
     keyAccountsAll: '모든 계정',
     keyAccountsNone: '먼저 위에서 API 키를 추가하세요',
+    accountOrder: '계정 순서',
+    accountOrderHint:
+      '앞쪽 우선은 컨텍스트 윈도우가 가장 큰 계정부터 사용하고, 윈도우가 같은 계정은 체크한 순서대로 사용합니다. 체크하지 않은 계정은 가져온 순서대로 뒤에 옵니다',
+    accountOrderImport: '가져온 순서',
+    modelAccounts: '모델별 계정',
+    modelAccountsHint:
+      '한 줄에 모델 ID:계정|계정 하나, 모델은 이 계정만 사용하며 API 키별 계정과 함께 적용됩니다. 적지 않은 모델은 모든 계정을 사용하고, 모델 상세에서도 체크할 수 있습니다',
   },
   fr: {
     title: 'Paramètres',
@@ -709,6 +744,13 @@ export const settingsMessages = defineMessages({
       'Limitez une clé aux comptes choisis ; une clé sans choix peut utiliser tous les comptes, et une clé limitée à des comptes n’utilise jamais la session invité',
     keyAccountsAll: 'Tous les comptes',
     keyAccountsNone: 'Ajoutez d’abord une clé API ci-dessus',
+    accountOrder: 'Ordre des comptes',
+    accountOrderHint:
+      '« Premier compte libre » utilise d’abord les comptes à la plus grande fenêtre de contexte, puis, à fenêtre égale, les comptes dans l’ordre où vous les cochez ; les comptes non cochés suivent dans l’ordre d’importation',
+    accountOrderImport: 'Ordre d’importation',
+    modelAccounts: 'Comptes par modèle',
+    modelAccountsHint:
+      'Un id-modèle:compte|compte par ligne ; le modèle n’utilise que ces comptes, en plus des comptes par clé API. Les modèles non listés peuvent utiliser tous les comptes ; vous pouvez aussi cocher les comptes dans le détail du modèle',
   },
   de: {
     title: 'Einstellungen',
@@ -833,5 +875,12 @@ export const settingsMessages = defineMessages({
       'Beschränkt einen Schlüssel auf die gewählten Konten; Schlüssel ohne Auswahl nutzen alle Konten, beschränkte Schlüssel nie die Gastsitzung',
     keyAccountsAll: 'Alle Konten',
     keyAccountsNone: 'Fügen Sie zuerst oben einen API-Schlüssel hinzu',
+    accountOrder: 'Kontenreihenfolge',
+    accountOrderHint:
+      '„Erstes freies Konto“ nutzt zuerst die Konten mit dem größten Kontextfenster und Konten mit gleichem Fenster in der Reihenfolge, in der Sie sie anhaken; nicht angehakte Konten folgen in Importreihenfolge',
+    accountOrderImport: 'Importreihenfolge',
+    modelAccounts: 'Konten je Modell',
+    modelAccountsHint:
+      'Eine Modell-ID:Konto|Konto pro Zeile; das Modell nutzt nur diese Konten, zusammen mit den Konten je API-Schlüssel. Nicht aufgeführte Modelle nutzen alle Konten; Konten lassen sich auch in den Modelldetails anhaken',
   },
 })

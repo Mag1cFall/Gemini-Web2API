@@ -15,7 +15,7 @@ import (
 // recordColumns 是请求记录查询读取的列，最后一列表示是否保存了正文
 const recordColumns = `r.id, r.response_id, r.time, r.protocol, r.path, r.model, r.provider_model, r.account, r.status, r.state,
  r.duration_ms, r.first_event_ms, r.queue_ms, r.input_tokens, r.reasoning_tokens, r.reply_tokens, r.total_tokens,
- r.tool_calls, r.error, r.attempts, r.thinking, EXISTS(SELECT 1 FROM bodies b WHERE b.id = r.id)`
+ r.tool_calls, r.error, r.attempts, r.thinking, EXISTS(SELECT 1 FROM request_bodies b WHERE b.id = r.id)`
 
 // searchColumns 是关键字匹配的请求记录列
 var searchColumns = []string{"id", "response_id", "model", "provider_model", "account", "error"}

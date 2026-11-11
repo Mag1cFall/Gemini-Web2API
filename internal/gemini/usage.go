@@ -65,7 +65,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	}
 	req.URL.RawQuery = c.batchQuery(bootstrap, usageRPC, "/usage", bootstrap.Language)
 	c.applyXHRHeaders(req)
-	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), c.clientID, bootstrap.BL, 0, 0, c.pageTiming()))
+	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), bootstrap.Language, c.clientID, bootstrap.BL, 0, "", 0, c.pageTiming()))
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 
 	resp, err := c.httpClient.Do(req)

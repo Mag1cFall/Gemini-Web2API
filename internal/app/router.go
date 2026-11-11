@@ -13,6 +13,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/webui"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/gzhttp"
 )
 
 // Deps 是路由使用的运行期组件
@@ -136,4 +137,20 @@ func securityHeaders(c *gin.Context) {
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Referrer-Policy", "no-referrer")
 	c.Next()
+}
+
+// compressAdmin 以 gzip 压缩管理接口发给接受 gzip 的客户端的 JSON、CSV 与事件流响应
+func compressAdmin(next http.Handler) http.Handler {
+	wrap, err := gzhttp.NewWrapper(gzhttp.ContentTypes([]string{"application/json", "text/csv", "text/event-stream"}))
+	if err != nil {
+		panic(err)
+	}
+	compressed := wrap(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			compressed.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

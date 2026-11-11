@@ -19,7 +19,16 @@ type conversationRegistry struct {
 	ttl    time.Duration
 	lastGC time.Time
 	store  *requestdb.Store
-	mu     sync.Mutex
+	// temporary 为不写入网页历史的账号以普通会话发送的会话，键为 CID，不再被续接后从网页历史删除
+	temporary map[string]temporaryChat
+	mu        sync.Mutex
+}
+
+// temporaryChat 是待删除的网页会话所属账号、模型模式与最近一次生成结束的时间
+type temporaryChat struct {
+	accountID string
+	mode      int
+	touched   time.Time
 }
 
 type conversationEntry struct {
@@ -35,9 +44,10 @@ type conversationLock struct {
 }
 
 var conversations = conversationRegistry{
-	states: make(map[string]conversationEntry),
-	locks:  make(map[string]*conversationLock),
-	ttl:    30 * time.Minute,
+	states:    make(map[string]conversationEntry),
+	locks:     make(map[string]*conversationLock),
+	ttl:       30 * time.Minute,
+	temporary: make(map[string]temporaryChat),
 }
 
 // ConfigureSessionTTL 设置显式会话状态的有效期
@@ -88,6 +98,9 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 		}
 	}
 	store := r.store
+	if _, temporary := r.temporary[entry.snapshot.CID]; temporary {
+		store = nil
+	}
 	r.mu.Unlock()
 	if store == nil {
 		return
@@ -102,6 +115,67 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 		}
 	}
 	store.SaveSessions(sessions)
+}
+
+// markTemporary 登记一个结束生成后需要从网页历史删除的会话
+func (r *conversationRegistry) markTemporary(snapshot gemini.ConversationSnapshot, accountID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.temporary[snapshot.CID] = temporaryChat{accountID: accountID, mode: snapshot.ModelMode, touched: time.Now()}
+}
+
+// takeTemporary 取出不再被续接的待删除会话：生成结束超过一分钟且没有未过期的续接条目指向它，all 为真时取出全部
+func (r *conversationRegistry) takeTemporary(now time.Time, all bool) map[string]temporaryChat {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	live := make(map[string]bool)
+	for _, entry := range r.states {
+		if now.Before(entry.expiresAt) {
+			live[entry.snapshot.CID] = true
+		}
+	}
+	taken := make(map[string]temporaryChat)
+	for cid, chat := range r.temporary {
+		if all || !live[cid] && now.Sub(chat.touched) > time.Minute {
+			taken[cid] = chat
+			delete(r.temporary, cid)
+		}
+	}
+	return taken
+}
+
+// deleteChats 从各会话所属账号的网页历史中删除会话
+func deleteChats(ctx context.Context, pool *balancer.AccountPool, chats map[string]temporaryChat) {
+	for cid, chat := range chats {
+		client := pool.Client(chat.accountID)
+		if client == nil {
+			continue
+		}
+		if err := client.DeleteConversation(ctx, cid, chat.mode); err != nil {
+			logging.Warn(chat.accountID, "删除网页会话失败", "会话", cid, "错误", err)
+			continue
+		}
+		logging.Info(chat.accountID, "已删除网页会话", "会话", cid)
+	}
+}
+
+// CleanupTemporaryChats 每分钟从网页历史删除不再被续接的临时会话，直到 ctx 结束
+func CleanupTemporaryChats(ctx context.Context, pool *balancer.AccountPool) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			deleteChats(ctx, pool, conversations.takeTemporary(now, false))
+		}
+	}
+}
+
+// DeleteTemporaryChats 从网页历史删除全部临时会话，服务停止时调用
+func DeleteTemporaryChats(ctx context.Context, pool *balancer.AccountPool) {
+	deleteChats(ctx, pool, conversations.takeTemporary(time.Now(), true))
 }
 
 // configureCooldownStore 让账号与模型冷却写入账本库，并恢复上次运行保存的未结束冷却

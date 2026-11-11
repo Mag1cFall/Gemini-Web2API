@@ -27,6 +27,8 @@ type Model struct {
 	Feature Feature
 	// Gem 为 Gem 条目的 Gem ID，写入生成请求 19 槽
 	Gem string
+	// Variant 为模型策略中与其他模型共用 mode 的模型的变体键，这类模型的 Hash 也是该键
+	Variant string
 }
 
 // ImageModelID 是官网 Create image 工具的公开模型 ID
@@ -210,7 +212,15 @@ func modelID(displayName string) string {
 	return "gemini-" + slug
 }
 
-// parseModelCatalog 从 otAQ7b 响应生成唯一模型目录，默认模型为 payload[0] 指定 mode 的行，没有该行时为首行
+// modelName 返回官网菜单项的型号名与说明：标题与副标题中含短名（如 Flash）的一项是型号名，另一项是说明，副标题不含短名时标题是型号名
+func modelName(short, title, subtitle string) (name, description string) {
+	if strings.Contains(subtitle, short) && !strings.Contains(title, short) {
+		return subtitle, title
+	}
+	return title, subtitle
+}
+
+// parseModelCatalog 从 otAQ7b 响应生成唯一模型目录：payload[15] 的模型行加上 payload[24] 策略中带变体键的模型，默认模型为 payload[0] 指定 mode 的行，没有该行时为首行
 func parseModelCatalog(payload []any) (ModelCatalog, error) {
 	rows, ok := arrayAt(payload, 15)
 	if !ok || len(rows) == 0 {
@@ -218,7 +228,7 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 	}
 
 	defaultMode, _ := intAt(payload, 0)
-	thinkingLevels := parseThinkingLevels(payload, 1)
+	chatPolicy := parsePolicy(payload, 1)
 	models := make([]Model, 0, len(rows))
 	for _, rawRow := range rows {
 		row, ok := rawRow.([]any)
@@ -226,15 +236,18 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 			continue
 		}
 		hash, _ := stringAt(row, 0)
-		displayName, _ := stringAt(row, 11)
-		if displayName == "" {
-			displayName, _ = stringAt(row, 19)
+		short, _ := stringAt(row, 1)
+		title, _ := stringAt(row, 11)
+		if title == "" {
+			title, _ = stringAt(row, 19)
 		}
 		mode, _ := intAt(row, 17)
-		if hash == "" || displayName == "" || mode == 0 {
+		if hash == "" || title == "" || mode == 0 {
 			continue
 		}
-		description, _ := stringAt(row, 12)
+		subtitle, _ := stringAt(row, 12)
+		displayName, description := modelName(short, title, subtitle)
+		levels, _ := policyLevels(chatPolicy, mode, "")
 		models = append(models, Model{
 			ID:             modelID(displayName),
 			DisplayName:    displayName,
@@ -243,7 +256,7 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 			Capabilities:   []string{"generateContent", "streamGenerateContent"},
 			Mode:           mode,
 			Default:        mode == defaultMode,
-			ThinkingLevels: thinkingLevels[mode],
+			ThinkingLevels: levels,
 		})
 	}
 	if len(models) == 0 {
@@ -251,6 +264,22 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 	}
 	if !slices.ContainsFunc(models, func(model Model) bool { return model.Default }) {
 		models[0].Default = true
+	}
+	for _, entry := range chatPolicy {
+		if entry.variant == "" || entry.upgrade {
+			continue
+		}
+		displayName, description := modelName(entry.short, entry.title, entry.subtitle)
+		models = append(models, Model{
+			ID:             modelID(displayName),
+			DisplayName:    displayName,
+			Description:    description,
+			Hash:           entry.variant,
+			Capabilities:   []string{"generateContent", "streamGenerateContent"},
+			Mode:           entry.mode,
+			ThinkingLevels: entry.levels,
+			Variant:        entry.variant,
+		})
 	}
 
 	sort.SliceStable(models, func(left, right int) bool {
@@ -285,9 +314,9 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 		}
 		catalog.add(entry)
 	}
-	taskLevels := parseThinkingLevels(payload, 2)
+	taskPolicy := parsePolicy(payload, 2)
 	for _, entry := range models {
-		levels, ok := taskLevels[entry.Mode]
+		levels, ok := policyLevels(taskPolicy, entry.Mode, entry.Variant)
 		if !ok {
 			continue
 		}
@@ -312,12 +341,22 @@ func (c *ModelCatalog) add(model Model) {
 	c.lookup[strings.ToLower(model.ID)] = len(c.models) - 1
 }
 
-// parseThinkingLevels 从 payload[24] 的模型策略读取各 mode 在指定界面（1 为 Chat，2 为 Task）下可选的思考强度
-func parseThinkingLevels(payload []any, surface int) map[int][]ThinkingLevel {
-	levels := make(map[int][]ThinkingLevel)
+// policyEntry 是 payload[24] 模型策略在一个界面下的一项：mode、同一 mode 下区分模型的变体键、菜单名称与可选的思考强度
+type policyEntry struct {
+	mode    int
+	variant string
+	// upgrade 表示该项是升级入口，账号层级不含该模型，官网点击后弹出升级对话框
+	upgrade                bool
+	short, title, subtitle string
+	levels                 []ThinkingLevel
+}
+
+// parsePolicy 读取 payload[24] 的模型策略在指定界面（1 为 Chat，2 为 Task）下的各项
+func parsePolicy(payload []any, surface int) []policyEntry {
+	var entries []policyEntry
 	policy, _ := arrayAt(payload, 24)
-	entries, _ := arrayAt(policy, 1)
-	for _, rawEntry := range entries {
+	rawEntries, _ := arrayAt(policy, 1)
+	for _, rawEntry := range rawEntries {
 		entry, _ := rawEntry.([]any)
 		header, _ := arrayAt(entry, 0)
 		mode, ok := intAt(header, 1)
@@ -325,15 +364,32 @@ func parseThinkingLevels(payload []any, surface int) map[int][]ThinkingLevel {
 		if value, _ := intAt(surfaces, 0); !ok || value != surface {
 			continue
 		}
+		item := policyEntry{mode: mode}
+		item.variant, _ = stringAt(header, 3)
+		item.short, _ = stringAt(header, 4)
+		item.subtitle, _ = stringAt(header, 5)
+		item.title, _ = stringAt(header, 12)
+		_, item.upgrade = arrayAt(header, 14)
 		options, _ := arrayAt(entry, 1)
 		for _, rawOption := range options {
 			option, _ := rawOption.([]any)
 			if level, ok := intAt(option, 0); ok {
-				levels[mode] = append(levels[mode], ThinkingLevel(level))
+				item.levels = append(item.levels, ThinkingLevel(level))
 			}
 		}
+		entries = append(entries, item)
 	}
-	return levels
+	return entries
+}
+
+// policyLevels 返回策略中指定 mode 与变体键的一项的思考强度，没有该项时 ok 为 false
+func policyLevels(entries []policyEntry, mode int, variant string) (levels []ThinkingLevel, ok bool) {
+	for _, entry := range entries {
+		if entry.mode == mode && entry.variant == variant {
+			return entry.levels, true
+		}
+	}
+	return nil, false
 }
 
 // thinkingRank 按 Low、Medium、High 的强弱顺序返回思考强度序号
@@ -365,31 +421,45 @@ func (m Model) thinkingLevel(requested ThinkingLevel) ThinkingLevel {
 	return selected
 }
 
-// clientFeatures 是登录页面在模型扩展头第 8 槽声明的功能编号
-var clientFeatures = []int{4, 5, 6, 8, 16, 19, 20}
+// clientFeatures 是登录页面在客户端扩展头第 8 槽声明的功能编号
+var clientFeatures = []int{4, 33, 22, 5, 6, 8, 16, 19, 20}
 
-// guestClientFeatures 是访客页面在模型扩展头第 8 槽声明的功能编号
-var guestClientFeatures = []int{4, 6, 16, 19, 20}
+// guestClientFeatures 是访客页面在客户端扩展头第 8 槽声明的功能编号
+var guestClientFeatures = []int{4, 33, 22, 6, 16, 19, 20}
 
-// buildModelHeader 构造包含模型、会话类型、功能编号、账号层级编码、思考强度、构建标签与请求计时的生成请求头，功能编号与官网一样写两遍，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
-func buildModelHeader(features []int, model Model, chatMode any, tier int, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) (string, error) {
+// fallbackTimezone 是读不到本机时区名时写入客户端扩展头的时区
+const fallbackTimezone = "UTC"
+
+// hostTimezone 是客户端扩展头计时槽末尾的本机 IANA 时区名
+var hostTimezone = localTimezone()
+
+// buildModelHeader 构造包含模型、界面语言、会话类型、功能编号、账号层级编码、思考强度、构建标签与请求计时的生成请求头，功能编号与官网一样写两遍，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
+func buildModelHeader(features []int, model Model, language string, chatMode any, tier int, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) (string, error) {
 	var levelSlot any
 	if thinkingLevel != 0 {
 		levelSlot = int(thinkingLevel)
 	}
-	header, err := json.Marshal([]any{
-		1, nil, nil, nil, model.Hash, nil, nil, chatMode,
+	header, err := json.Marshal(withVariant([]any{
+		1, nil, nil, nil, model.Hash, nil, language, chatMode,
 		slices.Concat(features, features), nil, nil, tier, nil, nil, model.Mode, levelSlot, clientID,
 		[]string{buildLabel}, nil, timing,
-	})
+	}, model.Variant))
 	if err != nil {
 		return "", err
 	}
 	return string(header), nil
 }
 
-// buildGenericHeader 构造 batchexecute 请求使用的客户端头，mode 与 level 为零时对应槽为空
-func buildGenericHeader(features []int, clientID string, buildLabel string, mode int, level ThinkingLevel, timing []any) string {
+// withVariant 返回在第 24 槽写了变体键的客户端头，variant 为空时原样返回
+func withVariant(header []any, variant string) []any {
+	if variant == "" {
+		return header
+	}
+	return append(header, nil, nil, nil, nil, variant)
+}
+
+// buildGenericHeader 构造 batchexecute 请求使用的客户端头，mode 与 level 为零时对应槽为空，variant 非空时写在第 24 槽
+func buildGenericHeader(features []int, language string, clientID string, buildLabel string, mode int, variant string, level ThinkingLevel, timing []any) string {
 	var modeSlot, levelSlot any
 	if mode != 0 {
 		modeSlot = mode
@@ -397,26 +467,26 @@ func buildGenericHeader(features []int, clientID string, buildLabel string, mode
 	if level != 0 {
 		levelSlot = int(level)
 	}
-	header, _ := json.Marshal([]any{1, nil, nil, nil, nil, nil, nil, nil, features, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}, nil, timing})
+	header, _ := json.Marshal(withVariant([]any{1, nil, nil, nil, nil, nil, language, nil, features, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}, nil, timing}, variant))
 	return string(header)
 }
 
 // buildConversationHeader 构造会话内 batchexecute 请求的客户端头，第 7 槽为 Temporary Chat 状态，不写模型 hash 与层级
-func buildConversationHeader(features []int, clientID string, buildLabel string, temporaryChat bool, mode int, level ThinkingLevel, timing []any) string {
+func buildConversationHeader(features []int, language string, clientID string, buildLabel string, temporaryChat bool, mode int, variant string, level ThinkingLevel, timing []any) string {
 	chatMode := 0
 	if temporaryChat {
 		chatMode = 1
 	}
-	header, _ := json.Marshal([]any{
-		1, nil, nil, nil, nil, nil, nil, chatMode, slices.Concat(features, features),
+	header, _ := json.Marshal(withVariant([]any{
+		1, nil, nil, nil, nil, nil, language, chatMode, slices.Concat(features, features),
 		nil, nil, nil, nil, nil, mode, int(level), clientID, []string{buildLabel}, nil, timing,
-	})
+	}, variant))
 	return string(header)
 }
 
-// requestTiming 返回网页客户端头末尾的耗时与发送时间，elapsed 为毫秒，发送时间取 now 的整毫秒
+// requestTiming 返回网页客户端头末尾的耗时、发送时间与本机时区，elapsed 为毫秒，发送时间取 now 的整毫秒
 func requestTiming(elapsed float64, now time.Time) []any {
-	return []any{pageDuration(elapsed), pageDuration(float64(now.UnixMilli()))}
+	return []any{pageDuration(elapsed), pageDuration(float64(now.UnixMilli())), hostTimezone}
 }
 
 // pageDuration 按官网页面脚本把毫秒数拆为 [秒,纳秒]，值为 0 的项写 null，末尾的 null 省略

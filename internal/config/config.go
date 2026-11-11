@@ -23,8 +23,9 @@ var Defaults = map[string]string{
 	"ACCOUNT_COOLDOWN": "2m", "SESSION_TTL": "30m", "INIT_TIMEOUT": "20s", "MODEL_MAPPING": "", "GEMINI_SAVE_HISTORY": "false",
 	"LOG_LEVEL": "info", "LOG_FORMAT": "text", "REQUEST_BODY_LOG": "false", "LOG_FILE": "true", "LOG_MAX_TOTAL_MB": "500",
 	"PER_ACCOUNT_CONCURRENCY": "1", "ROUTING_STRATEGY": "round-robin", "ADMIN_AUTH_ENABLED": "false", "ADMIN_USERNAME": "admin",
-	"ADMIN_PASSWORD": "", "API_KEY_ACCOUNTS": "", "FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-argon",
+	"ADMIN_PASSWORD": "", "API_KEY_ACCOUNTS": "", "FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-carbon,gemini-4-argon",
 	"NONSTREAM_KEEPALIVE": "true", "FAKE_STREAM": "false",
+	"ACCOUNT_ORDER": "", "MODEL_ACCOUNTS": "",
 }
 
 // InvalidValue 是加载时取值无效、改用默认值的配置项，含 API key 的 API_KEY_ACCOUNTS 不记 Value
@@ -65,6 +66,10 @@ type Config struct {
 	AdminPassword    string
 	// APIKeyAccounts 是各 API key 可用的账号 ID，未列出的 key 可用全部账号
 	APIKeyAccounts map[string][]string
+	// AccountOrder 是 fill-first 依次使用的账号 ID
+	AccountOrder []string
+	// ModelAccounts 是各模型可用的账号 ID，未列出的模型可用全部账号
+	ModelAccounts map[string][]string
 	// FirstEventHedge 是首事件备用请求方式：off、auto 或等待秒数
 	FirstEventHedge string
 	// FirstEventHedgeModels 是发起首事件备用请求的模型 ID
@@ -92,6 +97,7 @@ func Load() Config {
 		RoutingStrategy:       strings.ToLower(envOrDefault("ROUTING_STRATEGY")),
 		AdminUsername:         envOrDefault("ADMIN_USERNAME"),
 		AdminPassword:         os.Getenv("ADMIN_PASSWORD"),
+		AccountOrder:          SplitList(os.Getenv("ACCOUNT_ORDER")),
 		FirstEventHedge:       strings.ToLower(envOrDefault("FIRST_EVENT_HEDGE")),
 		FirstEventHedgeModels: SplitList(envOrDefault("FIRST_EVENT_HEDGE_MODELS")),
 	}
@@ -174,6 +180,9 @@ func Load() Config {
 		reject("API_KEY_ACCOUNTS", err.Error())
 	}
 	cfg.APIKeyAccounts = bindings
+	if cfg.ModelAccounts, err = ParseModelAccounts(os.Getenv("MODEL_ACCOUNTS")); err != nil {
+		reject("MODEL_ACCOUNTS", err.Error())
+	}
 	mapping, err := ParseModelMapping(os.Getenv("MODEL_MAPPING"))
 	if err != nil {
 		reject("MODEL_MAPPING", err.Error())
@@ -266,15 +275,8 @@ func ParseAPIKeyAccounts(value string, apiKeys string) (map[string][]string, err
 	accounts := make(map[string][]string)
 	var problem error
 	for _, item := range SplitList(value) {
-		index := strings.LastIndexByte(item, ':')
-		key := strings.TrimSpace(item[:max(index, 0)])
-		var ids []string
-		for id := range strings.SplitSeq(item[index+1:], "|") {
-			if id = strings.TrimSpace(id); id != "" {
-				ids = append(ids, id)
-			}
-		}
-		if index < 0 || key == "" || len(ids) == 0 {
+		key, ids, ok := accountBinding(item)
+		if !ok {
 			problem = fmt.Errorf("每一项写成 API key:账号|账号")
 			continue
 		}
@@ -290,8 +292,42 @@ func ParseAPIKeyAccounts(value string, apiKeys string) (map[string][]string, err
 	return accounts, problem
 }
 
-// FormatAPIKeyAccounts 把 API key 绑定写成 .env 的取值，按 key 排序
-func FormatAPIKeyAccounts(accounts map[string][]string) string {
+// ParseModelAccounts 解析逗号分隔的“模型 ID:账号|账号”绑定，无效项与重复的模型跳过并返回错误，其余绑定照常返回
+func ParseModelAccounts(value string) (map[string][]string, error) {
+	accounts := make(map[string][]string)
+	var problem error
+	for _, item := range SplitList(value) {
+		model, ids, ok := accountBinding(item)
+		if !ok {
+			problem = fmt.Errorf("每一项写成 模型 ID:账号|账号")
+			continue
+		}
+		if _, exists := accounts[model]; exists {
+			problem = fmt.Errorf("同一模型重复")
+			continue
+		}
+		accounts[model] = ids
+	}
+	return accounts, problem
+}
+
+// accountBinding 以最后一个冒号拆分“名称:账号|账号”，名称或账号为空时 ok 为假
+func accountBinding(item string) (name string, ids []string, ok bool) {
+	index := strings.LastIndexByte(item, ':')
+	if index < 0 {
+		return "", nil, false
+	}
+	for id := range strings.SplitSeq(item[index+1:], "|") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	name = strings.TrimSpace(item[:index])
+	return name, ids, name != "" && len(ids) > 0
+}
+
+// FormatAccountBindings 把 API key 或模型的账号绑定写成 .env 的取值，按名称排序
+func FormatAccountBindings(accounts map[string][]string) string {
 	items := make([]string, 0, len(accounts))
 	for _, key := range slices.Sorted(maps.Keys(accounts)) {
 		items = append(items, key+":"+strings.Join(accounts[key], "|"))

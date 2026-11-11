@@ -29,9 +29,9 @@ func (store *Store) SaveResponse(ctx context.Context, response StoredResponse) e
 	if len(response.Input) == 0 {
 		response.Input = json.RawMessage("[]")
 	}
-	_, err := store.db.ExecContext(ctx, `INSERT INTO responses(id,created_at,previous_id,background,status,response,input) VALUES(?,?,?,?,?,?,?)
+	_, err := store.db.ExecContext(ctx, `INSERT INTO stored_responses(id,created_at,previous_id,background,status,response,input) VALUES(?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET status=excluded.status, response=excluded.response, input=excluded.input`,
-		response.ID, response.CreatedAt.UnixMilli(), response.PreviousID, response.Background, response.Status, string(response.Response), string(response.Input))
+		response.ID, response.CreatedAt.UnixMilli(), response.PreviousID, response.Background, response.Status, compress(response.Response), compress(response.Input))
 	return err
 }
 
@@ -39,8 +39,8 @@ ON CONFLICT(id) DO UPDATE SET status=excluded.status, response=excluded.response
 func (store *Store) Response(ctx context.Context, id string) (StoredResponse, error) {
 	response := StoredResponse{ID: id}
 	var created int64
-	var body, input string
-	err := store.reads.QueryRowContext(ctx, `SELECT created_at,previous_id,background,status,response,input FROM responses WHERE id=?`, id).
+	var body, input []byte
+	err := store.reads.QueryRowContext(ctx, `SELECT created_at,previous_id,background,status,response,input FROM stored_responses WHERE id=?`, id).
 		Scan(&created, &response.PreviousID, &response.Background, &response.Status, &body, &input)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredResponse{}, ErrNotFound
@@ -49,13 +49,12 @@ func (store *Store) Response(ctx context.Context, id string) (StoredResponse, er
 		return StoredResponse{}, err
 	}
 	response.CreatedAt = time.UnixMilli(created)
-	response.Response, response.Input = json.RawMessage(body), json.RawMessage(input)
-	return response, nil
+	return response, response.decompress(body, input)
 }
 
 // DeleteResponse 删除保存的响应，返回是否存在
 func (store *Store) DeleteResponse(ctx context.Context, id string) (bool, error) {
-	result, err := store.db.ExecContext(ctx, `DELETE FROM responses WHERE id=?`, id)
+	result, err := store.db.ExecContext(ctx, `DELETE FROM stored_responses WHERE id=?`, id)
 	if err != nil {
 		return false, err
 	}
@@ -65,7 +64,7 @@ func (store *Store) DeleteResponse(ctx context.Context, id string) (bool, error)
 
 // UnfinishedResponses 返回状态为 queued 或 in_progress 的后台响应
 func (store *Store) UnfinishedResponses(ctx context.Context) ([]StoredResponse, error) {
-	rows, err := store.reads.QueryContext(ctx, `SELECT id,created_at,previous_id,background,status,response,input FROM responses WHERE background=1 AND status IN ('queued','in_progress')`)
+	rows, err := store.reads.QueryContext(ctx, `SELECT id,created_at,previous_id,background,status,response,input FROM stored_responses WHERE background=1 AND status IN ('queued','in_progress')`)
 	if err != nil {
 		return nil, err
 	}
@@ -74,13 +73,28 @@ func (store *Store) UnfinishedResponses(ctx context.Context) ([]StoredResponse, 
 	for rows.Next() {
 		var response StoredResponse
 		var created int64
-		var body, input string
+		var body, input []byte
 		if err := rows.Scan(&response.ID, &created, &response.PreviousID, &response.Background, &response.Status, &body, &input); err != nil {
 			return nil, err
 		}
 		response.CreatedAt = time.UnixMilli(created)
-		response.Response, response.Input = json.RawMessage(body), json.RawMessage(input)
+		if err := response.decompress(body, input); err != nil {
+			return nil, err
+		}
 		responses = append(responses, response)
 	}
 	return responses, rows.Err()
+}
+
+// decompress 还原压缩保存的响应对象与输入项
+func (response *StoredResponse) decompress(body, input []byte) error {
+	var err error
+	if body, err = decompress(body); err != nil {
+		return err
+	}
+	if input, err = decompress(input); err != nil {
+		return err
+	}
+	response.Response, response.Input = body, input
+	return nil
 }

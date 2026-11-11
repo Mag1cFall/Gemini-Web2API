@@ -4,6 +4,7 @@ package app
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,6 +47,9 @@ const dataDir = "data"
 // lockPath 是运行中的服务持有的实例锁
 var lockPath = filepath.Join(dataDir, "gemini-web2api.lock")
 
+// servedAuthPath 是运行中的服务记录实际读取的认证路径与导入账号目录的文件
+var servedAuthPath = filepath.Join(dataDir, "served-auth.json")
+
 // envPath 是管理端写回配置的文件
 const envPath = ".env"
 
@@ -82,15 +86,17 @@ func Main(args []string) error {
 	return runDefault(args)
 }
 
-// servedAuthPaths 返回当前数据目录中运行的服务按配置读取的认证路径与导入账号的目录，没有服务在运行时为空
+// servedAuthPaths 返回当前数据目录中运行的服务实际读取的认证路径与导入账号的目录，没有服务在运行时为空
 func servedAuthPaths() []string {
 	lock := flock.New(lockPath)
 	if locked, err := lock.TryLock(); err != nil || locked {
 		_ = lock.Unlock()
 		return nil
 	}
-	paths := config.Load().AuthStatePaths
-	return append(paths, authDir(paths))
+	var paths []string
+	data, _ := os.ReadFile(servedAuthPath)
+	_ = json.Unmarshal(data, &paths)
+	return paths
 }
 
 // loadDotenv 把 .env 中进程环境没有的变量写入进程环境并记入 dotenvKeys
@@ -207,6 +213,11 @@ func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, err
 	if !locked {
 		return nil, fmt.Errorf("同一目录已有 Gemini-Web2API 实例在运行（%s）", lockPath)
 	}
+	served, _ := json.Marshal(append(slices.Clone(cfg.AuthStatePaths), authDir(cfg.AuthStatePaths)))
+	if err := os.WriteFile(servedAuthPath, served, 0o600); err != nil {
+		_ = lock.Unlock()
+		return nil, fmt.Errorf("记录认证路径: %w", err)
+	}
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
 	reserved := ""
 	if errors.Is(err, portReserved) {
@@ -284,6 +295,8 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	})
 	pool.SetStrategy(cfg.RoutingStrategy)
 	pool.SetAPIKeyAccounts(cfg.APIKeyAccounts)
+	pool.SetAccountOrder(cfg.AccountOrder)
+	pool.SetModelAccounts(cfg.ModelAccounts)
 	adapter.SetFirstEventHedge(firstEventHedge(cfg))
 	adapter.SetResponseModes(cfg.NonstreamKeepalive, cfg.FakeStream)
 	settings := admin.NewSettings(envPath, cfg, func(next config.Config) {
@@ -299,6 +312,8 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		}
 		pool.SetStrategy(next.RoutingStrategy)
 		pool.SetAPIKeyAccounts(next.APIKeyAccounts)
+		pool.SetAccountOrder(next.AccountOrder)
+		pool.SetModelAccounts(next.ModelAccounts)
 		adapter.SetFirstEventHedge(firstEventHedge(next))
 		adapter.SetResponseModes(next.NonstreamKeepalive, next.FakeStream)
 		manager.SetSettings(accounts.Settings{
@@ -314,16 +329,19 @@ func (instance *Instance) Serve(ctx context.Context) error {
 			logging.Warn(logging.SourceService, "删除在线更新留下的旧版本失败", "错误", err)
 		}
 	}
-	server := newHTTPServer(NewRouter(Deps{
+	server := newHTTPServer(compressAdmin(NewRouter(Deps{
 		Pool: pool, Store: store, Accounts: manager, APIKey: settings.APIKey,
 		Admin: &admin.Deps{
 			Pool: pool, Accounts: manager, Store: store, Settings: settings, Version: Version(), StartedAt: started,
 			ListenAddr: listener.Addr().String(), ReservedListen: instance.reserved, DataDir: workDir, Desktop: instance.desktop, Updates: updater, Stopping: shuttingDown,
 		},
-	}))
+	})))
 	server.RegisterOnShutdown(func() { close(shuttingDown) })
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
+	cleanupContext, stopCleanup := context.WithCancel(ctx)
+	defer stopCleanup()
+	go adapter.CleanupTemporaryChats(cleanupContext, pool)
 	adminURL := AdminURL(listener.Addr().String())
 	if instance.reserved != "" {
 		logging.Warn(logging.SourceService, "监听端口被 Windows 保留，改用其后第一个可用端口", "配置", instance.reserved, "地址", listener.Addr().String())
@@ -372,6 +390,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		logging.Warn(logging.SourceService, "活动请求未在等待时间内结束，强制关闭", "等待", shutdownGrace, "活动请求", logging.ActiveCount())
 		_ = server.Close()
 	}
+	adapter.DeleteTemporaryChats(shutdownContext, pool)
 	logging.Info(logging.SourceService, "服务已停止", "耗时", time.Since(stopping))
 	return nil
 }

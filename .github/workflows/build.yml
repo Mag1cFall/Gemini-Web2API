@@ -2,9 +2,7 @@ name: Build And Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -23,15 +21,16 @@ env:
   WAILS_VERSION: v3.0.0-beta.29
 
 jobs:
-  web:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  version:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
       numeric: ${{ steps.version.outputs.numeric }}
     steps:
-      - uses: actions/checkout@v7
       - id: version
-        name: Resolve Version
         run: |
           version="${GITHUB_SHA:0:7}"
           numeric=0.0.0
@@ -42,98 +41,16 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "numeric=$numeric" >> "$GITHUB_OUTPUT"
-      - uses: pnpm/action-setup@v6
-        with:
-          package_json_file: web/package.json
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22.23.3'
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Build Frontend
-        working-directory: web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
-      - uses: actions/upload-artifact@v7
-        with:
-          name: webui
-          path: internal/webui/dist
-          retention-days: 7
-
-  web-checks:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-        with:
-          package_json_file: web/package.json
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22.23.3'
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Check Frontend
-        working-directory: web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run lint
-          pnpm run format:check
-          pnpm run typecheck
-          pnpm run test
-
-  checks:
-    needs: web
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        check: [test, vet]
-    env:
-      CGO_ENABLED: '0'
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: webui
-          path: internal/webui/dist
-      - uses: actions/setup-go@v7
-        id: go
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: actions/cache/restore@v5
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
-          restore-keys: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
-      - name: Run Unit Tests
-        if: matrix.check == 'test'
-        run: go test -mod=readonly ./...
-      - name: Check Minimum Go Version
-        if: matrix.check == 'vet'
-        run: |
-          go version
-          go vet ./...
-          go build -mod=readonly ./cmd/gemini-web2api
-      - uses: actions/cache/save@v5
-        if: github.ref == 'refs/heads/main'
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
   headless:
-    needs: web
+    needs: [checks, version]
     runs-on: ubuntu-24.04
     strategy:
       matrix:
         target: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
     env:
       CGO_ENABLED: '0'
-      VERSION: ${{ needs.web.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
@@ -164,7 +81,6 @@ jobs:
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           echo "ARTIFACT=packages-headless-${GOOS}-${GOARCH}" >> "$GITHUB_ENV"
       - uses: actions/cache/save@v5
-        if: github.ref == 'refs/heads/main'
         with:
           path: |
             ~/go/pkg/mod
@@ -177,12 +93,12 @@ jobs:
           retention-days: 7
 
   desktop-windows:
-    needs: web
+    needs: [checks, version]
     runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: '0'
-      VERSION: ${{ needs.web.outputs.version }}
-      NUMERIC: ${{ needs.web.outputs.numeric }}
+      VERSION: ${{ needs.version.outputs.version }}
+      NUMERIC: ${{ needs.version.outputs.numeric }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -215,7 +131,6 @@ jobs:
           GOOS=windows GOARCH=amd64 go build -mod=readonly -tags desktop,production,nomsgpack -trimpath -ldflags="-s -w -H windowsgui -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api.exe" ./cmd/gemini-web2api
           (cd dist && 7z a -tzip -bso0 "$name.zip" "$name")
       - uses: actions/cache/save@v5
-        if: github.ref == 'refs/heads/main'
         with:
           path: |
             ~/go/pkg/mod
@@ -228,15 +143,15 @@ jobs:
           retention-days: 7
 
   desktop-macos:
-    needs: web
+    needs: [checks, version]
     runs-on: macos-15
     env:
       CGO_ENABLED: '1'
+      VERSION: ${{ needs.version.outputs.version }}
+      NUMERIC: ${{ needs.version.outputs.numeric }}
       CGO_CPPFLAGS: -mmacosx-version-min=12.0
       CGO_LDFLAGS: -mmacosx-version-min=12.0
       MACOSX_DEPLOYMENT_TARGET: '12.0'
-      VERSION: ${{ needs.web.outputs.version }}
-      NUMERIC: ${{ needs.web.outputs.numeric }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -272,7 +187,6 @@ jobs:
           mkdir -p dist
           tar -czf "dist/gemini-web2api-desktop-${VERSION}-darwin-universal.tar.gz" -C bin Gemini-Web2API.app
       - uses: actions/cache/save@v5
-        if: github.ref == 'refs/heads/main'
         with:
           path: |
             ~/go/pkg/mod
@@ -285,7 +199,7 @@ jobs:
           retention-days: 7
 
   desktop-linux:
-    needs: web
+    needs: [checks, version]
     strategy:
       matrix:
         include:
@@ -296,7 +210,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       CGO_ENABLED: '1'
-      VERSION: ${{ needs.web.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
       ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
@@ -327,7 +241,6 @@ jobs:
           go build -mod=readonly -tags desktop,production,gtk3,nomsgpack -trimpath -ldflags="-s -w -X github.com/Mag1cFall/Gemini-Web2API/internal/app.version=${VERSION}" -o "dist/$name/gemini-web2api" ./cmd/gemini-web2api
           tar -czf "dist/$name.tar.gz" -C dist "$name"
       - uses: actions/cache/save@v5
-        if: github.ref == 'refs/heads/main'
         with:
           path: |
             ~/go/pkg/mod
@@ -341,7 +254,7 @@ jobs:
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [web-checks, checks, headless, desktop-windows, desktop-macos, desktop-linux]
+    needs: [headless, desktop-windows, desktop-macos, desktop-linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -363,7 +276,7 @@ jobs:
 
   docker:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [web-checks, checks, headless]
+    needs: headless
     strategy:
       matrix:
         include:

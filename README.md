@@ -26,22 +26,22 @@
 
 ## 支持的模型
 
-| 模型 ID | 名称 | 输入窗口 / 能力 | 默认 |
-| --- | --- | ---: | --- |
-| `gemini-3.8-flash` | 3.8 Flash | 32,768–1,048,576 | 是 |
-| `gemini-3.1-pro` | 3.1 Pro | 32,768–1,048,576 |  |
-| `gemini-3.5-flash-lite` | 3.5 Flash-Lite | 32,768–1,048,576 |  |
-| `gemini-4-argon` | 4 Argon | 32,768–1,048,576 |  |
-| `gemini-auto` | Auto | 免费账号 |  |
-| `gemini-3.8-flash-task`、`gemini-4-argon-task` | Task | 代为执行任务 |  |
-| `gemini-3.1-flash-image` | Nano Banana 2 | 图片生成与编辑 |  |
-| `gemini-video` | Video | 视频生成 |  |
-| `gemini-music` | Music | 音乐生成 |  |
-| `gemini-canvas` | Canvas | 文档与代码 |  |
-| `gemini-deep-research` | Deep Research | 研究报告 |  |
-| `gemini-guided-learning` | Guided Learning | 引导式学习 |  |
+| 模型 ID | 名称 | 官网说明 / 能力 | 输入窗口 | 默认 |
+| --- | --- | --- | ---: | --- |
+| `gemini-3.8-flash` | 3.8 Flash | All-around help | 32,768–1,048,576 | 是 |
+| `gemini-3.5-flash-lite` | 3.5 Flash-Lite | Quick answers | 32,768–1,048,576 |  |
+| `gemini-4-carbon` | 4 Carbon | Most complex work | 32,768–1,048,576 |  |
+| `gemini-4-argon` | 4 Argon | Code & analysis | 32,768–1,048,576 |  |
+| `gemini-auto` | Auto | Adapts to your needs（免费账号） | 32,768 |  |
+| `gemini-3.8-flash-task`、`gemini-4-carbon-task`、`gemini-4-argon-task` | Task | 代为执行任务 |  |  |
+| `gemini-3.1-flash-image` | Nano Banana 2 | 图片生成与编辑 |  |  |
+| `gemini-video` | Video | 视频生成 |  |  |
+| `gemini-music` | Music | 音乐生成 |  |  |
+| `gemini-canvas` | Canvas | 文档与代码 |  |  |
+| `gemini-deep-research` | Deep Research | 研究报告 |  |  |
+| `gemini-guided-learning` | Guided Learning | 引导式学习 |  |  |
 
-- **模型目录**：服务启动时读取各账号的 Gemini Web 模型目录与官网工具，运行后以 `/v1/models` 为准；模型 ID 由官网显示名称生成，账号收到新模型后自动公开
+- **模型目录**：服务启动时读取各账号的 Gemini Web 模型目录与官网工具，运行后以 `/v1/models` 为准；模型 ID 由官网菜单的型号名生成，官网的用途说明作为 `description`，账号收到新模型后自动公开
 - **目录字段**：`available_account_count` 是可用账号数，`default` 标出默认模型，`thinking_levels` 列出可选思考强度
 - **工具模型**：工具 ID 只在账号具备对应官网工具时出现，由该账号的官网默认模型执行
 - **图片**：图片 ID 用于对话生图和 `/v1/images/*`，`size` 与 `imageConfig.aspectRatio` 支持 1:1、9:16、3:4、4:3、16:9、2:3、21:9、1:8、8:1
@@ -358,11 +358,13 @@ build/               # 桌面版图标与打包配置
 | `ADMIN_AUTH_ENABLED` | 管理端登录 | `false` |
 | `ADMIN_USERNAME` | 管理端用户名 | `admin` |
 | `ADMIN_PASSWORD` | 管理端密码 | 空 |
-| `API_KEY_ACCOUNTS` | API key 可用的账号，每项 `key:账号|账号`，多项用逗号分隔 | 空 |
+| `API_KEY_ACCOUNTS` | API key 可用的账号，每项 `key:账号\|账号`，多项用逗号分隔 | 空 |
+| `ACCOUNT_ORDER` | `fill-first` 在上下文窗口相同的账号中依次使用的账号 ID，多个用逗号分隔 | 空 |
+| `MODEL_ACCOUNTS` | 模型可用的账号，每项 `模型 ID:账号\|账号`，多项用逗号分隔 | 空 |
 | `FIRST_EVENT_HEDGE` | 首事件备用请求：`auto`、等待秒数或 `off` | `auto` |
-| `FIRST_EVENT_HEDGE_MODELS` | 发起首事件备用请求的模型 ID，多个用逗号分隔 | `gemini-4-argon` |
+| `FIRST_EVENT_HEDGE_MODELS` | 发起首事件备用请求的模型 ID，多个用逗号分隔 | `gemini-4-carbon,gemini-4-argon` |
 
-`MODEL_MAPPING` 的格式为 `别名:模型 ID`，多项用逗号分隔。启动初始化失败的账号按 `ACCOUNT_COOLDOWN` 间隔重试。`ROUTING_STRATEGY` 为 `round-robin` 时从随机位置开始在账号间轮流分配，为 `fill-first` 时优先使用排在前面的空闲账号。`API_KEY_ACCOUNTS` 未列出的 key 可用全部账号，列出的 key 只用指定账号且不使用访客会话。`FIRST_EVENT_HEDGE` 在原请求迟迟没有首个事件时用另一个空闲账号发出同一请求，采用先返回的一个；`auto` 按各模型近 24 小时首事件等待的 p95 发起。
+`MODEL_MAPPING` 的格式为 `别名:模型 ID`，多项用逗号分隔。启动初始化失败的账号按 `ACCOUNT_COOLDOWN` 间隔重试。`ROUTING_STRATEGY` 为 `round-robin` 时从随机位置开始在账号间轮流分配，为 `fill-first` 时优先使用排在前面的空闲账号：先用上下文窗口最大的账号，窗口相同的账号按 `ACCOUNT_ORDER` 的顺序使用，未列出的账号按导入顺序排在后面。`API_KEY_ACCOUNTS` 未列出的 key 可用全部账号，列出的 key 只用指定账号且不使用访客会话。`MODEL_ACCOUNTS` 未列出的模型可用全部账号，列出的模型只在指定账号中选号，与 `API_KEY_ACCOUNTS` 同时生效；也可在管理端“模型”页的模型详情中勾选。`FIRST_EVENT_HEDGE` 在原请求迟迟没有首个事件时用另一个空闲账号发出同一请求，采用先返回的一个；`auto` 按各模型近 24 小时首事件等待的 p95 发起。
 
 命令行 `--auth` 和 `--listen` 可以覆盖认证路径与监听地址；`--open-ui` 控制启动后是否在浏览器中打开管理端，不带参数启动时默认打开。
 

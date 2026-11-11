@@ -336,6 +336,12 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 				output, _ = json.Marshal(gin.H{"status": envelope.Status, "output": json.RawMessage(rawObject(envelope.Output))})
 			}
 			messages = append(messages, ChatMessage{Role: "tool", Content: toolOutputContent(output), ToolCallID: cmp.Or(envelope.CallID, envelope.ID)})
+		case "agent_message":
+			content, err := agentMessageContent(envelope.Content)
+			if err != nil {
+				return nil, fmt.Errorf("agent_message: %w", err)
+			}
+			messages = append(messages, ChatMessage{Role: "user", Content: content})
 		case "reasoning":
 		case "code_interpreter_call", "web_search_call":
 			messages = append(messages, ChatMessage{Role: "assistant", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
@@ -350,6 +356,30 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 		}
 	}
 	return messages, nil
+}
+
+// agentMessageContent 把 Codex 智能体间消息的内容转为 input_text 片段，encrypted_content 中是本服务模型写出的消息原文
+func agentMessageContent(raw json.RawMessage) (json.RawMessage, error) {
+	var content []struct {
+		Type             string `json:"type"`
+		Text             string `json:"text"`
+		EncryptedContent string `json:"encrypted_content"`
+	}
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return nil, err
+	}
+	parts := make([]gin.H, 0, len(content))
+	for _, part := range content {
+		switch part.Type {
+		case "input_text":
+			parts = append(parts, gin.H{"type": "input_text", "text": part.Text})
+		case "encrypted_content":
+			parts = append(parts, gin.H{"type": "input_text", "text": part.EncryptedContent})
+		default:
+			return nil, fmt.Errorf("不支持的内容类型 %q", part.Type)
+		}
+	}
+	return json.Marshal(parts)
 }
 
 func responseImageContent(result string) (json.RawMessage, error) {

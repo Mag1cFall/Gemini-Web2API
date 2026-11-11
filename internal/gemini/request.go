@@ -86,4 +86,6 @@ type GenerateRequest struct {
 	Conversation         *ConversationState
 	// Branch 表示从会话中较早的回答继续，官网对应编辑该回答之后的提问
 	Branch bool
+	// ClientTools 表示请求带客户端执行的工具，这类请求不使用 Temporary Chat
+	ClientTools bool
 }

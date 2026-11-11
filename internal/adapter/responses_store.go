@@ -349,7 +349,16 @@ func ResponseRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
 			startingAfter = value
 		}
 		setSSEHeaders(c)
-		defer startKeepalive(c, openAIKeepalive)()
+		stream, stop := startStreamWriter(c, openAIKeepalive, false)
+		defer stop()
+		if stored.Status == "queued" || stored.Status == "in_progress" {
+			w, _, err := replayOpening(c.Writer, stored, startingAfter)
+			if err != nil {
+				return
+			}
+			stream.setFrame(w.progressFrame())
+			startingAfter = max(startingAfter, 1)
+		}
 		for stored.Status == "queued" || stored.Status == "in_progress" {
 			select {
 			case <-c.Request.Context().Done():
@@ -366,11 +375,11 @@ func ResponseRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
 	}
 }
 
-// replayResponse 按创建时的流式事件顺序输出保存的响应：created、in_progress、各输出项的事件，最后为 completed 或 failed
-func replayResponse(writer http.ResponseWriter, stored requestdb.StoredResponse, startingAfter int) error {
+// replayOpening 输出保存的响应的开场事件 response.created 与 response.in_progress，返回接着输出其余事件的写出器与保存的响应对象
+func replayOpening(writer http.ResponseWriter, stored requestdb.StoredResponse, startingAfter int) (*responseSequenceWriter, gin.H, error) {
 	var decoded map[string]any
 	if err := json.Unmarshal(stored.Response, &decoded); err != nil {
-		return err
+		return nil, nil, err
 	}
 	response, _ := ginValue(decoded).(gin.H)
 	running := maps.Clone(response)
@@ -380,11 +389,19 @@ func replayResponse(writer http.ResponseWriter, stored requestdb.StoredResponse,
 		created = maps.Clone(running)
 		created["status"] = "queued"
 	}
-	w := &responseSequenceWriter{writer: writer, startAt: startingAfter + 1, responseID: stored.ID, outputIndexes: make(map[string]int)}
+	model, _ := response["model"].(string)
+	createdAt, _ := response["created_at"].(float64)
+	w := &responseSequenceWriter{writer: writer, startAt: startingAfter + 1, responseID: stored.ID, model: model, created: int64(createdAt), outputIndexes: make(map[string]int)}
 	if err := w.emit("response.created", gin.H{"response": created}); err != nil {
-		return err
+		return nil, nil, err
 	}
-	if err := w.emit("response.in_progress", gin.H{"response": running}); err != nil {
+	return w, response, w.emit("response.in_progress", gin.H{"response": running})
+}
+
+// replayResponse 按创建时的流式事件顺序输出保存的响应：created、in_progress、各输出项的事件，最后为 completed 或 failed
+func replayResponse(writer http.ResponseWriter, stored requestdb.StoredResponse, startingAfter int) error {
+	w, response, err := replayOpening(writer, stored, startingAfter)
+	if err != nil {
 		return err
 	}
 	if response["status"] == "failed" {

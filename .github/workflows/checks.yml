@@ -1,0 +1,109 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.23.3'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build Frontend
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: webui
+          path: internal/webui/dist
+          retention-days: 7
+
+  web-checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.23.3'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Check Frontend
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run lint
+          pnpm run format:check
+          pnpm run typecheck
+          pnpm run test
+
+  checks:
+    needs: web
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        check: [test, vet]
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: webui
+          path: internal/webui/dist
+      - uses: actions/setup-go@v7
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+      - name: Run Unit Tests
+        if: matrix.check == 'test'
+        run: go test -mod=readonly ./...
+      - name: Check Minimum Go Version
+        if: matrix.check == 'vet'
+        run: |
+          go version
+          go vet ./...
+          go build -mod=readonly ./cmd/gemini-web2api
+      - uses: actions/cache/save@v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}

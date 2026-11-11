@@ -26,22 +26,22 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 
 ## Models
 
-| Model ID | Name | Input window / capability | Default |
-| --- | --- | ---: | --- |
-| `gemini-3.8-flash` | 3.8 Flash | 32,768-1,048,576 | Yes |
-| `gemini-3.1-pro` | 3.1 Pro | 32,768-1,048,576 |  |
-| `gemini-3.5-flash-lite` | 3.5 Flash-Lite | 32,768-1,048,576 |  |
-| `gemini-4-argon` | 4 Argon | 32,768-1,048,576 |  |
-| `gemini-auto` | Auto | Free accounts |  |
-| `gemini-3.8-flash-task`, `gemini-4-argon-task` | Task | Tasks performed on your behalf |  |
-| `gemini-3.1-flash-image` | Nano Banana 2 | Image generation and editing |  |
-| `gemini-video` | Video | Video generation |  |
-| `gemini-music` | Music | Music generation |  |
-| `gemini-canvas` | Canvas | Documents and code |  |
-| `gemini-deep-research` | Deep Research | Research reports |  |
-| `gemini-guided-learning` | Guided Learning | Guided learning |  |
+| Model ID | Name | Website description / capability | Input window | Default |
+| --- | --- | --- | ---: | --- |
+| `gemini-3.8-flash` | 3.8 Flash | All-around help | 32,768-1,048,576 | Yes |
+| `gemini-3.5-flash-lite` | 3.5 Flash-Lite | Quick answers | 32,768-1,048,576 |  |
+| `gemini-4-carbon` | 4 Carbon | Most complex work | 32,768-1,048,576 |  |
+| `gemini-4-argon` | 4 Argon | Code & analysis | 32,768-1,048,576 |  |
+| `gemini-auto` | Auto | Adapts to your needs (free accounts) | 32,768 |  |
+| `gemini-3.8-flash-task`, `gemini-4-carbon-task`, `gemini-4-argon-task` | Task | Tasks performed on your behalf |  |  |
+| `gemini-3.1-flash-image` | Nano Banana 2 | Image generation and editing |  |  |
+| `gemini-video` | Video | Video generation |  |  |
+| `gemini-music` | Music | Music generation |  |  |
+| `gemini-canvas` | Canvas | Documents and code |  |  |
+| `gemini-deep-research` | Deep Research | Research reports |  |  |
+| `gemini-guided-learning` | Guided Learning | Guided learning |  |  |
 
-- **Model catalog**: at startup the service reads each account's live Gemini Web model catalog and official tools; `/v1/models` is the runtime source of truth. IDs are derived from official display names, so new models appear automatically
+- **Model catalog**: at startup the service reads each account's live Gemini Web model catalog and official tools; `/v1/models` is the runtime source of truth. IDs are derived from the model names in the website menu, the website's usage descriptions become `description`, and new models appear automatically
 - **Catalog fields**: `available_account_count` is the number of usable accounts, `default` marks the default model, and `thinking_levels` lists the available thinking levels
 - **Tool models**: tool IDs appear only for accounts that have the corresponding official tool and run on that account's official default model
 - **Images**: the image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` support 1:1, 9:16, 3:4, 4:3, 16:9, 2:3, 21:9, 1:8, and 8:1
@@ -358,11 +358,13 @@ build/               # Desktop icons and packaging configuration
 | `ADMIN_AUTH_ENABLED` | Console sign-in | `false` |
 | `ADMIN_USERNAME` | Console username | `admin` |
 | `ADMIN_PASSWORD` | Console password | empty |
-| `API_KEY_ACCOUNTS` | Accounts each API key may use, as `key:account|account` items separated by commas | empty |
+| `API_KEY_ACCOUNTS` | Accounts each API key may use, as `key:account\|account` items separated by commas | empty |
+| `ACCOUNT_ORDER` | Account IDs that `fill-first` uses in turn among accounts with the same context window, separated by commas | empty |
+| `MODEL_ACCOUNTS` | Accounts each model may use, as `model-id:account\|account` items separated by commas | empty |
 | `FIRST_EVENT_HEDGE` | First-event backup request: `auto`, a wait in seconds, or `off` | `auto` |
-| `FIRST_EVENT_HEDGE_MODELS` | Model IDs that send first-event backup requests, separated by commas | `gemini-4-argon` |
+| `FIRST_EVENT_HEDGE_MODELS` | Model IDs that send first-event backup requests, separated by commas | `gemini-4-carbon,gemini-4-argon` |
 
-`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts; with `fill-first`, the first idle account is preferred. Keys missing from `API_KEY_ACCOUNTS` can use every account; listed keys use only their accounts and never the guest session. `FIRST_EVENT_HEDGE` sends the same request from another idle account when the original has not returned its first event for a while and uses whichever answers first; `auto` uses the p95 first-event wait of each model over the last 24 hours.
+`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts; with `fill-first`, the first idle account is preferred: accounts with the largest context window come first, accounts with the same window follow the `ACCOUNT_ORDER` order, and unlisted accounts follow in import order. Keys missing from `API_KEY_ACCOUNTS` can use every account; listed keys use only their accounts and never the guest session. Models missing from `MODEL_ACCOUNTS` can use every account; listed models pick only from their accounts, together with `API_KEY_ACCOUNTS`. The model details on the console's Models page can also set these accounts. `FIRST_EVENT_HEDGE` sends the same request from another idle account when the original has not returned its first event for a while and uses whichever answers first; `auto` uses the p95 first-event wait of each model over the last 24 hours.
 
 The `--auth` and `--listen` flags override auth paths and the listener address; `--open-ui` controls whether the console opens in the browser after startup, and defaults to on when the program starts without arguments.
 

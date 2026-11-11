@@ -1,4 +1,5 @@
 import { Boxes } from 'lucide-react'
+import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { Badge } from '@/components/ui/badge'
@@ -7,17 +8,19 @@ import { SearchInput } from '@/components/ui/search-input'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { Table, Td, Th } from '@/components/ui/table'
 import { modelsMessages } from '@/features/models/messages'
+import { ModelDetailSheet } from '@/features/models/ModelDetailSheet'
 import { useModels } from '@/features/models/queries'
 import { formatNumber } from '@/lib/format'
 import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 
-// ModelsPage 列出公开模型目录，搜索词写入地址的 q 参数
+// ModelsPage 列出公开模型目录，搜索词写入地址的 q 参数，点模型名称打开详情
 export function ModelsPage() {
   const m = useMessages(modelsMessages)
   const { locale } = useI18n()
   const [params, setParams] = useSearchParams()
   const q = params.get('q') ?? ''
   const models = useModels()
+  const [selected, setSelected] = useState<string | null>(null)
   if (models.isPending) return <Loading label={m.title} />
   if (models.isError) {
     return (
@@ -86,7 +89,16 @@ export function ModelsPage() {
                     <Td className="whitespace-nowrap">
                       <div className="flex flex-col gap-1">
                         <div className="flex h-6 items-center gap-2">
-                          <span className="font-medium">{model.display_name || model.id}</span>
+                          <button
+                            type="button"
+                            aria-label={fill(m.openDetail, { model: model.id })}
+                            onClick={() => {
+                              setSelected(model.id)
+                            }}
+                            className="text-left font-medium text-primary hover:text-primary-hover hover:underline"
+                          >
+                            {model.display_name || model.id}
+                          </button>
                           {model.default && <Badge tone="info">{m.default}</Badge>}
                         </div>
                         <span className="font-mono text-xs text-foreground-muted">
@@ -131,6 +143,12 @@ export function ModelsPage() {
           </Table>
         )}
       </Card>
+      <ModelDetailSheet
+        model={models.data.models.find((model) => model.id === selected) ?? null}
+        onClose={() => {
+          setSelected(null)
+        }}
+      />
     </>
   )
 }

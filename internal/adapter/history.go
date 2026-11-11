@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -31,8 +32,8 @@ func isHistoryKey(key string) bool {
 	return strings.HasPrefix(key, historyKeyPrefix)
 }
 
-// historyKey 返回系统指令、提示词发送的工具定义与消息序列对应的会话键，tool_choice 为 none 时提示词不含工具定义
-func historyKey(system string, bridge ToolBridge, turns []historyTurn) string {
+// historyKeys 返回系统指令、提示词发送的工具定义与消息序列 turns 分别接上 replies 中各条消息后对应的会话键，tool_choice 为 none 时提示词不含工具定义；turns 只编码一次
+func historyKeys(system string, bridge ToolBridge, turns []historyTurn, replies ...historyTurn) []string {
 	tools := bridge.Definitions
 	if bridge.disallowsHostedTools() {
 		tools = nil
@@ -43,8 +44,20 @@ func historyKey(system string, bridge ToolBridge, turns []historyTurn) string {
 		Schema json.RawMessage  `json:"j,omitempty"`
 		Turns  []historyTurn    `json:"m"`
 	}{strings.TrimSpace(system), tools, canonicalJSON(bridge.JSONSchema), turns})
-	sum := sha256.Sum256(data)
-	return historyKeyPrefix + hex.EncodeToString(sum[:16])
+	prefix := data[:len(data)-len("]}")]
+	keys := make([]string, 0, len(replies))
+	for _, reply := range replies {
+		encoded, _ := json.Marshal(reply)
+		hash := sha256.New()
+		hash.Write(prefix)
+		if len(turns) > 0 {
+			hash.Write([]byte(","))
+		}
+		hash.Write(encoded)
+		hash.Write([]byte("]}"))
+		keys = append(keys, historyKeyPrefix+hex.EncodeToString(hash.Sum(nil)[:16]))
+	}
+	return keys
 }
 
 // continuedHistoryKey 返回请求历史到最后一个 assistant 轮为止的会话键，该键已登记到网页会话时可按增量续接，否则返回空
@@ -53,7 +66,7 @@ func continuedHistoryKey(system string, bridge ToolBridge, turns []historyTurn) 
 		if turns[index].Role != "assistant" {
 			continue
 		}
-		key := historyKey(system, bridge, turns[:index+1])
+		key := historyKeys(system, bridge, turns[:index], turns[index])[0]
 		if _, _, _, ok := conversations.get(key); ok {
 			return key
 		}
@@ -81,14 +94,12 @@ func rememberHistory(pool *balancer.AccountPool, result generationResult, system
 		reply.Calls = append(reply.Calls, historyCall{Name: call.Name, Arguments: canonicalJSON(call.Arguments)})
 	}
 	rendered := renderCandidateMarkdown(content, primary, 0)
-	var keys []string
+	var replies []historyTurn
 	for _, text := range []string{content, rendered, renderCitationMarkdown(rendered, primary.Citations)} {
 		reply.Text = strings.TrimSpace(text)
-		key := historyKey(system, bridge, append(turns[:len(turns):len(turns)], reply))
-		if len(keys) == 0 || keys[len(keys)-1] != key {
-			keys = append(keys, key)
-		}
+		replies = append(replies, reply)
 	}
+	keys := slices.Compact(historyKeys(system, bridge, turns, replies...))
 	conversations.put(state, accountID, contextTokens, keys...)
 	for _, key := range keys {
 		pool.BindSession(key, accountID)

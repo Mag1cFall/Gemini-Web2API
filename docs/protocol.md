@@ -69,7 +69,7 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | 项 | 登录会话 | 访客会话 |
 | --- | --- | --- |
 | 表单 | `f.req=...&at=SNlM0e&` | `f.req=...&` |
-| 扩展头第 8 槽 | `[4,5,6,8,16,19,20]` | `[4,6,16,19,20]` |
+| 扩展头第 8 槽 | `[4,33,22,5,6,8,16,19,20]` | `[4,33,22,6,16,19,20]` |
 | Temporary Chat | 由 `GEMINI_SAVE_HISTORY` 决定 | 不使用 |
 | `inner[67]` | 模型目录 `payload[21]` 有 Personal Intelligence 时为 `0` | `null` |
 | `inner[80]`、扩展头第 15 槽 | 思考强度编号 | 模型没有思考档位时为 `null` |
@@ -112,10 +112,10 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 各 RPC 的查询参数按 `rpcids`、`source-path`、`bl`、`f.sid`、`hl`、递增 `_reqid`、`rt=c` 的顺序发送，表单按 `f.req=...&at=SNlM0e&` 的顺序与 `encodeURIComponent` 编码发送，末尾带 `&`，访客会话没有 `at`。`f.req` 各层 JSON 与页面 `JSON.stringify` 相同，`<`、`>`、`&` 保持原样。模型目录固定用 `hl=en` 请求，模型 ID 不随账号界面语言变化。共享扩展 header 为：
 
 ```json
-[1,null,null,null,null,null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,MODE,LEVEL,"CLIENT_UUID",["BL"],null,TIMING]
+[1,null,null,null,null,null,"LANG",null,[4,33,22,5,6,8,16,19,20],null,null,null,null,null,MODE,LEVEL,"CLIENT_UUID",["BL"],null,TIMING]
 ```
 
-页面加载阶段的模型目录与偏好读取不带 `MODE`、`LEVEL`（写 `null`）；选定模型后发出的 RPC（例如上传条款确认）写入当前模型 mode 与思考强度；账号条款的 `F6qrid` 与 `UVb0T` 写入目录默认模型的 mode，`LEVEL` 为 `null`。Task 首次使用的 `UVb0T` 的 `TIMING` 耗时项为空数组 `[]`，不参与计时；其余请求的 `TIMING` 见「关键 header」第 19 槽。`c8o8Fe` 使用会话内请求头：第 7 槽为 Temporary Chat 状态（`1` 或 `0`），第 8 槽功能编号重复两遍，第 4、11 槽为 `null`。
+页面加载阶段的模型目录与偏好读取不带 `MODE`、`LEVEL`（写 `null`）；选定模型后发出的 RPC（例如上传条款确认）写入当前模型 mode 与思考强度；账号条款的 `F6qrid` 与 `UVb0T` 写入目录默认模型的 mode，`LEVEL` 为 `null`。Task 首次使用的 `UVb0T` 的 `TIMING` 耗时项为空数组 `[]`，不参与计时；其余请求的 `TIMING` 见「关键 header」第 19 槽。`LANG` 为首页 `TuX5cc` 的界面语言。选中策略变体模型（如 4 Argon）后发出的 RPC 在 `TIMING` 之后补 4 个 `null` 与变体键，第 24 槽为变体键，其余请求头止于 `TIMING`。`c8o8Fe` 使用会话内请求头：第 7 槽为 Temporary Chat 状态（`1` 或 `0`），第 8 槽功能编号重复两遍，第 4、11 槽为 `null`。
 
 响应记录形态为：
 
@@ -127,14 +127,15 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 
 | 字段 | 用途 |
 | --- | --- |
-| `hash` | 模型选择 header 与响应真实模型校验 |
-| `displayName` | 公开名称与模型 ID 来源 |
-| `description` | `/v1/models` 描述 |
+| `hash` | 模型选择 header 与响应真实模型校验；策略变体模型为变体键 |
+| `displayName` | 型号名，公开名称与模型 ID 来源 |
+| `description` | 官网菜单的用途说明，作为 `/v1/models` 描述 |
 | `mode` | 生成请求模型模式 |
+| `variant` | 策略中与其他模型共用 mode 的模型的变体键 |
 | `default` | 单账号官网默认聊天模型 |
 | `thinkingLevels` | Chat 模式下可选的思考强度 |
 
-公开模型 ID 由显示名称规范化得到，例如 `3.8 Flash` 生成 `gemini-3.8-flash`。官网更新显示名后，启动读取的新目录直接生成对应 ID；各账号可以同时处于不同模型版本。解析同时接受公开 ID、显示名称和 hash，公开 ID 可带 Gemini API 的 `models/` 前缀。模型是否存在按全部账号与访客会话已读取的目录判断：
+公开模型 ID 由型号名规范化得到，例如 `3.8 Flash` 生成 `gemini-3.8-flash`、`4 Carbon` 生成 `gemini-4-carbon`；官网菜单的用途说明（如 Quick answers、Most complex work、Code & analysis）只作为 `description`。官网更新显示名后，启动读取的新目录直接生成对应 ID；各账号可以同时处于不同模型版本。解析同时接受公开 ID、显示名称和 hash，公开 ID 可带 Gemini API 的 `models/` 前缀。模型是否存在按全部账号与访客会话已读取的目录判断：
 
 | 情况 | 模型列表 | 生成请求 |
 | --- | --- | --- |
@@ -150,31 +151,52 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | 行槽位 | 解析结果 |
 | ---: | --- |
 | `0` | 模型 hash |
-| `11` | 显示名称 |
-| `12` | 描述 |
+| `1` | 短名，例如 `Flash`、`Carbon`、`Auto` |
+| `11` | 菜单标题 |
+| `12` | 菜单副标题 |
 | `17` | 模型 mode |
-| `19` | 显示名称回退 |
+| `19` | 菜单标题回退 |
 
-账号默认模型是 mode 等于 `payload[0]` 的行；没有行匹配时取第一行。行槽 `7`、`15` 为界面上的 New 标记，`8`、`16` 为对应模型代号。Pro 账号目录形态为（能力数字数组记为 `CAPS`）：
+标题与副标题中含短名的一项是型号名，另一项是用途说明；副标题不含短名时标题是型号名。用途说明可能以账号界面语言返回（如 `全方位協助`），型号名不随语言变化。
+
+账号默认模型是 mode 等于 `payload[0]` 的行；没有行匹配时取第一行。行槽 `7`、`15` 为界面上的 New 标记，`8`、`16` 为对应模型代号。
+
+`payload[24]` 为模型策略 `[策略名,[项...]]`，每项为 `[HEADER, LEVELS, TASK, [SURFACE]]`。`HEADER` 的槽位：
+
+| 槽位 | 内容 |
+| ---: | --- |
+| `1` | 模型 mode |
+| `3` | 变体键，与其他模型共用 mode 时出现，例如 `argon` |
+| `4` | 短名 |
+| `5` | 菜单副标题 |
+| `12` | 菜单标题 |
+| `14` | 升级入口 `[1,"<模型 ID>"]`：账号层级不含该模型，官网点击后弹出升级对话框 |
+
+`SURFACE` 为 `1`（Chat）或 `2`（Task），没有 `SURFACE` 的项不对应界面。模型行之外，Chat 策略中带变体键、不是升级入口的项也是模型：型号名与说明按上述规则取自 `HEADER` 的短名、标题与副标题，hash 记为变体键，mode 与同 mode 的模型行相同。服务向这类模型发请求时，生成请求头第 4 槽与各请求头第 24 槽写变体键。多个账号的同一公开 ID 合并时，保留思考强度更多的一项。
+
+Ultra 账号目录形态为（能力数字数组记为 `CAPS`，模型 hash 列表记为 `HASHES`，选项正文省略）：
 
 ```jsonc
 payload[0] = 1
 payload[15] = [
-  ["8c46e95b1a07cecc","Flash-Lite","Fastest answers",CAPS,2,null,CAPS,false,"",1,"Flash-Lite","3.5 Flash-Lite","Fastest answers",null,null,false,"",6,CAPS,"3.5 Flash-Lite"],
-  ["56fdd199312815e2","Flash","All-around help",CAPS,2,null,CAPS,false,"",20,"Flash","3.8 Flash","All-around help",null,null,false,"",1,CAPS,"3.8 Flash"],
-  ["e6fa609c3fa255c0","Pro","Advanced reasoning",CAPS,2,null,CAPS,false,"",4,"Pro","3.1 Pro","Advanced reasoning",null,null,false,"",3,CAPS,"3.1 Pro"],
-  ["95a4c0abcba24364","Argon","Complex tasks",CAPS,2,null,null,true,"Argon4p0",4,"Argon","4 Argon","Complex tasks",null,null,true,"Argon4p0",8,CAPS,"4 Argon"]
+  ["8c46e95b1a07cecc","Flash-Lite","3.5 Flash-Lite",CAPS,2,null,HASHES,false,"",1,"Flash-Lite","Quick answers","3.5 Flash-Lite",null,null,false,"",6,[ICON,true],"Quick answers"],
+  ["56fdd199312815e2","Flash","3.8 Flash",CAPS,2,null,HASHES,false,"",20,"Flash","全方位協助","3.8 Flash",null,null,false,"",1,[ICON,true],"全方位協助"],
+  ["95a4c0abcba24364","Carbon","4 Carbon",CAPS,2,null,null,false,"",4,"Carbon","Most complex work","4 Carbon",null,null,false,"",8,[ICON,true],"Most complex work"]
 ]
-payload[24] = ["launch_ultra_mode_pro_policy",[
-  [["",1,false,null,"Flash","All-around help",null,false,null,null,false,null,"3.8 Flash",CAPS,null,2,"Thinking level"],
-   [[1,"Low",...],[4,"Medium",...],[2,"High",...]],null,[1]],
-  [["",1,false,null,"Flash","All-around help",null,false,null,null,false,null,"3.8 Flash",CAPS,null,1,null],
-   [[1,"Standard",...]],null,[2]],
-  ...
+payload[24] = ["carbon_multi_ultra_neon_policy",[
+  [["",6,false,null,"Flash-Lite","3.5 Flash-Lite",null,false,null,null,false,null,"Quick answers",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
+  [["",1,false,null,"Flash","3.8 Flash",null,false,null,null,false,null,"全方位協助",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
+  [["",1,false,null,"Flash","3.8 Flash",null,false,null,null,false,null,"全方位協助",CAPS,null,1],[[1,...]],1,[2]],
+  [["",8,false,"argon","Argon","4 Argon",null,false,null,null,false,null,"Code & analysis",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
+  [["",8,false,null,"Carbon","4 Carbon",null,false,null,null,false,null,"Most complex work",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
+  [["",8,false,"argon","Argon","4 Argon",null,false,null,null,false,null,"Code & analysis",CAPS,null,1],[[1,...]],1,[2]],
+  [["",8,false,null,"Carbon","4 Carbon",null,false,null,null,false,null,"Most complex work",CAPS,null,1],[[1,...]],1,[2]]
 ]]
 ```
 
-免费账号目录只有一行 `cf41b0e0dd7d53e5`（mode `6`），公开 ID 为 `gemini-auto`。
+该目录公开 `gemini-3.5-flash-lite`、`gemini-3.8-flash`（默认）、`gemini-4-carbon`、`gemini-4-argon` 与 `gemini-3.8-flash-task`、`gemini-4-argon-task`、`gemini-4-carbon-task`。4 Carbon 与 4 Argon 的 mode 都为 `8`，4 Argon 的变体键为 `argon`。
+
+免费账号目录只有一行 `cf41b0e0dd7d53e5`（mode `6`，标题 `Auto`、副标题 `Adapts to your needs`），公开 ID 为 `gemini-auto`；策略中的 4 Argon 带升级入口 `[1,"gemini-4-argon"]`，不进入目录。访客目录只有一行 `3.5 Flash-Lite`（mode `6`），策略各项没有 `SURFACE`。
 
 `payload[14]` 为账号状态码，正常的登录账号为 `null`（即 `1000`），访客会话为 `1016`。登录账号的状态码在初始化与重读时按下表处理：
 
@@ -200,7 +222,7 @@ payload[24] = ["launch_ultra_mode_pro_policy",[
 | `gemini-deep-research` | Deep Research | `1` | `50` |
 | `gemini-guided-learning` | Guided Learning | `24` | `117` |
 
-`payload[24]` 中界面号为 `2` 的策略行是 Task 模式可选的模型与思考强度（3.8 Flash、4 Argon，只有 `1` Standard）。目录为这些模型生成 `<模型 ID>-task`，生成请求写 featureMode `40`。
+`payload[24]` 中界面号为 `2` 的策略行是 Task 模式可选的模型与思考强度（Ultra 账号为 3.8 Flash、4 Argon 与 4 Carbon，只有编号 `1`）。目录为这些模型生成 `<模型 ID>-task`，按 mode 与变体键对应 Chat 模型，生成请求写 featureMode `40`。
 
 账号初始化时按官网页面加载顺序以 `CNgdBe` 读取类型 `2` 与 `1` 的 Gem 列表，再读取 Gems 管理页的类型 `3`（Google 预置 Gem，如 `gem-chess-champ`、`gem-coding-partner`），每个 Gem 生成公开 ID `gem-<Gem ID>`，同一 Gem 出现在多个列表中时只生成一个模型，显示名称与说明取 Gem 行 `[ID,[名称,说明],[指令]]`，协调模型取账号默认模型，生成请求在 `inner[19]` 写 Gem ID。读取失败的账号不提供 Gem，其余模型照常可用。
 
@@ -220,7 +242,7 @@ Task、Deep Research 只在普通会话中提供，视频成品在生成流结�
 
 ### 思考强度
 
-`payload[24][1]` 的每一项为 `[HEADER, LEVELS, null, [SURFACE]]`：`HEADER[1]` 为模型 mode，`SURFACE` 为 `1`（Chat）或 `2`（Task）。服务读取 Chat 项：
+`payload[24][1]` 的每一项为 `[HEADER, LEVELS, TASK, [SURFACE]]`：`HEADER[1]` 为模型 mode，`HEADER[3]` 为变体键，`SURFACE` 为 `1`（Chat）或 `2`（Task）。服务按 mode 与变体键读取 Chat 项：
 
 | 强度 | 协议编号 |
 | --- | ---: |
@@ -246,7 +268,7 @@ Task、Deep Research 只在普通会话中提供，视频成品在生成流结�
 网关的全局 `default` 按当前 ready 账号的官网默认票数、模型覆盖账号数、公开 ID 字典序生成。各模型的账号覆盖数由 `available_account_count` 返回。
 
 
-**真实模型校验：** 模型 hash 可以晚于正文到达，标识确认前的事件按原顺序暂存；匹配后依次发布，不匹配或流结束时仍缺标识则终止响应。
+**真实模型校验：** 模型 hash 可以晚于正文到达，标识确认前的事件按原顺序暂存；匹配后依次发布，不匹配或流结束时仍缺标识则终止响应。策略变体模型的响应 `payload[39]` 为账号默认模型的 hash，这类模型按 `payload[42]` 的模型名核对。
 
 ### 上下文窗口
 
@@ -357,7 +379,7 @@ Host: accounts.google.com
 Authorization: MultiOAuth BASE64URL_PROTOBUF
 Authorization: MultiBearer REFRESH_TOKEN:GAIA_ID
 Content-Type: application/x-www-form-urlencoded
-User-Agent: Chrome/155
+User-Agent: Chrome/157
 Content-Length: 1
 ```
 
@@ -576,11 +598,11 @@ POST https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendSer
 
 ### 关键 header
 
-生成请求与官网 Chrome 155 的 Temporary Chat 请求逐项一致，普通会话的请求头只有第 7 槽不同：
+生成请求与官网 Chrome 157 的 Temporary Chat 请求逐项一致，普通会话的请求头只有第 7 槽不同：
 
 ```json
 x-goog-ext-525001261-jspb =
-[1,null,null,null,"MODEL_HASH",null,null,CHAT_MODE,[4,5,6,8,16,19,20,4,5,6,8,16,19,20],null,null,TIER,null,null,MODEL_MODE,THINKING_LEVEL,"CLIENT_UUID",["BL"],null,[[ELAPSED_SECONDS,ELAPSED_NANOS],[UNIX_SECONDS,NANOS]]]
+[1,null,null,null,"MODEL_HASH",null,"LANG",CHAT_MODE,[4,33,22,5,6,8,16,19,20,4,33,22,5,6,8,16,19,20],null,null,TIER,null,null,MODEL_MODE,THINKING_LEVEL,"CLIENT_UUID",["BL"],null,[[ELAPSED_SECONDS,ELAPSED_NANOS],[UNIX_SECONDS,NANOS],"IANA_TIMEZONE"]]
 
 x-goog-ext-525005358-jspb =
 ["REQUEST_UUID",1]
@@ -591,35 +613,37 @@ x-goog-ext-73010990-jspb = [0,0,0]
 
 | Header | 数组位置 | 内容 |
 | --- | ---: | --- |
-| `x-goog-ext-525001261-jspb` | `4` | 模型 hash |
+| `x-goog-ext-525001261-jspb` | `4` | 模型 hash，策略变体模型为变体键 |
+| 同上 | `6` | 首页 `TuX5cc` 的界面语言 |
 | 同上 | `7` | Temporary Chat `1`，普通会话 `0`，确认 Deep Research 计划时为 `null` |
-| 同上 | `8` | 能力数组 `[4,5,6,8,16,19,20]` 重复两次 |
+| 同上 | `8` | 功能编号 `[4,33,22,5,6,8,16,19,20]` 重复两次，访客为 `[4,33,22,6,16,19,20]` |
 | 同上 | `11` | `jSf9Qc` 的 `TIER_CODE`，访客为 `1` |
 | 同上 | `14` | 模型 mode |
 | 同上 | `15` | 思考强度编号 |
 | 同上 | `16` | 协议客户端 UUID |
 | 同上 | `17` | `[bl]` |
-| 同上 | `19` | 距上一个带计时请求的耗时与发送时间，秒为零时写 `null`，发送时间精确到毫秒 |
+| 同上 | `19` | 距上一个带计时请求的耗时、发送时间与本机 IANA 时区名，秒为零时写 `null`，发送时间精确到毫秒 |
+| 同上 | `24` | 选中策略变体模型时为变体键，第 20 至 23 槽为 `null`；其余模型的请求头止于第 19 槽 |
 | `x-goog-ext-525005358-jspb` | `0` | 本次生成 UUID |
 
-每个账号的 `gemini.Client` 在生命周期内保持自己的客户端 UUID；生成 UUID 每次请求重新创建，并同时写入 `f.req[59]`。两种 UUID 都是大写的 UUID v4。第 19 槽的耗时与官网页面的 TimeUsageTracker 相同：每个账号的 `gemini.Client` 从创建或上一个带该槽的请求（batchexecute、StreamGenerate、ProcessFile）起累计，按 `performance.now` 的 0.1 ms 精度以毫秒浮点数计，再按页面规则拆为秒与纳秒，耗时为 0 时写 `[]`。
+每个账号的 `gemini.Client` 在生命周期内保持自己的客户端 UUID；生成 UUID 每次请求重新创建，并同时写入 `f.req[59]`。两种 UUID 都是大写的 UUID v4。第 19 槽的耗时与官网页面的 TimeUsageTracker 相同：每个账号的 `gemini.Client` 从创建或上一个带该槽的请求（batchexecute、StreamGenerate、ProcessFile）起累计，按 `performance.now` 的 0.1 ms 精度以毫秒浮点数计，再按页面规则拆为秒与纳秒，耗时为 0 时写 `[]`。时区名在 Windows 上由注册表 `TimeZoneKeyName` 经 CLDR `windowsZones` 对照表换算，其他系统依次取 `TZ`、`/etc/localtime` 的链接目标与 `/etc/timezone`，都读不到时为 `UTC`。
 
 ### 请求身份
 
-所有访问 Google 的请求使用同一个 Chrome 155.0.8059.85（Windows x64 稳定版）身份。tls-client 的 `Chrome_152` 模板与 Chrome 155 稳定版首次连接的 TLS 与 HTTP/2 指纹一致：
+所有访问 Google 的请求使用同一个 Chrome 157.0.8103.40（Windows x64 稳定版）身份。tls-client 的 `Chrome_152` 模板与 Chrome 157 稳定版首次连接的 TLS 与 HTTP/2 指纹一致：
 
 | 项目 | 值 |
 | --- | --- |
 | JA4 | `t13d1517h2_8daaf6152771_cb7bf5808d99` |
 | HTTP/2 Akamai | `1:65536;2:0;4:6291456;6:262144\|15663105\|0\|m,a,s,p` |
-| `user-agent` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36` |
-| `sec-ch-ua` | `"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"` |
+| `user-agent` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36` |
+| `sec-ch-ua` | `"Not-A.Brand";v="99", "Google Chrome";v="157", "Chromium";v="157"` |
 | `sec-ch-ua-mobile` | `?0` |
 | `sec-ch-ua-platform` | `"Windows"` |
 | `accept-language` | 认证状态的 `language`，缺省 `en-US,en;q=0.9` |
 | `accept-encoding` | `gzip, deflate, br, zstd` |
 
-发往 Google 域的请求另带高熵 Client Hints 与 `x-browser-*`：`sec-ch-ua-arch` `"x86"`、`sec-ch-ua-bitness` `"64"`、`sec-ch-ua-form-factors` `"Desktop"`、`sec-ch-ua-full-version` `"155.0.8059.85"`、`sec-ch-ua-full-version-list` `"Google Chrome";v="155.0.8059.85", "Chromium";v="155.0.8059.85", "Not(A:Brand";v="24.0.0.0"`、`sec-ch-ua-model` `""`、`sec-ch-ua-platform-version` `"10.0.0"`、`sec-ch-ua-wow64` `?0`，以及 `x-browser-channel` `stable`、`x-browser-year` `2026`、`x-browser-validation` `6q7HZiKEhnYpLUmbisJzG0KzioE=`（随 Chrome 版本变化）、`x-browser-copyright` `Copyright 2026 Google LLC. All Rights Reserved.`。Cookie 按 RFC 6265 与公共后缀表匹配域，以 `.` 开头的域为域 Cookie，其余为 host-only Cookie。
+发往 Google 域的请求另带高熵 Client Hints 与 `x-browser-*`：`sec-ch-ua-arch` `"x86"`、`sec-ch-ua-bitness` `"64"`、`sec-ch-ua-form-factors` `"Desktop"`、`sec-ch-ua-full-version` `"157.0.8103.40"`、`sec-ch-ua-full-version-list` `"Not-A.Brand";v="99.0.0.0", "Google Chrome";v="157.0.8103.40", "Chromium";v="157.0.8103.40"`、`sec-ch-ua-model` `""`、`sec-ch-ua-platform-version` `"10.0.0"`、`sec-ch-ua-wow64` `?0`，以及 `x-browser-channel` `stable`、`x-browser-year` `2026`、`x-browser-validation` `XLAS5gg5sZEDe2LzGC1NUVw7aB4=`（随 Chrome 版本变化）、`x-browser-copyright` `Copyright 2026 Google LLC. All Rights Reserved.` 与 `x-sec-ch-ua-not-a-border`。`x-sec-ch-ua-not-a-border` 与 `x-browser-validation` 出现在同一批请求中，由 Chrome 的 `chromecompaneros.dll`（`GetCompaneroValue`）计算：以 16 字符种子（Chrome 157 为 `f369e73779169d07`，随 Chrome 版本变化）的四个大端 32 位字为状态 `a,b,c,d`，依次逐字节吸收 Chrome 内置的 API key `AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE`、User-Agent 与当前 Unix 毫秒数除以 300000 的十进制字符串，每个字节 `x` 执行 `r=rol32(x+a,7)`、`b^=r`、`c+=b`、`n=rol32(c,13)`、`t=d^n`、`a=b+t`、`b=n^r`、`c=t+r`、`d=n`；最后把 `a,b,c,d` 各按小端逐字节、低半字节在前映射到字母表 `qazwsxedcrfvtgby`，得到 32 个字母。取值每 5 分钟变化一次，同一时段各域名相同；服务每个请求按当前时间计算。Cookie 按 RFC 6265 与公共后缀表匹配域，以 `.` 开头的域为域 Cookie，其余为 host-only Cookie。
 
 Chrome 的请求头发送顺序由请求头名称集合决定，每类请求使用官网现场的顺序：
 
@@ -627,7 +651,7 @@ Chrome 的请求头发送顺序由请求头名称集合决定，每类请求使�
 首页导航：sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-full-version, sec-ch-ua-arch, sec-ch-ua-platform,
 sec-ch-ua-platform-version, sec-ch-ua-model, sec-ch-ua-bitness, sec-ch-ua-wow64,
 sec-ch-ua-full-version-list, sec-ch-ua-form-factors, upgrade-insecure-requests, user-agent, accept,
-x-browser-channel, x-browser-year, x-browser-validation, x-browser-copyright, sec-fetch-site,
+x-browser-channel, x-browser-year, x-browser-validation, x-browser-copyright, x-sec-ch-ua-not-a-border, sec-fetch-site,
 sec-fetch-mode, sec-fetch-user, sec-fetch-dest, accept-encoding, accept-language, cookie, priority
 
 batchexecute 与 StreamGenerate：content-length, sec-ch-ua-full-version-list, sec-ch-ua-platform,
@@ -635,34 +659,34 @@ sec-ch-ua, sec-ch-ua-bitness, sec-ch-ua-model, sec-ch-ua-mobile, x-same-domain, 
 sec-ch-ua-form-factors, sec-ch-ua-arch, x-goog-ext-73010989-jspb, sec-ch-ua-full-version,
 content-type, x-goog-ext-525001261-jspb, x-goog-ext-525005358-jspb, x-goog-ext-73010990-jspb,
 user-agent, sec-ch-ua-platform-version, accept, origin, x-browser-channel, x-browser-year,
-x-browser-validation, x-browser-copyright, sec-fetch-site, sec-fetch-mode, sec-fetch-dest, referer,
+x-browser-validation, x-browser-copyright, x-sec-ch-ua-not-a-border, sec-fetch-site, sec-fetch-mode, sec-fetch-dest, referer,
 accept-encoding, accept-language, cookie, priority
 
 ProcessFile：content-length, sec-ch-ua-full-version-list, sec-ch-ua-platform, x-goog-ext-525001261-jspb,
 sec-ch-ua, sec-ch-ua-bitness, sec-ch-ua-model, sec-ch-ua-mobile, x-same-domain, sec-ch-ua-wow64,
 sec-ch-ua-form-factors, sec-ch-ua-arch, sec-ch-ua-full-version, user-agent, content-type,
 sec-ch-ua-platform-version, accept, origin, x-browser-channel, x-browser-year, x-browser-validation,
-x-browser-copyright, sec-fetch-site, sec-fetch-mode, sec-fetch-dest, referer, accept-encoding,
+x-browser-copyright, x-sec-ch-ua-not-a-border, sec-fetch-site, sec-fetch-mode, sec-fetch-dest, referer, accept-encoding,
 accept-language, cookie, priority
 
 上传开始：content-length, sec-ch-ua-full-version-list, sec-ch-ua-platform, sec-ch-ua, sec-ch-ua-bitness,
 sec-ch-ua-model, sec-ch-ua-mobile, sec-ch-ua-form-factors, sec-ch-ua-wow64, x-goog-upload-protocol,
 sec-ch-ua-arch, sec-ch-ua-full-version, content-type, x-goog-upload-header-content-length, push-id,
 x-client-pctx, x-goog-upload-command, user-agent, x-tenant-id, sec-ch-ua-platform-version, accept,
-origin, x-browser-channel, x-browser-year, x-browser-validation, x-browser-copyright, sec-fetch-site,
+origin, x-browser-channel, x-browser-year, x-browser-validation, x-browser-copyright, x-sec-ch-ua-not-a-border, sec-fetch-site,
 sec-fetch-mode, sec-fetch-dest, referer, accept-encoding, accept-language, cookie, priority
 
 上传完成：content-length, sec-ch-ua-full-version-list, sec-ch-ua-platform, sec-ch-ua, sec-ch-ua-bitness,
 sec-ch-ua-model, sec-ch-ua-mobile, sec-ch-ua-form-factors, sec-ch-ua-wow64, sec-ch-ua-arch,
 sec-ch-ua-full-version, content-type, push-id, x-client-pctx, x-goog-upload-command,
 x-goog-upload-offset, x-tenant-id, user-agent, sec-ch-ua-platform-version, accept, origin,
-x-browser-channel, x-browser-year, x-browser-validation, x-browser-copyright, sec-fetch-site,
+x-browser-channel, x-browser-year, x-browser-validation, x-browser-copyright, x-sec-ch-ua-not-a-border, sec-fetch-site,
 sec-fetch-mode, sec-fetch-dest, referer, accept-encoding, accept-language, cookie, priority
 
 生成图下载：sec-ch-ua-full-version-list, sec-ch-ua-platform, sec-ch-ua, sec-ch-ua-bitness,
 sec-ch-ua-model, sec-ch-ua-mobile, sec-ch-ua-form-factors, sec-ch-ua-wow64, sec-ch-ua-arch,
 sec-ch-ua-full-version, user-agent, sec-ch-ua-platform-version, accept, origin, x-browser-channel,
-x-browser-year, x-browser-validation, x-browser-copyright, sec-fetch-site, sec-fetch-mode,
+x-browser-year, x-browser-validation, x-browser-copyright, x-sec-ch-ua-not-a-border, sec-fetch-site, sec-fetch-mode,
 sec-fetch-dest, sec-fetch-storage-access, referer, accept-encoding, accept-language, cookie, priority
 ```
 
@@ -701,7 +725,7 @@ sec-fetch-dest, sec-fetch-storage-access, referer, accept-encoding, accept-langu
 | `97` | 确认 Deep Research 计划时为 `[0,0]` |
 | `98` | `1` |
 
-`GEMINI_SAVE_HISTORY=false` 使用 Temporary Chat。显式网页 session 保存三元组与续接令牌并固定到产生它的账号。不带 session 的 Chat、Anthropic Messages、Responses 与 Gemini `generateContent`、`streamGenerateContent` 请求以 system（Gemini 为 `systemInstruction`）、提示词中发送的函数定义（`tool_choice` 为 `none` 时不发送）、响应 JSON Schema 与最后一个 assistant 轮（Gemini 为 model 轮）及之前的消息计算会话键；该键由本服务上一轮回答登记且所属账号有空闲请求槽时续接该网页 session，只发送最后一个 assistant 轮之后的消息，续接失败时新建会话发送完整历史；其余无 session 请求相互独立。登记的键按回答正文、渲染后的正文与带来源链接的正文各算一次，工具调用参数按键排序，工具调用 ID、思考块与 `cache_control` 不参与；Gemini 连续的 model 内容按顺序直接拼接为一轮，google-genai SDK chats 把流式回答的每个分块记为一个 model 内容。客户端从会话最新一轮回答继续时按官网追问编码；从较早的回答继续时按官网“编辑该回答之后的提问”编码，从该回答分叉。
+`GEMINI_SAVE_HISTORY=false` 使用 Temporary Chat；带客户端工具定义的登录账号请求使用普通会话，这类会话不写入账本库的会话表，没有未过期的续接键指向它且生成结束超过一分钟后、或服务停止时，以 `GzXR5e` 从账号历史中删除。显式网页 session 保存三元组与续接令牌并固定到产生它的账号。不带 session 的 Chat、Anthropic Messages、Responses 与 Gemini `generateContent`、`streamGenerateContent` 请求以 system（Gemini 为 `systemInstruction`）、提示词中发送的函数定义（`tool_choice` 为 `none` 时不发送）、响应 JSON Schema 与最后一个 assistant 轮（Gemini 为 model 轮）及之前的消息计算会话键；该键由本服务上一轮回答登记且所属账号有空闲请求槽时续接该网页 session，只发送最后一个 assistant 轮之后的消息，续接失败时新建会话发送完整历史；其余无 session 请求相互独立。登记的键按回答正文、渲染后的正文与带来源链接的正文各算一次，工具调用参数按键排序，工具调用 ID、思考块与 `cache_control` 不参与；Gemini 连续的 model 内容按顺序直接拼接为一轮，google-genai SDK chats 把流式回答的每个分块记为一个 model 内容。客户端从会话最新一轮回答继续时按官网追问编码；从较早的回答继续时按官网“编辑该回答之后的提问”编码，从该回答分叉。
 
 ### 完整 `f.req` 编码
 
@@ -830,7 +854,7 @@ FILES = [
 ]
 ```
 
-官网 Chrome 155 Temporary Chat 首轮的非 `null` 槽完整集合为（选择有选项组的工具时另有 `54`、`55`）：
+官网 Chrome 157 Temporary Chat 首轮的非 `null` 槽完整集合为（选择有选项组的工具时另有 `54`、`55`）：
 
 ```text
 0,1,3,4,6,7,10,11,17,18,27,30,41,45,49,53,59,61,67,68,79,80,91,96,98
@@ -879,18 +903,18 @@ RAW_FILE_BYTES
 
 完成响应正文为 `/contrib_service/ttl_1d/...` 形态的上传路径。附件未声明 MIME 类型时按内容嗅探；内容为文本而类型不是 `text/*` 与 `application/json` 时按 `text/plain` 登记。
 
-**ProcessFile：** 与 batchexecute 使用同样的 query 与表单编码，模型 header 带模型 hash、mode 与思考强度、不带第 7、11 槽：
+**ProcessFile：** 与 batchexecute 使用同样的 query 与表单编码，模型 header 带模型 hash、界面语言、mode 与思考强度、不带第 7、11 槽，选中策略变体模型时第 24 槽为变体键：
 
 ```text
 f.req = [null,"[[[UPLOAD_PATH,null,1,MIME_TYPE],FILE_NAME,null,null,null,null,null,null,[0]],null,1,[HL]]"]
-x-goog-ext-525001261-jspb = [1,null,null,null,"MODEL_HASH",null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,MODEL_MODE,THINKING_LEVEL,"CLIENT_UUID",["BL"],null,TIMING]
+x-goog-ext-525001261-jspb = [1,null,null,null,"MODEL_HASH",null,"LANG",null,[4,33,22,5,6,8,16,19,20],null,null,null,null,null,MODEL_MODE,THINKING_LEVEL,"CLIENT_UUID",["BL"],null,TIMING]
 ```
 
 响应 `wrb.fr` 记录的 `payload[3][0]` 为文件 UUID。
 
 ### 图片生成
 
-官网输入框工具菜单的 Create image 把 `f.req[49]` 设为 featureMode `14`，`f.req[54]` 设为空数组，`f.req[55]` 写入 Aspect ratio 选项（未选择时为空数组），其余槽与普通提问相同；生成请求由 `StreamGenerate` 执行。官网通过 `ku4Jyf` 查询类别 `14` 的图片额度。工具菜单对所有模型开放，4 Argon 选择 Create image 时只返回文字。
+官网输入框工具菜单的 Create image 把 `f.req[49]` 设为 featureMode `14`，`f.req[54]` 设为空数组，`f.req[55]` 写入 Aspect ratio 选项（未选择时为空数组），其余槽与普通提问相同；生成请求由 `StreamGenerate` 执行。官网通过 `ku4Jyf` 查询类别 `14` 的图片额度。
 
 成功图片响应同时披露三层身份：
 
@@ -901,7 +925,7 @@ x-goog-ext-525001261-jspb = [1,null,null,null,"MODEL_HASH",null,null,null,[4,5,6
 | 类别号 | `candidate[12][7][0][0][3][0]` | `23` | `20` |
 | 内部生成器 tag | `candidate[12][7][0][0][3][18]` | `imagen_default.ultra` | `imagen_default.complaintflow` |
 
-图片产品名称随输入框模型选择器当前的模型变化：同一 Ultra 账号选 3.5 Flash-Lite 时为 `Nano Banana 2 Lite`，选 3.1 Pro 时为 `Nano Banana 2.1`。两种模型下 Create image 的请求只有模型 hash 与 mode 不同。
+图片产品名称随输入框模型选择器当前的模型变化：同一 Ultra 账号选 3.5 Flash-Lite 时为 `Nano Banana 2 Lite`。不同模型下 Create image 的请求只有模型 hash 与 mode 不同。
 
 脱敏后的原始媒体项形态为：
 
@@ -1076,7 +1100,7 @@ DECIMAL_LENGTH_HINT
 
 官网在流式输出中把正文里的地址改写为 `[地址](https://地址)`，行内代码中的地址同样被改写，已输出的文字在后续快照中变为链接，地址尚未写完时链接随后续快照加长。官网判断代码块时，任何围栏行（以 ```` ``` ```` 或 `~~~` 开头，长度与语言标记不限）都切换代码状态，嵌套围栏的内层因此按正文改写。服务按同一判定在围栏代码块以外（没有关闭时延伸到正文末尾）把地址以 `https://`、`http://` 或 `mailto:` 开头、文字等于地址或等于去掉这一前缀的地址的链接还原为文字，相对地址等其他链接保持原样；回答完成前正文截止到末尾尚未写完的链接。正文中的 Markdown 转义（`\<`、`\>`、`\_`、`\[`、`\]`）还原为原字符，围栏代码块与行内代码保持原文。
 
-**实际模型。** 候选帧带实际模型 hash 与模型名，可以晚于正文到达；模型信息确认前的事件按原顺序暂存，回答结束前没有模型信息即为请求的模型。实际模型与请求不一致时产生可重试 `502`，同一帧带额度提示时为 `429`，错误说明附上提示原文。
+**实际模型。** 候选帧带实际模型 hash 与模型名，可以晚于正文到达，策略变体模型按模型名核对；模型信息确认前的事件按原顺序暂存，回答结束前没有模型信息即为请求的模型。上游对 Low 以外的思考强度在型号名后加档位名（如 `4 Carbon Medium`、`4 Argon High`），服务按型号名核对，变体模型请求的 `provider_model` 为该变体模型的公开 ID。实际模型与请求不一致时产生可重试 `502`，同一帧带额度提示时为 `429`，错误说明附上提示原文。
 
 ### Canvas 文档
 
@@ -1245,7 +1269,7 @@ Gemini Web 也会在 HTTP 200、无错误帧的正常候选中以正文返回固
 
 OpenAI Chat 与 Completions 的 `n` 大于 1 时与 `/v1/images` 一样逐个生成：第一个 choice 沿用请求的会话，其余各自新开会话；choices 依次编号，流式输出依次写出各 choice 的块，每个 choice 有自己的结束块；`usage` 为各次生成之和。`n` 小于 1 时返回 400 `integer_below_min_value`。Gemini `generationConfig.candidateCount` 大于 1 时同样逐个生成，`candidates` 依次编号，流式依次写出各候选的块，`usageMetadata` 为各次生成之和并在流式的最后一块给出。
 
-同一消息的多个文本段（Chat、Anthropic 与 Responses 的 content 数组，Gemini 的 parts）按顺序写入提示词，相接处两侧都不是空白时以换行分隔。Chat 消息带 `name` 时，正文前写上说话人（`name: 正文`）。
+同一消息的多个文本段（Chat、Anthropic 与 Responses 的 content 数组，Gemini 的 parts）按顺序写入提示词，相接处两侧都不是空白时以换行分隔。Chat 消息带 `name` 时，正文前写上说话人（`name: 正文`）。Responses 的 `agent_message` 输入项（Codex 智能体之间的消息）转为 user 轮，内容中的 `input_text` 与 `encrypted_content` 依次作为文本段。
 
 Chat 与 Completions 的 `stop`、Anthropic `stop_sequences` 与 Gemini `generationConfig.stopSequences` 在本地截断正文：流式输出留住可能构成停止序列开头的末尾文字，命中首个停止序列后只输出命中处之前的正文，并与官网点击停止一样结束上游生成；正文以停止序列开头时返回空正文，Anthropic 的 `content` 为空数组。上游改写已输出的正文快照时，按改写后的正文截断。Chat 与 Completions 的 `finish_reason` 为 `stop`，Anthropic 的 `stop_reason` 为 `stop_sequence` 并在 `stop_sequence` 中给出命中的序列，Gemini 的 `finishReason` 为 `STOP`。
 
@@ -1295,7 +1319,7 @@ a.txt
 工具协议：
 可用工具：[CLIENT_TOOL_DEFINITION]
 工具选择：auto
-这些工具由客户端在用户的环境中执行。需要调用工具时，在回答末尾按下面的格式写出调用……
+这些工具由客户端在用户的环境中执行。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。需要调用工具时，在回答末尾按下面的格式写出调用……
 [Call:工具名称]
 [Arg:参数名]
 ```
@@ -1307,7 +1331,7 @@ a.txt
 <|im_start|>assistant
 ````
 
-结束围栏前的换行不属于参数值，参数值以换行结束时结束围栏前留一个空行；协议说明要求新建源代码或文本文件、整文件复制时文件以换行结束，用户逐字指定的内容按原样写。
+结束围栏前的换行不属于参数值，参数值以换行结束时结束围栏前留一个空行；协议说明要求复制工具结果中的内容时结尾与原文一致（结果代码块结束围栏前有空行时参数代码块同样留一个空行），原文带行号等看不出结尾时与新建源代码或文本文件时文件以换行结束，用户逐字指定的内容按原样写。
 
 Chat 与 Responses 的 `parallel_tool_calls` 为 `false` 或 Anthropic 的 `disable_parallel_tool_use` 为 `true` 时，协议说明中的“一次可以写多个调用。”换成“一次只调用一个工具。”，回答只取第一个调用块。
 
@@ -1355,7 +1379,7 @@ Gemini Web 会改写正文中的组件标签（`<TemplateWidget>`、`<GenerateWi
 
 Gemini `text/x.enum` 要求回答为 schema `enum` 中的一个值；`responseFormat.image.aspectRatio` 与 `imageConfig.aspectRatio` 同义。回答不符合 schema 时，先修复字符串中的非法转义、控制字符与缺失的闭合括号，修复后符合 schema 时返回修复后的 JSON；仍不符合 schema 或枚举时与无法解析的工具调用一样，在首个可见输出前换另一个账号新建会话重试，仍不符合时返回 502，OpenAI 协议的 `code` 为 `output_validation_error`。OpenAI `json_schema` 只在 `strict` 为 `true` 时按 schema 校验回答，`strict` 为 `false` 或缺省时原样返回回答；`json_object` 校验回答为 JSON。schema 编译不了（例如 `pattern` 含 lookahead、远程 `$ref`、draft-04 写法）时照常写入提示词，回答与工具参数只校验 JSON 语法。
 
-Google Search 与 Code Execution 由网页上游执行。Responses 的 `web_search_call` 根据 citations 输出 `completed` item；Code Execution 当前实测由 3.1 Pro 与 3.6 Flash 执行。
+Google Search 与 Code Execution 由网页上游执行。Responses 的 `web_search_call` 根据 citations 输出 `completed` item；Code Execution 由所选模型在网页上游执行。
 
 图片下载完成后，OpenAI Responses 返回：
 
@@ -1448,7 +1472,7 @@ total_tokens = prompt_tokens + completion_tokens + thought_tokens
 | 端点 | 实现 |
 | --- | --- |
 | `/v1/completions` | 每个 prompt 生成 `n` 个 choice，序号为 prompt 序号乘 `n` 加生成序号；token 数组与 token 数组的数组按 Gemini 分词器还原为文本，词表之外的 token 返回 400；带 `suffix` 时 system 消息要求补出两段之间的文本，user 消息为 `[Prompt]` 与 `[Suffix]` 两段，各段原文放在代码块中 |
-| Responses 保存 | `store` 不为 false 的响应与输入项写入 `data/requests.db` 的 `responses` 表；`input_items` 沿 `previous_response_id` 链列出全部前序输入与输出；`GET /v1/responses/{id}?stream=true` 等后台响应结束后按创建时的流式事件回放，失败的响应以 `response.failed` 结束，其余以 `response.completed` 结束，`starting_after` 之前的事件不输出 |
+| Responses 保存 | `store` 不为 false 的响应与输入项以 gzip 压缩写入 `data/requests.db` 的 `stored_responses` 表；`input_items` 沿 `previous_response_id` 链列出全部前序输入与输出；`GET /v1/responses/{id}?stream=true` 按创建时的流式事件回放，取回进行中的后台响应时先输出 `response.created` 与 `response.in_progress`、静默时重发 `response.in_progress`，结束后接着输出其余事件，失败的响应以 `response.failed` 结束，其余以 `response.completed` 结束，`starting_after` 之前的事件不输出 |
 | Responses 后台 | `background: true` 先保存 `queued`，在独立的请求跟踪中生成；流式后台响应在生成期间保存为 `in_progress`；`cancel` 停止生成并保存 `cancelled`；启动时把上次运行未完成的后台响应保存为 `failed`，`error.code` 为 `server_error` |
 | `/v1/responses/input_tokens` | 与生成相同的提示词编码加附件估算，续接时计入会话上下文；`input` 可省略，只带 `tools` 或 `conversation` 时同样计数 |
 | `/v1/responses/compact` | 最近约 20000 tokens 的条目原样保留，更早的条目由所选模型写成结构化摘要；`compaction` 项的 `encrypted_content` 是摘要与原样条目的 Base64 JSON，之后的请求把它展开为摘要 user 消息与原样条目 |

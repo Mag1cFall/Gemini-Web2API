@@ -151,7 +151,7 @@ var generatedMediaHeaderOrder = []string{
 	"sec-ch-ua-full-version-list", "sec-ch-ua-platform", "sec-ch-ua", "sec-ch-ua-bitness",
 	"sec-ch-ua-model", "sec-ch-ua-mobile", "sec-ch-ua-form-factors", "sec-ch-ua-wow64",
 	"sec-ch-ua-arch", "sec-ch-ua-full-version", "user-agent", "sec-ch-ua-platform-version",
-	"accept", "origin", "x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright",
+	"accept", "origin", "x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-storage-access", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -198,6 +198,7 @@ type imageDownload struct {
 	rcid          string
 	index         int
 	mode          int
+	variant       string
 	level         ThinkingLevel
 	temporaryChat bool
 }
@@ -217,7 +218,7 @@ func (c *Client) FetchMediaContent(ctx context.Context, media Media) ([]byte, er
 	}
 	result, err := c.batchExecute(ctx, bootstrap, batchRequest{
 		rpcID: "c8o8Fe", payload: payload, sourcePath: "/app", language: bootstrap.Language, extension: "[0]",
-		mode: media.download.mode, level: media.download.level, conversation: true, temporaryChat: media.download.temporaryChat,
+		mode: media.download.mode, variant: media.download.variant, level: media.download.level, conversation: true, temporaryChat: media.download.temporaryChat,
 	})
 	if err != nil {
 		return nil, err

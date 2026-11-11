@@ -70,6 +70,8 @@ type ServiceConfig struct {
 	RestartFields    []string `json:"restart_fields"`
 
 	APIKeyAccounts        string `json:"api_key_accounts"`
+	AccountOrder          string `json:"account_order"`
+	ModelAccounts         string `json:"model_accounts"`
 	FirstEventHedge       string `json:"first_event_hedge"`
 	FirstEventHedgeModels string `json:"first_event_hedge_models"`
 	// Invalid 是启动时取值无效、按默认值运行的 .env 项
@@ -102,6 +104,8 @@ type ConfigUpdate struct {
 	AuthStates       *string `json:"auth_states"`
 	LogFormat        *string `json:"log_format"`
 	APIKeyAccounts   *string `json:"api_key_accounts"`
+	AccountOrder     *string `json:"account_order"`
+	ModelAccounts    *string `json:"model_accounts"`
 	FirstEventHedge  *string `json:"first_event_hedge"`
 	HedgeModels      *string `json:"first_event_hedge_models"`
 }
@@ -122,7 +126,8 @@ func (s *Settings) View() ServiceConfig {
 		AuthStates: strings.Join(cfg.AuthStatePaths, ","), LogFormat: cfg.LogFormat,
 		ActiveListenAddr: s.active.ListenAddress, RestartFields: []string{},
 		Invalid: nonNil(cfg.Invalid), Locked: cfg.Locked,
-		APIKeyAccounts: config.FormatAPIKeyAccounts(cfg.APIKeyAccounts), FirstEventHedge: cfg.FirstEventHedge,
+		APIKeyAccounts: config.FormatAccountBindings(cfg.APIKeyAccounts), FirstEventHedge: cfg.FirstEventHedge,
+		AccountOrder: strings.Join(cfg.AccountOrder, ","), ModelAccounts: config.FormatAccountBindings(cfg.ModelAccounts),
 		FirstEventHedgeModels: strings.Join(cfg.FirstEventHedgeModels, ","),
 	}
 	if cfg.ListenAddress != s.active.ListenAddress {
@@ -271,7 +276,7 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		env["LOG_FORMAT"] = format
 	}
 	if update.APIKeyAccounts != nil || update.ProxyAPIKey != nil {
-		raw := config.FormatAPIKeyAccounts(next.APIKeyAccounts)
+		raw := config.FormatAccountBindings(next.APIKeyAccounts)
 		if update.APIKeyAccounts != nil {
 			raw = *update.APIKeyAccounts
 		}
@@ -280,9 +285,21 @@ func (s *Settings) Update(update ConfigUpdate) error {
 			problems = append(problems, fmt.Errorf("API_KEY_ACCOUNTS %w", err))
 		}
 		next.APIKeyAccounts = bindings
-		if formatted := config.FormatAPIKeyAccounts(bindings); update.APIKeyAccounts != nil || formatted != config.FormatAPIKeyAccounts(s.current.APIKeyAccounts) {
+		if formatted := config.FormatAccountBindings(bindings); update.APIKeyAccounts != nil || formatted != config.FormatAccountBindings(s.current.APIKeyAccounts) {
 			env["API_KEY_ACCOUNTS"] = formatted
 		}
+	}
+	if update.AccountOrder != nil {
+		next.AccountOrder = config.SplitList(*update.AccountOrder)
+		env["ACCOUNT_ORDER"] = strings.Join(next.AccountOrder, ",")
+	}
+	if update.ModelAccounts != nil {
+		bindings, err := config.ParseModelAccounts(*update.ModelAccounts)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("MODEL_ACCOUNTS %w", err))
+		}
+		next.ModelAccounts = bindings
+		env["MODEL_ACCOUNTS"] = config.FormatAccountBindings(bindings)
 	}
 	if update.FirstEventHedge != nil {
 		mode := strings.ToLower(strings.TrimSpace(*update.FirstEventHedge))

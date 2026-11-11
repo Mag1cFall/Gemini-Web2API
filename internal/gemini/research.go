@@ -142,7 +142,7 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decode
 		}
 		payload, err := c.batchExecute(ctx, bootstrap, batchRequest{
 			rpcID: "hNvQHb", payload: string(request), sourcePath: "/app/" + strings.TrimPrefix(session.CID, "c_"),
-			language: bootstrap.Language, extension: "[0]", mode: model.Mode, level: level,
+			language: bootstrap.Language, extension: "[0]", mode: model.Mode, variant: model.Variant, level: level,
 		})
 		if err != nil && errors.Is(err, ErrTransport) && ctx.Err() == nil {
 			trace.Stage("后台生成轮询网络错误，下次重试", "次数", polls, "原因", err)

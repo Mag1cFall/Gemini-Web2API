@@ -41,7 +41,9 @@ func availableModels(pool *balancer.AccountPool) []CatalogModel {
 				defaultVotes[model.ID]++
 			}
 			availability := byID[model.ID]
-			availability.Model = model
+			if availability.ID == "" || len(model.ThinkingLevels) > len(availability.ThinkingLevels) {
+				availability.Model = model
+			}
 			if account.Ready {
 				availability.AccountCount++
 				availability.Accounts = append(availability.Accounts, account.ID)

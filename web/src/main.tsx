@@ -5,6 +5,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router'
 
+import { logsKey } from '@/app/events'
 import { appMessages } from '@/app/messages'
 import { router } from '@/app/router'
 import { Toaster } from '@/components/ui/toast'
@@ -32,6 +33,7 @@ const queryClient: QueryClient = new QueryClient({
     },
   },
 })
+queryClient.setQueryDefaults(logsKey, { structuralSharing: false, gcTime: Infinity })
 
 // AppToaster 以当前语言渲染提示
 function AppToaster() {
