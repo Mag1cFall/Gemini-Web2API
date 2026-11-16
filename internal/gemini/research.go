@@ -114,13 +114,21 @@ func (r *researchThoughts) progress(candidate []any) error {
 func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decoder *FrameDecoder, model Model, level ThinkingLevel, progress func([]any) error, researchConfirm *string, emit func(Event) error) error {
 	trace := logging.FromContext(ctx)
 	trace.Background(model.ID)
-	c.requestSlot.Release(1)
-	c.busy.Add(-1)
-	c.notifyRelease()
-	defer func() {
-		c.busy.Add(1)
-		c.requestSlot.Acquire(context.Background(), 1)
-	}()
+	alreadyReleased := false
+	restore := func() {}
+	if ctrl, ok := ctx.Value(slotYieldContextKey{}).(SlotYieldController); ok && ctrl != nil {
+		restore, alreadyReleased = ctrl()
+	}
+	if !alreadyReleased {
+		c.requestSlot.Release(1)
+		c.busy.Add(-1)
+		c.notifyRelease()
+		defer func() {
+			c.busy.Add(1)
+			_ = c.requestSlot.Acquire(context.Background(), 1)
+			restore()
+		}()
+	}
 	session := state.Snapshot()
 	request, err := json.Marshal([]any{session.CID, 10, nil, 1, []any{0}, []any{4}, nil, 1})
 	if err != nil {

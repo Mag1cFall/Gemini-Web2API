@@ -229,7 +229,7 @@ func (g *outputGate) emitter(attempt *generationAttempt, onEvent func(gemini.Eve
 }
 
 // yieldingRelease 返回请求结束时的释放函数与首个内容事件到达时的通知函数：等待首事件超过 slotYieldAfter 时提前让出请求槽，让其他请求可以使用该账号
-func yieldingRelease(client *gemini.Client, release func()) (func(), func()) {
+func yieldingRelease(client *gemini.Client, release func()) (func(), func(), gemini.SlotYieldController) {
 	var mu sync.Mutex
 	var endYield func()
 	released := false
@@ -258,7 +258,21 @@ func yieldingRelease(client *gemini.Client, release func()) (func(), func()) {
 			release()
 		}
 	}
-	return finish, func() { timer.Stop() }
+	suspend := func() (func(), bool) {
+		timer.Stop()
+		mu.Lock()
+		defer mu.Unlock()
+		if released {
+			return func() {}, true
+		}
+		released = true
+		return func() {
+			mu.Lock()
+			defer mu.Unlock()
+			released = false
+		}, false
+	}
+	return finish, func() { timer.Stop() }, suspend
 }
 
 // startAttempt 在后台以 client 执行一次生成，结束时释放请求槽并按结果报告账号状态，被另一方取代或 panic 的尝试不报告
@@ -269,7 +283,8 @@ func startAttempt(ctx context.Context, pool *balancer.AccountPool, gate *outputG
 		claimed: make(chan struct{}), done: make(chan struct{}),
 	}
 	emit := gate.emitter(attempt, onEvent)
-	finish, firstContent := yieldingRelease(client, release)
+	finish, firstContent, suspend := yieldingRelease(client, release)
+	attemptCtx = gemini.WithSlotYieldController(attemptCtx, suspend)
 	go func() {
 		defer close(attempt.done)
 		defer cancel()

@@ -96,6 +96,16 @@ func (c *Client) CachedUsage() *UsageInfo {
 	return c.usage.Load()
 }
 
+type slotYieldContextKey struct{}
+
+// SlotYieldController 协调外层超时让出与内部后台轮询让出，防止同一请求重复释放请求槽
+type SlotYieldController func() (restore func(), alreadyReleased bool)
+
+// WithSlotYieldController 将槽位让出协调器绑定到 context
+func WithSlotYieldController(ctx context.Context, ctrl SlotYieldController) context.Context {
+	return context.WithValue(ctx, slotYieldContextKey{}, ctrl)
+}
+
 // AcquireRequest 占用账号的一个请求槽直到完整上游请求链结束，后台生成的轮询阶段让出
 func (c *Client) AcquireRequest(ctx context.Context) (func(), error) {
 	c.busy.Add(1)
