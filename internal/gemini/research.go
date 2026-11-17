@@ -110,17 +110,23 @@ func (r *researchThoughts) progress(candidate []any) error {
 	return nil
 }
 
-// awaitTurn 在调用方持有账号请求槽时调用，轮询期间让出请求槽，以 hNvQHb 轮询会话中本轮回答，完成后重新占用请求槽并按生成流解析该回答，连续 turnMissingPolls 次读不到本轮回答时返回可重试错误；decoder 为已输出部分回答的生成流解码器，为 nil 时从头输出；progress 接收进行中的候选，researchConfirm 非空时写入该回答计划卡片的确认按钮文字
+// awaitTurn 以 hNvQHb 轮询会话中本轮回答，读到后按生成流解析该回答：调用方仍持有账号请求槽时轮询期间让出、返回前重新占用并调用让出协调器的恢复函数，请求槽已被首事件等待让出时保持让出；连续 turnMissingPolls 次读不到本轮回答时返回可重试错误；decoder 为已输出部分回答的生成流解码器，为 nil 时从头输出；progress 接收进行中的候选，researchConfirm 非空时写入该回答计划卡片的确认按钮文字
 func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decoder *FrameDecoder, model Model, level ThinkingLevel, progress func([]any) error, researchConfirm *string, emit func(Event) error) error {
 	trace := logging.FromContext(ctx)
 	trace.Background(model.ID)
-	c.requestSlot.Release(1)
-	c.busy.Add(-1)
-	c.notifyRelease()
-	defer func() {
-		c.busy.Add(1)
-		c.requestSlot.Acquire(context.Background(), 1)
-	}()
+	alreadyReleased := false
+	restore := func() {}
+	if ctrl, ok := ctx.Value(slotYieldContextKey{}).(SlotYieldController); ok {
+		restore, alreadyReleased = ctrl()
+	}
+	if !alreadyReleased {
+		c.releaseRequest()
+		defer func() {
+			c.busy.Add(1)
+			_ = c.requestSlot.Acquire(context.Background(), 1)
+			restore()
+		}()
+	}
 	session := state.Snapshot()
 	request, err := json.Marshal([]any{session.CID, 10, nil, 1, []any{0}, []any{4}, nil, 1})
 	if err != nil {
