@@ -228,7 +228,7 @@ func (g *outputGate) emitter(attempt *generationAttempt, onEvent func(gemini.Eve
 	}
 }
 
-// yieldingRelease 返回请求结束时的释放函数与首个内容事件到达时的通知函数：等待首事件超过 slotYieldAfter 时提前让出请求槽，让其他请求可以使用该账号
+// yieldingRelease 返回请求结束时的释放函数、首个内容事件到达时的通知函数与后台轮询的让出协调器：等待首事件超过 slotYieldAfter 时提前让出请求槽，让其他请求可以使用该账号
 func yieldingRelease(client *gemini.Client, release func()) (func(), func(), gemini.SlotYieldController) {
 	var mu sync.Mutex
 	var endYield func()
@@ -263,6 +263,10 @@ func yieldingRelease(client *gemini.Client, release func()) (func(), func(), gem
 		mu.Lock()
 		defer mu.Unlock()
 		if released {
+			if endYield != nil {
+				endYield()
+				endYield = nil
+			}
 			return func() {}, true
 		}
 		released = true

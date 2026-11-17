@@ -96,6 +96,7 @@ func (c *Client) CachedUsage() *UsageInfo {
 	return c.usage.Load()
 }
 
+// slotYieldContextKey 是 context 中请求槽让出协调器的键
 type slotYieldContextKey struct{}
 
 // SlotYieldController 协调外层超时让出与内部后台轮询让出，防止同一请求重复释放请求槽
