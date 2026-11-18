@@ -48,6 +48,8 @@ func (e adapterEmitError) Unwrap() error { return e.err }
 
 type accountContextError struct {
 	err *gemini.ProtocolError
+	// tokens 是这次请求需要的输入 token 数，账号池据此排除上下文窗口同样装不下请求的其他账号
+	tokens int
 }
 
 func (e *accountContextError) Error() string { return e.err.Error() }
@@ -541,6 +543,7 @@ func runGenerationAttempts(
 		if rebuildable && sessionKey != "" && !newSession && (isAccountContextError(err) || errors.Is(err, gemini.ErrGuestAttachments) || retryableAccountError(err) && !visibleOutput()) {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
+			excludeNarrowAccounts(trace, pool, excludedAccountIDs, accountID, err)
 			if (gemini.TransientError(err) || isOutputMismatchError(err)) && !visibleOutput() && regenerated < regenerations {
 				regenerated++
 				regenerating = true
@@ -554,6 +557,7 @@ func runGenerationAttempts(
 			}
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
+			excludeNarrowAccounts(trace, pool, excludedAccountIDs, accountID, err)
 			continue
 		}
 		if (gemini.TransientError(err) || isOutputMismatchError(err)) && (sessionKey == "" || newSession) && regenerated < regenerations && !visibleOutput() {
@@ -667,7 +671,7 @@ func runGenerationWithClient(
 	}
 	promptTokens := contextTokens + tokencount.Content(prompt) + mediaTokens(files)
 	if contextWindow := client.ContextWindow(); contextWindow > 0 && promptTokens > contextWindow {
-		return generationResult{}, &accountContextError{err: &gemini.ProtocolError{
+		return generationResult{}, &accountContextError{tokens: promptTokens, err: &gemini.ProtocolError{
 			HTTPStatus: 413,
 			Message:    fmt.Sprintf("账号上下文窗口为 %d tokens，当前请求需要 %d tokens", contextWindow, promptTokens),
 		}}
@@ -962,6 +966,26 @@ func isOutputMismatchError(err error) bool {
 func isAccountContextError(err error) bool {
 	var contextErr *accountContextError
 	return errors.As(err, &contextErr)
+}
+
+// accountContextTokens 返回账号上下文窗口不足时这次请求需要的输入 token 数
+func accountContextTokens(err error) int {
+	var contextErr *accountContextError
+	if errors.As(err, &contextErr) {
+		return contextErr.tokens
+	}
+	return 0
+}
+
+// excludeNarrowAccounts 在账号因上下文窗口不足拒绝请求时把上下文窗口同样装不下这次请求的账号与访客会话一并排除，避免向它们重复上传附件并徒劳发起请求
+func excludeNarrowAccounts(trace *logging.Request, pool *balancer.AccountPool, excludedAccountIDs map[string]struct{}, accountID string, err error) {
+	tokens := accountContextTokens(err)
+	if tokens <= 0 {
+		return
+	}
+	if added := pool.ExcludeNarrowContext(excludedAccountIDs, tokens); len(added) > 0 {
+		trace.Progress("WARN", accountID, "排除上下文窗口装不下请求的账号", "需要", tokens, "账号", strings.Join(added, ","))
+	}
 }
 
 // publicModelID 返回响应中的模型 ID：别名取映射目标，改名前的旧 ID 取当前 ID，gemini-default 在各就绪账号（没有账号时为访客会话）的默认模型相同时取该模型
