@@ -6,12 +6,15 @@ import (
 	"io"
 	"math"
 	"mime"
+	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf16"
 
 	http "github.com/bogdanfinn/fhttp"
+	tls_client "github.com/bogdanfinn/tls-client"
 )
 
 const maxMediaRedirects = 5
@@ -29,7 +32,7 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 			return nil, err
 		}
 		if generatedMedia {
-			applyChromeHeaders(req, c.language, true)
+			c.applyChromeHeaders(req, true)
 			req.Header.Set("accept", "*/*")
 			req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
 			req.Header.Set("origin", "https://gemini.google.com")
@@ -45,7 +48,7 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 			}
 			req.Header[http.HeaderOrderKey] = generatedMediaHeaderOrder
 		} else {
-			applyChromeHeaders(req, c.language, false)
+			c.applyChromeHeaders(req, false)
 			req.Header.Set("Referer", "https://gemini.google.com/")
 			req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
 			req.Header[http.HeaderOrderKey] = xhrHeaderOrder
@@ -54,7 +57,7 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, transportProtocolError("media fetch", err)
+			return nil, transportProtocolError("下载媒体", err)
 		}
 		if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 			resp.Body.Close()
@@ -64,7 +67,7 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 			location := resp.Header.Get("Location")
 			resp.Body.Close()
 			if location == "" {
-				return nil, fmt.Errorf("media redirect has no location")
+				return nil, fmt.Errorf("下载媒体时重定向没有目标地址")
 			}
 			nextURL, err := currentURL.Parse(location)
 			if err != nil {
@@ -75,12 +78,12 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, responseStatusError(resp, "media fetch")
+			return nil, responseStatusError(resp, "下载媒体")
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			return nil, retryableProtocolError("read media response", err)
+			return nil, retryableProtocolError("下载媒体时读取内容失败", err)
 		}
 		contentType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 		if generatedMedia && contentType == "text/plain" {
@@ -93,24 +96,21 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 		}
 		return body, nil
 	}
-	return nil, fmt.Errorf("media redirect limit exceeded")
+	return nil, fmt.Errorf("下载媒体时重定向次数过多")
 }
 
-// FetchRemoteMedia 以账号的浏览器身份与出口、不带账号 Cookie 下载客户端给出的媒体地址，每一跳先以 checkHost 检查目标主机，声明或读到的大小超过 limit 时返回错误
-func (c *Client) FetchRemoteMedia(ctx context.Context, mediaURL string, checkHost func(context.Context, string) error, limit int64) ([]byte, error) {
+// FetchRemoteMedia 以账号的浏览器身份与出口、不带账号 Cookie 下载客户端给出的媒体地址，每条连接只连向解析后检查过的公网地址，声明或读到的大小超过 limit 时返回错误
+func (c *Client) FetchRemoteMedia(ctx context.Context, mediaURL string, limit int64) ([]byte, error) {
 	currentURL, err := url.Parse(mediaURL)
 	if err != nil {
 		return nil, err
 	}
 	for redirects := 0; redirects <= maxMediaRedirects; redirects++ {
-		if err := checkHost(ctx, currentURL.Hostname()); err != nil {
-			return nil, err
-		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, currentURL.String(), nil)
 		if err != nil {
 			return nil, err
 		}
-		applyChromeHeaders(req, c.language, false)
+		c.applyChromeHeaders(req, false)
 		req.Header.Set("Referer", "https://gemini.google.com/")
 		req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
 		req.Header[http.HeaderOrderKey] = xhrHeaderOrder
@@ -146,12 +146,58 @@ func (c *Client) FetchRemoteMedia(ctx context.Context, mediaURL string, checkHos
 	return nil, fmt.Errorf("重定向超过 %d 次", maxMediaRedirects)
 }
 
+// newMediaClient 创建下载客户端给出的媒体地址的客户端：请求身份与代理和账号相同，不带 Cookie，建立连接前解析目标主机，只连接检查过的公网地址，经代理时按该地址建隧道
+func newMediaClient(timeoutSeconds int, proxyURL string, major int) (tls_client.HttpClient, error) {
+	tunnel, err := NewHTTPClient(timeoutSeconds, proxyURL, major)
+	if err != nil {
+		return nil, err
+	}
+	build, err := chromeBuildFor(major)
+	if err != nil {
+		return nil, err
+	}
+	dialer := tunnel.GetDialer()
+	return tls_client.NewHttpClient(tls_client.NewNoopLogger(),
+		tls_client.WithTimeoutSeconds(timeoutSeconds),
+		tls_client.WithClientProfile(build.clientProfile()),
+		tls_client.WithRandomTLSExtensionOrder(),
+		tls_client.WithNotFollowRedirects(),
+		tls_client.WithCookieJar(newCookieJar()),
+		tls_client.WithDialContext(func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			checked, err := publicAddress(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(checked.String(), port))
+		}),
+	)
+}
+
+// publicAddress 解析 host 并返回第一个地址，解析结果含本机、私网、链路本地、组播或未指定地址时返回错误
+func publicAddress(ctx context.Context, host string) (netip.Addr, error) {
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	for _, address := range addresses {
+		address = address.Unmap()
+		if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
+			return netip.Addr{}, fmt.Errorf("主机 %s 解析到非公网地址 %s", host, address)
+		}
+	}
+	return addresses[0].Unmap(), nil
+}
+
 // generatedMediaHeaderOrder 是 Chrome 稳定版页面 fetch 生成图下载链各跳的请求头顺序
 var generatedMediaHeaderOrder = []string{
 	"sec-ch-ua-full-version-list", "sec-ch-ua-platform", "sec-ch-ua", "sec-ch-ua-bitness",
 	"sec-ch-ua-model", "sec-ch-ua-mobile", "sec-ch-ua-form-factors", "sec-ch-ua-wow64",
 	"sec-ch-ua-arch", "sec-ch-ua-full-version", "user-agent", "sec-ch-ua-platform-version",
-	"accept", "origin", "x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"accept", "origin", "x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-storage-access", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -180,12 +226,12 @@ func prepareGeneratedMediaURL(mediaURL *url.URL) bool {
 func parseGeneratedMediaRelay(body []byte) (*url.URL, error) {
 	nextURL, err := url.Parse(strings.TrimSpace(string(body)))
 	if err != nil {
-		return nil, fmt.Errorf("parse generated media relay: %w", err)
+		return nil, fmt.Errorf("解析生成媒体的地址: %w", err)
 	}
 	host := nextURL.Hostname()
 	allowedHost := host == "lh3.googleusercontent.com" || host == "lh3.google.com" || strings.HasSuffix(host, ".usercontent.google.com")
 	if nextURL.Scheme != "https" || !allowedHost || !strings.HasPrefix(nextURL.Path, "/rd-gg-dl/") && !strings.HasPrefix(nextURL.Path, "/rd-gg/") {
-		return nil, fmt.Errorf("generated media relay returned an unexpected URL")
+		return nil, fmt.Errorf("官网返回的生成媒体地址无法识别")
 	}
 	return nextURL, nil
 }
@@ -225,7 +271,7 @@ func (c *Client) FetchMediaContent(ctx context.Context, media Media) ([]byte, er
 	}
 	downloadURL, ok := stringAt(result, 0)
 	if !ok || downloadURL == "" {
-		return nil, fmt.Errorf("c8o8Fe returned no download URL")
+		return nil, fmt.Errorf("官网没有返回原图下载地址")
 	}
 	return c.FetchMedia(ctx, downloadURL+"=d-I")
 }

@@ -3,7 +3,6 @@ package gemini
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -36,7 +35,7 @@ func (c *Client) fetchGems(ctx context.Context, bootstrap Bootstrap) ([]Gem, err
 			rpcID: listGemsRPC, payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]",
 		})
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", listGemsRPC, err)
+			return nil, err
 		}
 		gems = append(gems, parseGems(payload, kind.predefined)...)
 	}
@@ -57,6 +56,17 @@ func parseGems(payload []any, predefined bool) []Gem {
 		}
 		description, _ := stringAt(meta, 1)
 		gems = append(gems, Gem{ID: id, Name: name, Description: description, Predefined: predefined})
+	}
+	return gems
+}
+
+// gems 返回目录中的 Gem
+func (c ModelCatalog) gems() []Gem {
+	var gems []Gem
+	for _, model := range c.models {
+		if model.Gem != "" {
+			gems = append(gems, Gem{ID: model.Gem, Name: model.DisplayName, Description: model.Description})
+		}
 	}
 	return gems
 }

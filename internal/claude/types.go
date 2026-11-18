@@ -23,6 +23,31 @@ type ClaudeRequest struct {
 	Metadata           *Metadata       `json:"metadata,omitempty"`
 	ConversationID     string          `json:"conversation_id,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	// ContextManagement 为本服务在本地执行的上下文编辑策略
+	ContextManagement *ContextManagement `json:"context_management,omitempty"`
+}
+
+// ContextManagement 是 context_management 的上下文编辑策略
+type ContextManagement struct {
+	Edits []ContextEdit `json:"edits"`
+}
+
+// ContextEdit 是一条上下文编辑策略，字段按 type 取用
+type ContextEdit struct {
+	Type                 string          `json:"type"`
+	Trigger              *EditAmount     `json:"trigger"`
+	Keep                 json.RawMessage `json:"keep"`
+	ClearAtLeast         *EditAmount     `json:"clear_at_least"`
+	ExcludeTools         []string        `json:"exclude_tools"`
+	ClearToolInputs      json.RawMessage `json:"clear_tool_inputs"`
+	PauseAfterCompaction bool            `json:"pause_after_compaction"`
+	Instructions         string          `json:"instructions"`
+}
+
+// EditAmount 是触发条件、保留数量与最少清理量的类型与数值
+type EditAmount struct {
+	Type  string `json:"type"`
+	Value int    `json:"value"`
 }
 
 type ThinkingConfig struct {
@@ -66,6 +91,8 @@ type ContentBlock struct {
 	Source    *ImageSource            `json:"source,omitempty"`
 	Data      string                  `json:"data,omitempty"`
 	Citations []map[string]any        `json:"citations,omitempty"`
+	// EncryptedContent 是 compaction 块的加密内容，本服务写为 null
+	EncryptedContent json.RawMessage `json:"encrypted_content,omitempty"`
 }
 
 type ImageSource struct {
@@ -83,6 +110,13 @@ type Tool struct {
 	DisplayWidthPx  int  `json:"display_width_px,omitempty"`
 	DisplayHeightPx int  `json:"display_height_px,omitempty"`
 	EnableZoom      bool `json:"enable_zoom,omitempty"`
+	// MaxUses 是服务端工具在一次请求中的调用次数上限
+	MaxUses int `json:"max_uses,omitempty"`
+	// AllowedDomains 与 BlockedDomains 是 web_search 与 web_fetch 工具允许与屏蔽的域名
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
+	// UserLocation 是 web_search 工具按其搜索的用户位置
+	UserLocation json.RawMessage `json:"user_location,omitempty"`
 }
 
 func (t Tool) IsWebSearch() bool {
@@ -96,28 +130,35 @@ func (t Tool) IsWebSearch() bool {
 }
 
 type ClaudeResponse struct {
-	ID             string         `json:"id"`
-	Type           string         `json:"type"`
-	Role           string         `json:"role"`
-	Model          string         `json:"model"`
-	Content        []ContentBlock `json:"content"`
-	StopReason     string         `json:"stop_reason"`
-	StopSequence   *string        `json:"stop_sequence"`
-	Usage          *Usage         `json:"usage,omitempty"`
-	ConversationID string         `json:"conversation_id,omitempty"`
+	ID           string         `json:"id"`
+	Type         string         `json:"type"`
+	Role         string         `json:"role"`
+	Content      []ContentBlock `json:"content"`
+	Model        string         `json:"model"`
+	StopReason   string         `json:"stop_reason"`
+	StopSequence *string        `json:"stop_sequence"`
+	Usage        *Usage         `json:"usage,omitempty"`
+	// ContextManagement 是请求带 context_management 时生效的编辑
+	ContextManagement map[string]any `json:"context_management,omitempty"`
+	ConversationID    string         `json:"conversation_id,omitempty"`
+	// ProviderModel 是上游实际回答的模型 ID
+	ProviderModel string `json:"provider_model,omitempty"`
 }
 
 type Usage struct {
 	InputTokens              int            `json:"input_tokens"`
-	OutputTokens             int            `json:"output_tokens"`
-	CacheReadInputTokens     *int           `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens *int           `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     *int           `json:"cache_read_input_tokens,omitempty"`
+	OutputTokens             int            `json:"output_tokens"`
 	ServerToolUse            *ServerToolUse `json:"server_tool_use,omitempty"`
+	// Iterations 是请求带 compact_20260112 时压缩与回答各次采样的用量
+	Iterations []map[string]any `json:"iterations,omitempty"`
 }
 
 // ServerToolUse 统计服务端工具的调用次数
 type ServerToolUse struct {
 	WebSearchRequests int `json:"web_search_requests"`
+	WebFetchRequests  int `json:"web_fetch_requests"`
 }
 
 func ParseMessageContent(raw json.RawMessage) ([]ContentBlock, string, error) {

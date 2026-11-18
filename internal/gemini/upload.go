@@ -26,7 +26,7 @@ var uploadStartHeaderOrder = []string{
 	"sec-ch-ua-wow64", "x-goog-upload-protocol", "sec-ch-ua-arch", "sec-ch-ua-full-version",
 	"content-type", "x-goog-upload-header-content-length", "push-id", "x-client-pctx",
 	"x-goog-upload-command", "user-agent", "x-tenant-id", "sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -38,7 +38,7 @@ var uploadFinalizeHeaderOrder = []string{
 	"sec-ch-ua-wow64", "sec-ch-ua-arch", "sec-ch-ua-full-version", "content-type",
 	"push-id", "x-client-pctx", "x-goog-upload-command", "x-goog-upload-offset", "x-tenant-id",
 	"user-agent", "sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -49,7 +49,7 @@ var processFileHeaderOrder = []string{
 	"sec-ch-ua", "sec-ch-ua-bitness", "sec-ch-ua-model", "sec-ch-ua-mobile", "x-same-domain",
 	"sec-ch-ua-wow64", "sec-ch-ua-form-factors", "sec-ch-ua-arch", "sec-ch-ua-full-version",
 	"user-agent", "content-type", "sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -108,7 +108,7 @@ func (c *Client) uploadFile(ctx context.Context, bootstrap Bootstrap, file FileD
 	resp.Body.Close()
 	uploadURL := resp.Header.Get("x-goog-upload-url")
 	if uploadURL == "" {
-		return FileData{}, retryableProtocolError("upload start response has no x-goog-upload-url", nil)
+		return FileData{}, retryableProtocolError("上传附件时官网没有返回上传地址", nil)
 	}
 
 	finalize, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, bytes.NewReader(data))
@@ -126,7 +126,7 @@ func (c *Client) uploadFile(ctx context.Context, bootstrap Bootstrap, file FileD
 	defer resp.Body.Close()
 	path, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return FileData{}, retryableProtocolError("read upload response", err)
+		return FileData{}, retryableProtocolError("上传附件时读取结果失败", err)
 	}
 	return FileData{URL: strings.TrimSpace(string(path)), FileName: filename, MimeType: mimeType}, nil
 }
@@ -152,7 +152,7 @@ func textContent(data []byte) bool {
 
 // applyUploadHeaders 写入页面向上传服务发起跨站 XHR 的请求头与上传租户标识
 func (c *Client) applyUploadHeaders(req *http.Request, bootstrap Bootstrap, order []string) {
-	applyChromeHeaders(req, c.language, true)
+	c.applyChromeHeaders(req, true)
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
 	req.Header.Set("origin", "https://gemini.google.com")
@@ -172,7 +172,7 @@ func (c *Client) applyUploadHeaders(req *http.Request, bootstrap Bootstrap, orde
 func (c *Client) doUpload(req *http.Request) (*http.Response, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, transportProtocolError("upload", err)
+		return nil, transportProtocolError("上传附件", err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
@@ -180,7 +180,7 @@ func (c *Client) doUpload(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, responseStatusError(resp, "upload")
+		return nil, responseStatusError(resp, "上传附件")
 	}
 	return resp, nil
 }
@@ -207,7 +207,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	req.Header[http.HeaderOrderKey] = processFileHeaderOrder
 	header, err := json.Marshal(withVariant([]any{
 		1, nil, nil, nil, model.Hash, nil, bootstrap.Language, nil, c.features(), nil, nil, nil, nil, nil, model.Mode, int(level), c.clientID,
-		[]string{bootstrap.BL}, nil, c.pageTiming(),
+		[]string{bootstrap.BL},
 	}, model.Variant))
 	if err != nil {
 		return "", err
@@ -216,7 +216,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", transportProtocolError("process file", err)
+		return "", transportProtocolError("处理附件", err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
@@ -224,7 +224,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", responseStatusError(resp, "process file")
+		return "", responseStatusError(resp, "处理附件")
 	}
 	fileID := ""
 	err = scanProtocolRecords(resp.Body, func(record []any) error {
@@ -233,11 +233,11 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 		}
 		encoded, _ := stringAt(record, 2)
 		if encoded == "" {
-			return rpcStatusError("process file", record)
+			return rpcStatusError("处理附件", record)
 		}
 		var payload []any
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("decode process file payload: %w", err)
+			return fmt.Errorf("解析附件处理结果: %w", err)
 		}
 		ids, _ := arrayAt(payload, 3)
 		fileID, _ = stringAt(ids, 0)
@@ -247,7 +247,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 		return "", err
 	}
 	if fileID == "" {
-		return "", retryableProtocolError("process file response has no file id", nil)
+		return "", retryableProtocolError("处理附件时官网没有返回附件 ID", nil)
 	}
 	return fileID, nil
 }

@@ -1,4 +1,15 @@
-import type { LogEntry, LogLevel } from '@/features/logs/types'
+import type { LogEntry, LogFieldEntry, LogLevel } from '@/features/logs/types'
+import { serverText } from '@/lib/i18n'
+
+// logText 是一条日志的消息与字段拼成的单行文字，用于搜索与时间线
+export function logText(message: string, fields: LogFieldEntry[] = []) {
+  return [
+    serverText(message),
+    ...fields.map((field) =>
+      field.key ? serverText(field.key) + '=' + serverText(field.value) : serverText(field.value),
+    ),
+  ].join(' | ')
+}
 
 // levelRank 是日志级别的严重程度
 const levelRank: Record<LogLevel, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 }
@@ -66,21 +77,35 @@ export function groupLogs(logs: LogEntry[]): LogRow[] {
   return rows
 }
 
-// matchRow 判断一行最新事件的级别是否达到最低级别、是否包含该来源的事件并命中搜索词
+// involves 判断一行是否有来自 source 的事件，或请求由该账号处理、该账号参与过尝试
+function involves(row: LogRow, source: string) {
+  const request = row.entry.request
+  return (
+    row.events.some((event) => event.source === source) ||
+    request?.account === source ||
+    request?.attempts?.some((attempt) => attempt.account === source) === true
+  )
+}
+
+// matchRow 判断一行最新事件的级别是否达到最低级别、是否涉及所选来源并命中搜索词
 export function matchRow(row: LogRow, filter: LogFilter) {
   if (filter.level !== 'all' && levelRank[row.entry.level] < levelRank[filter.level]) return false
-  if (filter.source && !row.events.some((event) => event.source === filter.source)) return false
+  if (filter.source && !involves(row, filter.source)) return false
   const needle = filter.q.trim().toLowerCase()
   if (!needle) return true
   const request = row.entry.request
   const fields = [
-    ...row.events.flatMap((event) => [event.message, event.source, event.event]),
+    ...row.events.flatMap((event) => [
+      logText(event.message, event.fields),
+      event.source,
+      event.event,
+    ]),
     request?.id,
     request?.model,
     request?.path,
     request?.account,
     request?.status === undefined ? undefined : String(request.status),
-    request?.error,
+    request?.error === undefined ? undefined : serverText(request.error),
     request?.finish_reason,
   ]
   return fields.some((field) => field?.toLowerCase().includes(needle) === true)

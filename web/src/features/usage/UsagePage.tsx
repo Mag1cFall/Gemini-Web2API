@@ -343,7 +343,7 @@ export function UsagePage() {
                     choice === 0 ? m.autoRefreshOff : fill(m.autoRefreshEvery, { seconds: choice }),
                 }))}
                 size="sm"
-                className="w-[128px]"
+                className="min-w-[128px]"
               />
             )}
             <Tooltip label={m.refresh}>
@@ -408,9 +408,9 @@ export function UsagePage() {
                 className="flex h-6 max-w-full items-center gap-1 rounded-sm bg-primary-soft pr-1 pl-2 text-xs text-primary"
               >
                 <span className="shrink-0 opacity-70">{dimensionLabels[chip.dimension]}:</span>
-                <span title={label} className="min-w-0 truncate">
-                  {label}
-                </span>
+                <Tooltip overflow label={label}>
+                  <span className="min-w-0 truncate">{label}</span>
+                </Tooltip>
                 <button
                   type="button"
                   aria-label={fill(m.removeFilter, { value: label })}

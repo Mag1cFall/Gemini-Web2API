@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardEmpty, CardHeader, CountBadge, PageHeader } from '@/components/ui/page'
 import { Table, Td, Th } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
+import { Tooltip } from '@/components/ui/tooltip'
 import {
   accountsMessages,
   cooldownReason,
@@ -13,6 +14,7 @@ import {
 } from '@/features/accounts/messages'
 import { useAccountLabel, useClearCooldown } from '@/features/accounts/queries'
 import { useCooldowns } from '@/features/models/queries'
+import { DateTimeText, Elapsed, RelativeText } from '@/features/requests/Elapsed'
 import { requestsMessages } from '@/features/requests/messages'
 import {
   useCancelRequest,
@@ -26,26 +28,27 @@ import type { RequestInfo } from '@/features/requests/types'
 import { protocolLabels } from '@/features/usage/model'
 import { RecordDrawer } from '@/features/usage/RecordDrawer'
 import { ApiError } from '@/lib/api'
-import {
-  formatBytes,
-  formatDateTime,
-  formatDuration,
-  formatNumber,
-  formatRelative,
-} from '@/lib/format'
+import { formatBytes, formatDuration, formatNumber } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
-import { useNow } from '@/lib/time'
+
+// Truncated 是单行截断的表格文字，被截断时悬停显示全文
+function Truncated({ text }: { text: string }) {
+  return (
+    <Tooltip overflow label={text}>
+      <span className="block truncate">{text}</span>
+    </Tooltip>
+  )
+}
 
 // recentLimit 是最近结束列表显示的请求数
 const recentLimit = 20
 
-// RequestsPage 显示进行中的请求与取消、最近结束的请求与账号冷却及其清除，数据来自事件流，地址带 id 时打开请求账本中该请求的记录
+// RequestsPage 显示进行中的请求与取消、最近结束的请求与账号冷却及其清除，数据来自事件流，地址带 id 时打开请求账本中该请求的记录；每秒只重新渲染计时文字
 export function RequestsPage() {
   const m = useMessages(requestsMessages)
   const rm = useMessages(cooldownReasonMessages)
   const am = useMessages(accountsMessages)
   const { locale } = useI18n()
-  const now = useNow(1000)
   const clearCooldown = useClearCooldown()
   const accountLabel = useAccountLabel()
   const running = useRunning()
@@ -60,10 +63,6 @@ export function RequestsPage() {
       finished.find((item) => item.id === selected.id) ??
       selected)
     : null
-  const elapsed = (request: RequestInfo) =>
-    request.state === 'running'
-      ? Math.max(request.duration_ms, now.getTime() - Date.parse(request.started_at))
-      : request.duration_ms
   const protocol = (request: RequestInfo) =>
     request.protocol ? (protocolLabels[request.protocol] ?? request.protocol) : '—'
 
@@ -89,17 +88,18 @@ export function RequestsPage() {
   const openButton = (request: RequestInfo) => {
     const label = request.model ?? `${request.method} ${request.path}`
     return (
-      <button
-        type="button"
-        aria-label={fill(m.openDetail, { id: request.id })}
-        title={label}
-        onClick={() => {
-          setSelected(request)
-        }}
-        className="max-w-full truncate text-left font-mono text-primary hover:text-primary-hover hover:underline"
-      >
-        {label}
-      </button>
+      <Tooltip overflow label={label}>
+        <button
+          type="button"
+          aria-label={fill(m.openDetail, { id: request.id })}
+          onClick={() => {
+            setSelected(request)
+          }}
+          className="max-w-full truncate text-left font-mono text-primary hover:text-primary-hover hover:underline"
+        >
+          {label}
+        </button>
+      </Tooltip>
     )
   }
 
@@ -139,24 +139,18 @@ export function RequestsPage() {
               {running.map((request) => (
                 <tr key={request.id} className="hover:bg-hover">
                   <Td className="max-w-cell">{openButton(request)}</Td>
-                  <Td
-                    className="max-w-cell truncate @max-[480px]:hidden"
-                    title={accountText(request.account)}
-                  >
-                    {accountText(request.account)}
+                  <Td className="max-w-cell @max-[480px]:hidden">
+                    <Truncated text={accountText(request.account)} />
                   </Td>
                   <Td className="whitespace-nowrap @max-[480px]:hidden">{protocol(request)}</Td>
-                  <Td
-                    className="max-w-cell truncate text-foreground-muted @max-[760px]:hidden"
-                    title={request.stage}
-                  >
-                    {request.stage ?? '—'}
+                  <Td className="max-w-cell text-foreground-muted @max-[760px]:hidden">
+                    <Truncated text={request.stage ?? '—'} />
                   </Td>
                   <Td className="whitespace-nowrap text-foreground-muted @max-[480px]:hidden">
-                    {formatDateTime(new Date(request.started_at), now, locale)}
+                    <DateTimeText date={new Date(request.started_at)} />
                   </Td>
                   <Td className="text-right whitespace-nowrap">
-                    {formatDuration(elapsed(request), locale)}
+                    <Elapsed request={request} />
                   </Td>
                   <Td className="text-right whitespace-nowrap @max-[480px]:hidden">
                     {request.first_event_ms ? formatDuration(request.first_event_ms, locale) : '—'}
@@ -215,11 +209,9 @@ export function RequestsPage() {
                   className={request.state === 'failed' ? 'bg-error-soft/40' : 'hover:bg-hover'}
                 >
                   <Td className="whitespace-nowrap text-foreground-muted">
-                    {formatDateTime(
-                      new Date(Date.parse(request.started_at) + request.duration_ms),
-                      now,
-                      locale,
-                    )}
+                    <DateTimeText
+                      date={new Date(Date.parse(request.started_at) + request.duration_ms)}
+                    />
                   </Td>
                   <Td className="whitespace-nowrap">
                     <span className="flex items-center gap-2">
@@ -230,8 +222,8 @@ export function RequestsPage() {
                     </span>
                   </Td>
                   <Td className="max-w-cell">{openButton(request)}</Td>
-                  <Td className="max-w-cell truncate" title={accountText(request.account)}>
-                    {accountText(request.account)}
+                  <Td className="max-w-cell">
+                    <Truncated text={accountText(request.account)} />
                   </Td>
                   <Td className="whitespace-nowrap">{protocol(request)}</Td>
                   <Td className="text-right whitespace-nowrap">
@@ -270,8 +262,8 @@ export function RequestsPage() {
             <tbody>
               {cooldowns.map((cooldown) => (
                 <tr key={cooldown.account_id + '\n' + cooldown.model}>
-                  <Td className="max-w-cell truncate" title={accountLabel(cooldown.account_id)}>
-                    {accountLabel(cooldown.account_id)}
+                  <Td className="max-w-cell">
+                    <Truncated text={accountLabel(cooldown.account_id)} />
                   </Td>
                   <Td className="font-mono whitespace-nowrap">
                     {cooldown.model || m.wholeAccount}
@@ -280,9 +272,9 @@ export function RequestsPage() {
                     {cooldown.reason ? cooldownReason(rm, cooldown.reason) : '—'}
                   </Td>
                   <Td className="whitespace-nowrap">
-                    {formatDateTime(new Date(cooldown.until), now, locale)}
+                    <DateTimeText date={new Date(cooldown.until)} />
                     <span className="ml-2 text-foreground-muted">
-                      {formatRelative(new Date(cooldown.until), now, locale)}
+                      <RelativeText date={new Date(cooldown.until)} />
                     </span>
                   </Td>
                   <Td className="text-right whitespace-nowrap">
@@ -312,7 +304,6 @@ export function RequestsPage() {
 
       <RequestDetailSheet
         request={live}
-        durationMs={live ? elapsed(live) : 0}
         cancelling={cancel.isPending && cancel.variables === live?.id}
         onCancel={cancelRequest}
         onClose={() => {

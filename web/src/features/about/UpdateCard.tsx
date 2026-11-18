@@ -18,7 +18,7 @@ import {
 } from '@/features/about/queries'
 import { renderMarkdown } from '@/features/playground/markdown'
 import { formatBytes, formatFullDateTime } from '@/lib/format'
-import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
+import { defineMessages, fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 
 // updateMessages 是在线更新卡片的文案
 const updateMessages = defineMessages({
@@ -183,7 +183,7 @@ const updateMessages = defineMessages({
     latest: 'Neueste Version',
     published: 'Veröffentlicht',
     checkedAt: 'Geprüft',
-    upToDate: 'Sie verwenden die neueste Version',
+    upToDate: 'Du verwendest die neueste Version',
     available: 'Version {version} ist verfügbar',
     notes: 'Neuerungen',
     updateTo: 'Auf {version} aktualisieren',
@@ -271,7 +271,7 @@ export function UpdateCard() {
       {data.mode === 'binary' && data.error && (
         <div className="px-5 py-4">
           <Callout tone="error" role="alert">
-            {fill(m.checkFailed, { error: data.error })}
+            {fill(m.checkFailed, { error: serverText(data.error) })}
           </Callout>
         </div>
       )}
@@ -330,9 +330,7 @@ export function UpdateCard() {
                       </Button>
                     </>
                   }
-                >
-                  <span className="sr-only">{m.confirmHint}</span>
-                </DialogContent>
+                />
               </Dialog>
             )}
           </CardRow>

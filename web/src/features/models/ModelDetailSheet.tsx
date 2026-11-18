@@ -14,7 +14,47 @@ import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 
-// ModelDetailSheet 是一个模型的右侧详情：概要与该模型可用的账号，勾选账号后立即写入 MODEL_ACCOUNTS
+// answeredTools 是由账号默认模型回答、按实际回答的模型计费的官网工具
+const answeredTools = new Set(['canvas', 'deep_research', 'guided_learning'])
+
+// usd 返回美元单价文字
+function usd(value: number) {
+  return '$' + value.toFixed(2)
+}
+
+// priceItems 返回模型详情中的单价行：有单价时列出输入与输出、图片或视频输出与长上下文单价，音乐模型按首计价，Gem、默认模型与工具模型按实际回答的模型计费
+function priceItems(model: Model, m: (typeof modelsMessages)['zh-CN']) {
+  const price = model.price
+  if (!price) {
+    const answered =
+      model.id.startsWith('gem-') ||
+      model.id === 'gemini-default' ||
+      answeredTools.has(model.tool ?? '')
+    return [{ label: m.price, value: answered ? m.priceByAnswer : m.priceNone }]
+  }
+  if (price.song) return [{ label: m.priceSong, value: usd(price.song) }]
+  const items = [
+    {
+      label: m.price,
+      value: fill(m.priceTokens, { input: usd(price.input), output: usd(price.output) }),
+    },
+  ]
+  if (price.media) {
+    items.push({
+      label: model.tool === 'video' ? m.priceVideo : m.priceImage,
+      value: usd(price.media),
+    })
+  }
+  if (price.long_input && price.long_output) {
+    items.push({
+      label: m.priceLong,
+      value: fill(m.priceTokens, { input: usd(price.long_input), output: usd(price.long_output) }),
+    })
+  }
+  return items
+}
+
+// ModelDetailSheet 是一个模型的详情对话框：概要与该模型可用的账号，勾选账号后立即写入 MODEL_ACCOUNTS
 export function ModelDetailSheet({ model, onClose }: { model: Model | null; onClose: () => void }) {
   const m = useMessages(modelsMessages)
   const { locale } = useI18n()
@@ -54,7 +94,8 @@ export function ModelDetailSheet({ model, onClose }: { model: Model | null; onCl
       }}
     >
       <DialogContent
-        layout="sheet"
+        wide
+        focusContent
         closeLabel={m.close}
         title={model.display_name || model.id}
         description={<code className="font-mono">{model.id}</code>}
@@ -70,6 +111,7 @@ export function ModelDetailSheet({ model, onClose }: { model: Model | null; onCl
                 { label: m.context, value: contextWindow },
                 { label: m.thinking, value: model.thinking_levels.join(' · ') || m.none },
                 { label: m.capabilities, value: model.capabilities.join(' · ') || m.none },
+                ...priceItems(model, m),
               ]}
             />
           </DetailSection>

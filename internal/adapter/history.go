@@ -60,8 +60,11 @@ func historyKeys(system string, bridge ToolBridge, turns []historyTurn, replies 
 	return keys
 }
 
-// continuedHistoryKey 返回请求历史到最后一个 assistant 轮为止的会话键，该键已登记到网页会话时可按增量续接，否则返回空
+// continuedHistoryKey 返回请求历史到最后一个 assistant 轮为止的会话键，该键已登记到网页会话时可按增量续接，否则或续接官网会话开关关闭时返回空
 func continuedHistoryKey(system string, bridge ToolBridge, turns []historyTurn) string {
+	if !continueSession.Load() {
+		return ""
+	}
 	for index := len(turns) - 1; index > 0; index-- {
 		if turns[index].Role != "assistant" {
 			continue
@@ -75,9 +78,9 @@ func continuedHistoryKey(system string, bridge ToolBridge, turns []historyTurn) 
 	return ""
 }
 
-// rememberHistory 把请求历史加上本轮回答后的会话键登记到本轮网页会话，供不带会话标识的客户端下一轮续接；回答按客户端可能回传的几种渲染各登记一次，turns 为空表示请求带有会话标识
+// rememberHistory 把请求历史加上本轮回答后的会话键登记到本轮网页会话，供不带会话标识的客户端下一轮续接；回答按客户端可能回传的几种渲染各登记一次，turns 为空表示请求带有会话标识，续接官网会话开关关闭时不登记
 func rememberHistory(pool *balancer.AccountPool, result generationResult, system string, bridge ToolBridge, turns []historyTurn) {
-	if len(turns) == 0 {
+	if len(turns) == 0 || !continueSession.Load() {
 		return
 	}
 	state, accountID, contextTokens, ok := conversations.get(result.ResponseID)
@@ -85,7 +88,7 @@ func rememberHistory(pool *balancer.AccountPool, result generationResult, system
 		return
 	}
 	primary := result.Accumulator.Primary()
-	content, calls, err := bridge.Parse(primary.Text)
+	content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 	if err != nil {
 		return
 	}

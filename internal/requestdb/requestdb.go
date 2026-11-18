@@ -1,4 +1,4 @@
-// Package requestdb 在本地 SQLite 中保存请求用量、小时与本地日汇总及可选的 gzip 压缩截断正文，并提供用量查询接口
+// Package requestdb 在本地 SQLite 中保存请求用量、小时与本地日汇总、可选的 gzip 压缩截断正文与 WARN 以上日志，并提供用量与日志查询接口
 package requestdb
 
 import (
@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,9 @@ const responseRetention = 30 * 24 * time.Hour
 
 // GeneratedRetention 是生成视频与缩略图自生成起的保留时长，与 Gemini API 生成视频在服务端保存的 2 天一致
 const GeneratedRetention = 48 * time.Hour
+
+// FilesLimit 是文件目录的总字节上限，超过时从最早的文件起删除
+const FilesLimit = 4 << 30
 
 // pruneInterval 是清理过期数据并交还空闲页的间隔
 const pruneInterval = time.Hour
@@ -79,8 +83,9 @@ CREATE TABLE IF NOT EXISTS request_bodies (
  request BLOB NOT NULL, request_size INTEGER NOT NULL, response BLOB NOT NULL, response_size INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS stored_responses (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, previous_id TEXT NOT NULL, background INTEGER NOT NULL,
- status TEXT NOT NULL, response BLOB NOT NULL, input BLOB NOT NULL);
+ status TEXT NOT NULL, response BLOB NOT NULL, input BLOB NOT NULL, conversation TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS stored_responses_created ON stored_responses(created_at);
+CREATE INDEX IF NOT EXISTS stored_responses_conversation ON stored_responses(conversation, created_at) WHERE conversation != '';
 CREATE INDEX IF NOT EXISTS stored_responses_unfinished ON stored_responses(status) WHERE background=1 AND status IN ('queued','in_progress');
 CREATE TABLE IF NOT EXISTS files (
  id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, filename TEXT NOT NULL,
@@ -95,7 +100,14 @@ CREATE TABLE IF NOT EXISTS sessions (
  model_mode INTEGER NOT NULL, turns INTEGER NOT NULL, account TEXT NOT NULL, context_tokens INTEGER NOT NULL, expires_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS cooldowns (
- account TEXT NOT NULL, model TEXT NOT NULL, until INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY (account, model));`
+ account TEXT NOT NULL, model TEXT NOT NULL, until INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY (account, model));
+CREATE TABLE IF NOT EXISTS model_catalogs (account TEXT PRIMARY KEY, catalog BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS model_renames (old TEXT PRIMARY KEY, current TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS logs (
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, level TEXT NOT NULL, request_id TEXT NOT NULL,
+ text TEXT NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS logs_time ON logs(time);
+CREATE INDEX IF NOT EXISTS logs_request_id ON logs(request_id);`
 
 // Body 是一次请求捕获的请求与响应正文及其原始字节数
 type Body struct {
@@ -105,11 +117,12 @@ type Body struct {
 	ResponseSize int64
 }
 
-// write 是写入协程处理的一条用量、正文或会话，flushed 非空时表示提交此前排队的全部内容后关闭它
+// write 是写入协程处理的一条用量、正文、会话或日志，flushed 非空时表示提交此前排队的全部内容后关闭它
 type write struct {
 	info     *logging.RequestInfo
 	body     *RequestBody
 	sessions []StoredSession
+	log      *logging.Event
 	flushed  chan struct{}
 }
 
@@ -381,6 +394,21 @@ func (store *Store) write(batch []write) (err error) {
 				return err
 			}
 		}
+		if event := item.log; event != nil {
+			data, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			requestID, text := "", event.Source+" "+event.Text()
+			if request := event.Request; request != nil {
+				requestID = request.ID
+				text = strings.Join([]string{text, request.ID, request.Model, request.Account, request.Error}, " ")
+			}
+			if _, err := tx.Exec(`INSERT INTO logs (time,level,request_id,text,data) VALUES (?,?,?,?,?)`,
+				event.Time.UnixMilli(), event.Level, requestID, text, string(data)); err != nil {
+				return err
+			}
+		}
 	}
 	for key, value := range hours {
 		if err := mergeRollup(tx, "hours", key, value); err != nil {
@@ -439,11 +467,12 @@ func (store *Store) prune() {
 	_, requestsErr := store.db.Exec(`DELETE FROM requests WHERE time < ?`, hour)
 	_, hoursErr := store.db.Exec(`DELETE FROM hours WHERE start < ?`, hour)
 	_, daysErr := store.db.Exec(`DELETE FROM days WHERE start < ?`, day)
+	_, logsErr := store.db.Exec(`DELETE FROM logs WHERE time < ?`, hour)
 	_, responsesErr := store.db.Exec(`DELETE FROM stored_responses WHERE created_at < ?`, now.Add(-responseRetention).UnixMilli())
 	_, videosErr := store.db.Exec(`DELETE FROM videos WHERE created_at < ?`, now.Add(-GeneratedRetention).UnixMilli())
-	store.purgeExpiredFiles(context.Background())
+	store.purgeFiles(context.Background())
 	reclaimErr := reclaim(context.Background(), store.db)
-	if err := errors.Join(requestsErr, hoursErr, daysErr, responsesErr, videosErr, reclaimErr); err != nil {
+	if err := errors.Join(requestsErr, hoursErr, daysErr, logsErr, responsesErr, videosErr, reclaimErr); err != nil {
 		logging.Error(logging.SourceService, "请求账本清理失败", "错误", err)
 	}
 }

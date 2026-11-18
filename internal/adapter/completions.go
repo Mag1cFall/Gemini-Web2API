@@ -115,6 +115,14 @@ func unsupportedCompletionParameters(request CompletionRequest) []string {
 	return fields
 }
 
+// completionFinish 返回补全的结束原因：达到输出上限为 length，其余为 stop
+func completionFinish(result generationResult) string {
+	if result.Truncated {
+		return "length"
+	}
+	return "stop"
+}
+
 // completionChoice 返回 text_completion 的一个 choice
 func completionChoice(index int, text string, finishReason any) gin.H {
 	return gin.H{"text": text, "index": index, "logprobs": nil, "finish_reason": finishReason}
@@ -167,9 +175,13 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return gin.H{"id": id, "object": "text_completion", "created": created, "model": model, "choices": choices}
 		}
 		var usage gemini.Usage
+		maxTokens := 0
+		if request.MaxTokens != nil {
+			maxTokens = *request.MaxTokens
+		}
 		generate := func(index int, onEvent func(gemini.Event) error, projection *streamProjection) (generationResult, error) {
 			transcript := completionTranscript(prompts[index], request.Suffix)
-			result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionCreate, request.Model, fmt.Sprintf("%s-%d", id, index), generationMedia{}, gemini.ThinkingLow, ToolBridge{Stop: sequences},
+			result, accountID, err := runGeneration(c.Request.Context(), pool, "", sessionCreate, request.Model, fmt.Sprintf("%s-%d", id, index), generationMedia{}, gemini.ThinkingLow, ToolBridge{Stop: sequences, MaxTokens: maxTokens},
 				func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 					return transcript, nil, nil
 				}, onEvent, projection)
@@ -200,7 +212,7 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				if request.Echo {
 					text = prompts[index] + text
 				}
-				choices = append(choices, completionChoice(index, text, "stop"))
+				choices = append(choices, completionChoice(index, text, completionFinish(result)))
 			}
 			logging.FromContext(c.Request.Context()).SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
 			response := chunk(choices)
@@ -247,7 +259,7 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					}
 				}
 			}
-			if err := writeSSEJSON(c.Writer, chunk([]gin.H{completionChoice(index, "", "stop")})); err != nil {
+			if err := writeSSEJSON(c.Writer, chunk([]gin.H{completionChoice(index, "", completionFinish(result))})); err != nil {
 				return
 			}
 		}

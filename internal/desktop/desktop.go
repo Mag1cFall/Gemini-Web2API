@@ -8,13 +8,19 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/i18n"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 )
 
 // Options 为桌面应用的运行参数
@@ -44,13 +50,16 @@ const openPrefix = "desktop:open:"
 // windowPrefix 为页面顶栏窗口按钮的消息前缀
 const windowPrefix = "desktop:window:"
 
-// localePrefix 为页面报告界面语言的消息前缀，菜单随之换成该语言
-const localePrefix = "desktop:locale:"
+// routePrefix 为页面报告当前路径与查询的消息前缀，重建窗口时打开该页面
+const routePrefix = "desktop:route:"
+
+// busyPrefix 为页面报告是否有进行中的生成或未保存的修改的消息前缀，取值为 1 或 0
+const busyPrefix = "desktop:busy:"
 
 // maximisedEvent 是通知页面窗口最大化状态的事件名
 const maximisedEvent = "desktop:maximised"
 
-// closeToTray 表示关闭窗口时隐藏到托盘；Linux 的托盘依赖桌面环境扩展，关闭窗口即退出
+// closeToTray 表示关闭窗口后应用留在托盘，窗口与 WebView 一并销毁，再次显示时重建；Linux 的托盘依赖桌面环境扩展，关闭窗口即退出
 var closeToTray = runtime.GOOS != "linux"
 
 // windowActions 为页面顶栏窗口按钮对应的窗口操作
@@ -70,7 +79,7 @@ var icon []byte
 //go:embed tray-template.png
 var trayTemplate []byte
 
-// pageScript 在页面中转交外链、拖放与界面语言，Windows 上报告标题栏与窗口按钮的非客户区，macOS 与 Linux 上实现标题栏拖动，Linux 另有边缘缩放
+// pageScript 在页面中转交外链、拖放、界面语言、配色与当前页面，Windows 上报告标题栏与窗口按钮的非客户区，macOS 与 Linux 上实现标题栏拖动，Linux 另有边缘缩放
 //
 //go:embed page.js
 var pageScript string
@@ -82,41 +91,89 @@ var loadedEvents = []events.WindowEventType{
 	events.Linux.WindowLoadFinished,
 }
 
-// Run 取得单实例锁后启动服务，服务开始监听时按实际地址打开窗口与托盘，阻塞到退出；已有实例时唤起它的窗口并退出本进程
+// shell 是桌面应用与它的主窗口：主窗口关闭到托盘后与 WebView 一并销毁，再次显示时按关闭前的位置、大小、最大化状态与页面重建
+type shell struct {
+	app     *application.App
+	options Options
+	// page 是带桌面宿主参数的管理端首页地址，服务开始监听时写入
+	page *url.URL
+	// webview 为 false 时系统没有 WebView2 运行时，管理端在默认浏览器中打开
+	webview bool
+	tray    *tray
+	// opening 串行化主窗口的创建
+	opening sync.Mutex
+	mu      sync.Mutex
+	window  *application.WebviewWindow
+	bounds  application.Rect
+	maxed   bool
+	route   string
+	// busy 为页面报告的进行中工作，closing 为页面忙碌时关闭窗口后等待销毁
+	busy, closing bool
+}
+
+// Run 取得单实例锁后启动服务，服务开始监听时打开窗口与托盘（隐藏启动只创建托盘，显示时创建窗口；Linux 桌面环境没有系统托盘时隐藏启动也打开窗口），阻塞到退出；已有实例时唤起它的窗口并退出本进程；Windows 缺少 WebView2 运行时时只创建托盘，管理端在默认浏览器中打开
 func Run(options Options) error {
+	log.SetOutput(webviewLog{})
 	dataDir, err := filepath.Abs(options.DataDir)
 	if err != nil {
 		return err
 	}
-
-	var app *application.App
-	var window *application.WebviewWindow
-	show := func() {
-		setDockIcon(true)
-		window.Show()
-		window.UnMinimise()
-		window.Focus()
-	}
-	var localize func(locale string)
-	app = application.New(application.Options{
+	s := &shell{options: options, page: &url.URL{}, webview: true}
+	s.app = application.New(application.Options{
 		Name: options.Title,
 		Icon: icon,
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID:               uniqueID,
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) { show() },
+			OnSecondInstanceLaunch: func(application.SecondInstanceData) { go s.show() },
 		},
-		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir},
-		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
-			if target, ok := strings.CutPrefix(message, openPrefix); ok {
-				openBrowser(app, target)
-			} else if action, ok := strings.CutPrefix(message, windowPrefix); ok && windowActions[action] != nil {
-				windowActions[action](window)
-			} else if locale, ok := strings.CutPrefix(message, localePrefix); ok {
-				localize(locale)
-			}
-		},
+		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir, DisableQuitOnLastWindowClosed: closeToTray, WndProcInterceptor: func(hwnd uintptr, msg uint32, wParam, lParam uintptr) (uintptr, bool) {
+			return s.tray.message(hwnd, msg, wParam, lParam)
+		}},
+		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) { s.handle(message) },
+		ErrorHandler:      func(err error) { logging.Error(logging.SourceService, "桌面窗口错误", "错误", err) },
+		WarningHandler:    func(message string) { logging.Warn(logging.SourceService, "桌面窗口警告", "内容", message) },
 	})
+	s.webview = runtime.GOOS != "windows" || s.app.Env.Info().PlatformInfo["WebView2"] != ""
+	hosted := trayHosted()
+	s.tray = addTray(s)
+	s.app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(*application.ApplicationEvent) { go s.show() })
+	return s.serve(func(address string) error {
+		page, err := windowURL(address)
+		if err != nil {
+			return err
+		}
+		s.page = page
+		switch {
+		case !s.webview:
+			logging.Warn(logging.SourceService, "没有找到 WebView2 运行时，管理端在默认浏览器中打开")
+			if !options.Hidden {
+				s.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { go s.show() })
+			}
+		case !options.Hidden || !hosted:
+			if !hosted {
+				logging.Info(logging.SourceService, "桌面环境没有系统托盘，关闭窗口即退出")
+			}
+			s.open()
+		default:
+			s.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { setDockIcon(false) })
+		}
+		return nil
+	})
+}
 
+// webviewLog 是标准库 log 的输出：Wails 的 WebView2 层在退出进程前经它报告的错误写入服务日志，全部输出照常写到标准错误
+type webviewLog struct{}
+
+// Write 把带 [WebView2 Error] 的一行记为桌面窗口错误
+func (webviewLog) Write(p []byte) (int, error) {
+	if _, text, ok := strings.Cut(string(p), "[WebView2 Error] "); ok {
+		logging.Error(logging.SourceService, "桌面窗口错误", "错误", strings.TrimSpace(text))
+	}
+	return os.Stderr.Write(p)
+}
+
+// serve 在后台运行服务，开始监听后以管理端地址调用 ready（先行结束时不调用），再运行应用直到退出；服务先于退出结束时显示其错误并退出应用
+func (s *shell) serve(ready func(address string) error) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var served error
@@ -124,23 +181,91 @@ func Run(options Options) error {
 	listening := make(chan string, 1)
 	go func() {
 		defer close(finished)
-		served = options.Serve(ctx, func(url string) { listening <- url })
+		served = s.options.Serve(ctx, func(address string) { listening <- address })
 	}()
-	page := &url.URL{}
 	select {
 	case address := <-listening:
-		if page, err = windowURL(address); err != nil {
+		if err := ready(address); err != nil {
 			return err
 		}
 	case <-finished:
 	}
+	s.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+		go func() {
+			<-finished
+			if ctx.Err() != nil {
+				return
+			}
+			if served != nil {
+				showError(s.app, served)
+			}
+			s.app.Quit()
+		}()
+	})
+	err := s.app.Run()
+	cancel()
+	<-finished
+	return errors.Join(err, served)
+}
 
-	window = app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:            options.Title,
-		URL:              page.String(),
+// handle 处理页面发来的消息：外链、窗口按钮、当前页面、忙碌状态与托盘所用的界面语言和配色
+func (s *shell) handle(message string) {
+	if s.tray.handle(message) {
+		return
+	}
+	if target, ok := strings.CutPrefix(message, openPrefix); ok {
+		openBrowser(s.app, target)
+	} else if action, ok := strings.CutPrefix(message, windowPrefix); ok && windowActions[action] != nil {
+		if window := s.current(); window != nil {
+			windowActions[action](window)
+		}
+	} else if route, ok := strings.CutPrefix(message, routePrefix); ok && strings.HasPrefix(route, "/") {
+		s.mu.Lock()
+		s.route = route
+		s.mu.Unlock()
+	} else if busy, ok := strings.CutPrefix(message, busyPrefix); ok {
+		s.setBusy(busy == "1")
+	}
+}
+
+// current 返回当前主窗口，关闭到托盘后为 nil
+func (s *shell) current() *application.WebviewWindow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.window
+}
+
+// show 显示主窗口，没有时创建；没有 WebView2 时在默认浏览器中打开管理端
+func (s *shell) show() {
+	if !s.webview {
+		openBrowser(s.app, origin(s.page))
+		return
+	}
+	s.opening.Lock()
+	window := s.current()
+	if window == nil {
+		window = s.open()
+	}
+	s.opening.Unlock()
+	s.mu.Lock()
+	s.closing = false
+	s.mu.Unlock()
+	setDockIcon(true)
+	window.Show()
+	window.UnMinimise()
+	window.Focus()
+}
+
+// open 按上次关闭前的位置、大小、最大化状态与页面创建主窗口
+func (s *shell) open() *application.WebviewWindow {
+	s.mu.Lock()
+	bounds, maxed, route := s.bounds, s.maxed, s.route
+	s.mu.Unlock()
+	options := application.WebviewWindowOptions{
+		Title:            s.options.Title,
+		URL:              pageAt(s.page, route),
 		Frameless:        runtime.GOOS != "darwin",
 		Mac:              application.MacWindow{TitleBar: application.MacTitleBarHiddenInset, InvisibleTitleBarHeight: 48},
-		Hidden:           options.Hidden || page.Host == "",
 		Width:            1280,
 		Height:           800,
 		MinWidth:         960,
@@ -149,13 +274,20 @@ func Run(options Options) error {
 		Linux:            application.LinuxWindow{WebviewGpuPolicy: application.WebviewGpuPolicyNever},
 		// WebView2CompositionHosting 让页面报告的标题栏与窗口按钮参与 Windows 命中测试，悬停最大化按钮时系统显示贴靠布局
 		Windows: application.WindowsWindow{WebView2CompositionHosting: true},
-	})
+	}
+	if bounds.Width > 0 {
+		options.InitialPosition = application.WindowXY
+		options.X, options.Y, options.Width, options.Height = bounds.X, bounds.Y, bounds.Width, bounds.Height
+	}
+	window := s.app.Window.NewWithOptions(options)
+	if maxed {
+		window.Maximise()
+	}
+	s.mu.Lock()
+	s.window = window
+	s.mu.Unlock()
 	if closeToTray {
-		window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
-			window.Hide()
-			setDockIcon(false)
-			event.Cancel()
-		})
+		window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) { s.closed(window, event) })
 	}
 	notifyMaximised := func(*application.WindowEvent) {
 		window.ExecJS(fmt.Sprintf("window.dispatchEvent(new CustomEvent(%q,{detail:%t}))", maximisedEvent, window.IsMaximised()))
@@ -168,78 +300,42 @@ func Run(options Options) error {
 			notifyMaximised(event)
 		})
 	}
-	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(*application.ApplicationEvent) { show() })
-
-	tray := app.SystemTray.New()
-	if runtime.GOOS == "darwin" {
-		tray.SetTemplateIcon(trayTemplate)
-	} else {
-		tray.SetIcon(icon)
-	}
-	tray.SetTooltip(options.Title)
-	current := ""
-	localize = func(locale string) {
-		text, ok := menuTexts[locale]
-		if !ok || locale == current {
-			return
-		}
-		current = locale
-		tray.SetMenu(trayMenu(app, text, page, show))
-		if runtime.GOOS == "darwin" {
-			app.Menu.Set(appMenu(text))
-		}
-	}
-	localize(defaultLocale)
-	tray.OnClick(show)
-
-	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
-		if options.Hidden {
-			setDockIcon(false)
-		}
-		go func() {
-			<-finished
-			if ctx.Err() != nil {
-				return
-			}
-			if served != nil {
-				showError(app, served)
-			}
-			app.Quit()
-		}()
-	})
-	err = app.Run()
-	cancel()
-	<-finished
-	return errors.Join(err, served)
+	return window
 }
 
-// trayMenu 返回托盘菜单：显示窗口、在浏览器中打开、复制 API 地址、开机启动与退出
-func trayMenu(app *application.App, text menuText, page *url.URL, show func()) *application.Menu {
-	menu := app.NewMenu()
-	menu.Add(text.ShowWindow).OnClick(func(*application.Context) { show() })
-	menu.Add(text.OpenInBrowser).OnClick(func(*application.Context) { openBrowser(app, page.Scheme+"://"+page.Host+"/") })
-	menu.Add(text.CopyAddress).OnClick(func(*application.Context) {
-		app.Clipboard.SetText(page.Scheme + "://" + page.Host)
-	})
-	menu.AddSeparator()
-	autostart := text.Autostart
-	if runtime.GOOS == "darwin" {
-		autostart = text.OpenAtLogin
+// closed 在关闭窗口时记下位置、大小与最大化状态并隐藏 Dock 图标；页面忙碌时只隐藏窗口，空闲后再销毁
+func (s *shell) closed(window *application.WebviewWindow, event *application.WindowEvent) {
+	maxed, minimised, bounds := window.IsMaximised(), window.IsMinimised(), window.Bounds()
+	s.mu.Lock()
+	keep := s.window == window && s.busy
+	if s.window == window {
+		s.maxed = maxed
+		if !maxed && !minimised {
+			s.bounds = bounds
+		}
+		if keep {
+			s.closing = true
+		} else {
+			s.window, s.busy, s.closing = nil, false, false
+		}
 	}
-	enabled, _ := app.Autostart.IsEnabled()
-	menu.AddCheckbox(autostart, enabled).OnClick(func(click *application.Context) {
-		toggle := app.Autostart.Disable
-		if click.IsChecked() {
-			toggle = func() error { return enableAutostart(app) }
-		}
-		if err := toggle(); err != nil {
-			click.ClickedMenuItem().SetChecked(!click.IsChecked())
-			showError(app, err)
-		}
-	})
-	menu.AddSeparator()
-	menu.Add(text.Quit).OnClick(func(*application.Context) { app.Quit() })
-	return menu
+	s.mu.Unlock()
+	setDockIcon(false)
+	if keep {
+		event.Cancel()
+		window.Hide()
+	}
+}
+
+// setBusy 记录页面是否有进行中的生成或未保存的修改，窗口已关闭隐藏且页面空闲时销毁窗口与 WebView
+func (s *shell) setBusy(busy bool) {
+	s.mu.Lock()
+	s.busy = busy
+	window, release := s.window, !busy && s.closing
+	s.mu.Unlock()
+	if release && window != nil {
+		window.Close()
+	}
 }
 
 // windowURL 返回带桌面宿主查询参数的窗口地址
@@ -254,13 +350,31 @@ func windowURL(raw string) (*url.URL, error) {
 	return page, nil
 }
 
-// enableAutostart 登记开机启动；能隐藏到托盘的平台启动后只显示托盘
-func enableAutostart(app *application.App) error {
+// origin 返回管理端首页地址，不带桌面宿主参数
+func origin(page *url.URL) string {
+	return page.Scheme + "://" + page.Host + "/"
+}
+
+// pageAt 返回管理端在 route（路径与查询）上的地址，查询带桌面宿主参数；route 为空或无法解析时为首页
+func pageAt(page *url.URL, route string) string {
+	address, err := url.Parse(route)
+	if route == "" || err != nil {
+		return page.String()
+	}
+	query := address.Query()
+	query.Set(shellQuery, "desktop")
+	target := *page
+	target.Path, target.RawQuery = address.Path, query.Encode()
+	return target.String()
+}
+
+// autostartOptions 返回开机启动的登记参数；能隐藏到托盘的平台启动后只显示托盘
+func autostartOptions() application.AutostartOptions {
 	options := application.AutostartOptions{Identifier: uniqueID}
 	if closeToTray {
 		options.Arguments = []string{"--" + HiddenFlag}
 	}
-	return app.Autostart.EnableWithOptions(options)
+	return options
 }
 
 // markReady 让窗口立即执行 ExecJS，外部页面不会自行发送 wails:runtime:ready
@@ -279,7 +393,7 @@ func openBrowser(app *application.App, target string) {
 	}
 }
 
-// showError 用原生对话框显示错误，关闭对话框后返回
+// showError 用原生对话框按界面语言显示错误，关闭对话框后返回
 func showError(app *application.App, err error) {
-	app.Dialog.Error().SetTitle(app.Config().Name).SetMessage(err.Error()).Show()
+	app.Dialog.Error().SetTitle(app.Config().Name).SetMessage(i18n.Translate(locale(), err.Error())).Show()
 }

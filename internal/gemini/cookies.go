@@ -16,7 +16,7 @@ func (c *Client) replaceCookies(cookies []Cookie) error {
 	for _, cookie := range cookies {
 		cookie = normalizeCookie(cookie, "gemini.google.com")
 		if cookie.Name == "" {
-			return fmt.Errorf("cookie name is empty")
+			return fmt.Errorf("Cookie 名为空")
 		}
 		target, err := cookieURL(cookie)
 		if err != nil {
@@ -76,7 +76,7 @@ func (c *Client) absorbResponseCookies(requestURL *url.URL, resp *http.Response)
 		return nil
 	}
 	if err := c.save(c.cookieSnapshotLocked()); err != nil {
-		return fmt.Errorf("persist account cookies: %w", err)
+		return fmt.Errorf("保存账号 Cookie: %w", err)
 	}
 	return nil
 }
@@ -98,6 +98,13 @@ func (c *Client) cookieSnapshotLocked() []Cookie {
 	return result
 }
 
+// cookieSnapshot 返回当前 Cookie 的副本
+func (c *Client) cookieSnapshot() []Cookie {
+	c.cookieMu.Lock()
+	defer c.cookieMu.Unlock()
+	return c.cookieSnapshotLocked()
+}
+
 func normalizeCookie(cookie Cookie, requestHost string) Cookie {
 	cookie.Domain = strings.ToLower(strings.TrimSpace(cookie.Domain))
 	if cookie.Domain == "" {
@@ -116,7 +123,7 @@ func cookieKey(cookie Cookie) string {
 func cookieURL(cookie Cookie) (*url.URL, error) {
 	host := strings.TrimPrefix(cookie.Domain, ".")
 	if host == "" {
-		return nil, fmt.Errorf("cookie %q has no domain", cookie.Name)
+		return nil, fmt.Errorf("Cookie %q 没有域名", cookie.Name)
 	}
 	return url.Parse("https://" + host + "/")
 }

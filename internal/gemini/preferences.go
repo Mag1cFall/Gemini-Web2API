@@ -89,7 +89,7 @@ func (c *Client) fetchPreferences(ctx context.Context, bootstrap Bootstrap) (Pre
 	if err != nil {
 		return nil, err
 	}
-	payload, err := c.batchExecute(ctx, bootstrap, batchRequest{rpcID: preferencesRPC, payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]"})
+	payload, err := c.batchExecute(ctx, bootstrap, batchRequest{rpcID: preferencesRPC, payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[]"})
 	if err != nil {
 		return nil, err
 	}

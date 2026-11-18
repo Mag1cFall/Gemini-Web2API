@@ -31,7 +31,7 @@ func SetFile(path string, enabled bool, maxTotalMB int) error {
 	if std.format == "json" {
 		std.fileWrite = newJSONConsole(std.file)
 	} else {
-		std.fileWrite = newTextConsole(std.file).write
+		std.fileWrite = newTextConsole(std.file, fileTimeLayout).write
 	}
 	return nil
 }

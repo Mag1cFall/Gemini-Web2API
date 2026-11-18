@@ -17,6 +17,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/pricing"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
 	"github.com/gin-gonic/gin"
 )
@@ -63,6 +64,7 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.PUT("/accounts/:id", h.updateAccount)
 	api.DELETE("/accounts/:id", h.deleteAccount)
 	api.POST("/accounts/:id/verify", h.verifyAccount)
+	api.POST("/accounts/:id/usage", h.refreshUsage)
 	api.GET("/accounts/import/chrome", h.chromeProfiles)
 	api.POST("/accounts/import/chrome", h.importChrome)
 	api.POST("/accounts/import/cookie/discover", h.discoverCookie)
@@ -76,6 +78,9 @@ func Mount(router *gin.Engine, deps Deps) {
 		c.JSON(http.StatusOK, h.Pool.Usage(c.Request.Context(), refresh))
 	})
 	api.GET("/models", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"models": h.models()}) })
+	api.GET("/routes", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"routes": publicRoutes(router)}) })
+	api.GET("/hedge", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"models": h.hedgeStats()}) })
+	api.GET("/directories", h.directories)
 	api.GET("/cooldowns", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"cooldowns": h.cooldowns()}) })
 	api.DELETE("/accounts/:id/cooldowns/:scope", h.clearCooldown)
 	api.GET("/requests", func(c *gin.Context) {
@@ -83,9 +88,13 @@ func Mount(router *gin.Engine, deps Deps) {
 	})
 	api.POST("/requests/:id/cancel", h.cancelRequest)
 	api.GET("/requests/:id/body", requestdb.BodyHandler(deps.Store))
-	api.GET("/logs", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"logs": logging.History()}) })
+	api.GET("/logs", requestdb.LogsHandler(deps.Store))
 	api.DELETE("/logs", func(c *gin.Context) {
 		logging.Clear()
+		if err := deps.Store.ClearLogs(c.Request.Context()); err != nil {
+			writeError(c, http.StatusInternalServerError, "logs_clear_failed", err.Error())
+			return
+		}
 		c.Status(http.StatusNoContent)
 	})
 	api.GET("/usage", requestdb.UsageHandler(deps.Store))
@@ -174,6 +183,8 @@ type modelInfo struct {
 	MaxContextWindow int      `json:"max_context_window"`
 	Accounts         []string `json:"accounts"`
 	CoolingAccounts  []string `json:"cooling_accounts"`
+	// Price 为按 Gemini API 单价估算费用所用的当前单价，没有对应单价的模型没有该字段
+	Price *pricing.Price `json:"price,omitempty"`
 }
 
 // modelTools 是官网工具条目在模型页的工具名
@@ -203,12 +214,16 @@ func (h *handler) models() []modelInfo {
 		if model.AliasOf != "" {
 			target = model.AliasOf
 		}
-		models = append(models, modelInfo{
+		info := modelInfo{
 			ID: model.ID, DisplayName: model.DisplayName, Description: model.Description, Default: model.Default,
 			AliasOf: model.AliasOf, Tool: modelTools[model.Feature], Capabilities: nonNil(model.Capabilities), ThinkingLevels: levels,
 			MinContextWindow: model.MinInputTokenLimit, MaxContextWindow: model.MaxInputTokenLimit,
 			Accounts: nonNil(model.Accounts), CoolingAccounts: nonNil(cooling[target]),
-		})
+		}
+		if price, ok := pricing.Lookup(target, now); ok {
+			info.Price = &price
+		}
+		models = append(models, info)
 	}
 	return models
 }
@@ -354,6 +369,24 @@ func (h *handler) updateConfig(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, h.settings.View())
+}
+
+// route 是一个公开接口的方法与 gin 路径
+type route struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+// publicRoutes 列出 router 上注册的全部公开接口，不含管理端与就绪检查
+func publicRoutes(router *gin.Engine) []route {
+	routes := []route{}
+	for _, item := range router.Routes() {
+		if strings.HasPrefix(item.Path, "/api/") || item.Path == "/readyz" {
+			continue
+		}
+		routes = append(routes, route{Method: item.Method, Path: item.Path})
+	}
+	return routes
 }
 
 // writeError 以管理端错误体结束请求

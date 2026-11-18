@@ -38,7 +38,7 @@ var rotationPageHeaderOrder = []string{
 	"sec-ch-ua-platform", "sec-ch-ua-platform-version", "sec-ch-ua-model", "sec-ch-ua-bitness",
 	"sec-ch-ua-wow64", "sec-ch-ua-full-version-list", "sec-ch-ua-form-factors",
 	"upgrade-insecure-requests", "user-agent", "accept",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -49,7 +49,7 @@ var rotateHeaderOrder = []string{
 	"sec-ch-ua", "sec-ch-ua-bitness", "sec-ch-ua-model", "sec-ch-ua-mobile", "sec-ch-ua-form-factors",
 	"sec-ch-ua-wow64", "sec-ch-ua-arch", "sec-ch-ua-full-version", "user-agent", "content-type",
 	"sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -68,8 +68,9 @@ type cookieRotation struct {
 
 // CookieRotator 以官网轮换页的方式为一个账号轮换 Cookie，同一时间只由一个调用方使用
 type CookieRotator struct {
-	client   *Client
-	rotation *cookieRotation
+	client       *Client
+	rotation     *cookieRotation
+	nextRotateAt time.Time
 	// rotated 表示已轮换过，第一轮紧接启动或恢复时的初始化，会话有效时不重读账号状态
 	rotated bool
 }
@@ -81,44 +82,72 @@ func NewCookieRotator(client *Client) *CookieRotator {
 
 // Rotate 轮换 __Secure-1PSIDTS 并经 ListAccounts 确认会话有效，释放请求槽后重读账号状态，返回下次轮换前的等待时间；会话失效且账号带续签材料时在请求槽内续签并重读
 func (r *CookieRotator) Rotate(ctx context.Context) (time.Duration, error) {
-	reload, err := r.rotateSession(ctx)
+	reload, wait, err := r.rotateSession(ctx)
 	if err == nil && reload {
 		err = r.client.reload(ctx)
 	}
-	return r.interval(), err
+	return wait, err
 }
 
-// rotateSession 在账号请求槽内轮换 Cookie 并确认会话，会话失效时续签并重读，返回会话有效时是否还需重读账号状态
-func (r *CookieRotator) rotateSession(ctx context.Context) (bool, error) {
+// rotateSession 在账号请求槽内按各自到期时间刷新设备绑定 Cookie 与轮换页 Cookie，会话失效时续签并重读，返回是否还需重读账号状态与下次等待时间
+func (r *CookieRotator) rotateSession(ctx context.Context) (bool, time.Duration, error) {
 	c := r.client
 	release, err := c.AcquireRequest(ctx)
 	if err != nil {
-		return false, err
+		return false, r.interval(), err
 	}
 	defer release()
+
+	var boundWait time.Duration
+	if c.rotateBound != nil {
+		if boundWait, err = c.rotateBound(ctx, c.cookieSnapshot, c.sendBound); err != nil {
+			return false, max(boundWait, minRotationInterval), err
+		}
+	}
+	now := time.Now()
+	if !r.nextRotateAt.IsZero() && now.Before(r.nextRotateAt) {
+		wait := r.nextRotateAt.Sub(now)
+		if boundWait > 0 && boundWait < wait {
+			wait = boundWait
+		}
+		return false, max(wait, minRotationInterval), nil
+	}
+
 	first := !r.rotated
 	r.rotated = true
 	version := c.cookieVersion.Load()
 	err = r.rotate(ctx)
 	if err == nil {
+		wait := r.scheduleNext(time.Now(), boundWait)
 		listed, signedIn, err := c.listAccountsSignedIn(ctx)
 		if err != nil {
-			return false, err
+			return false, wait, err
 		}
 		if signedIn || !listed {
-			return !first, nil
+			return !first, wait, nil
 		}
 		if c.refresh == nil {
-			return false, retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
+			return false, wait, retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
 		}
 	} else if !isAuthenticationError(err) || c.refresh == nil {
-		return false, err
+		return false, r.scheduleNext(time.Now(), boundWait), err
 	}
 	if err := c.refreshCookies(ctx, version); err != nil {
-		return false, err
+		return false, r.scheduleNext(time.Now(), boundWait), err
 	}
 	r.rotation = nil
-	return false, c.reload(ctx)
+	return false, r.scheduleNext(time.Now(), boundWait), c.reload(ctx)
+}
+
+// scheduleNext 返回下次轮换前的等待时间：设备绑定 Cookie 先于轮换页间隔到期时记下轮换页的到期时间并返回绑定 Cookie 的等待时间
+func (r *CookieRotator) scheduleNext(now time.Time, boundWait time.Duration) time.Duration {
+	interval := r.interval()
+	if boundWait > 0 && boundWait < interval {
+		r.nextRotateAt = now.Add(interval)
+		return max(boundWait, minRotationInterval)
+	}
+	r.nextRotateAt = time.Time{}
+	return interval
 }
 
 // reload 重读首页、模型目录、偏好与用量，让目录、偏好与上下文窗口跟上账号变化，失败时保留原有 bootstrap
@@ -152,7 +181,7 @@ func (r *CookieRotator) rotate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	applyChromeHeaders(req, c.language, true)
+	c.applyChromeHeaders(req, true)
 	req.Header.Set("pragma", "no-cache")
 	req.Header.Set("cache-control", "no-cache")
 	req.Header.Set("content-type", "application/json")
@@ -166,7 +195,7 @@ func (r *CookieRotator) rotate(ctx context.Context) error {
 	req.Header.Set("priority", "u=1, i")
 	req.Header[http.HeaderOrderKey] = rotateHeaderOrder
 	req.Header[http.PHeaderOrderKey] = pseudoHeaderOrder
-	body, err := c.doRotationRequest(req, "rotate cookies")
+	body, err := c.doRotationRequest(req, "刷新登录 Cookie")
 	if err != nil {
 		return err
 	}
@@ -182,9 +211,9 @@ func (c *Client) loadRotationPage(ctx context.Context) (cookieRotation, error) {
 	if err != nil {
 		return cookieRotation{}, err
 	}
-	applyChromeHeaders(req, c.language, true)
+	c.applyChromeHeaders(req, true)
 	req.Header.Set("upgrade-insecure-requests", "1")
-	req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("accept", c.chromeBuild().accept)
 	req.Header.Set("sec-fetch-site", "same-site")
 	req.Header.Set("sec-fetch-mode", "navigate")
 	req.Header.Set("sec-fetch-dest", "iframe")
@@ -193,13 +222,13 @@ func (c *Client) loadRotationPage(ctx context.Context) (cookieRotation, error) {
 	req.Header.Set("priority", "u=0, i")
 	req.Header[http.HeaderOrderKey] = rotationPageHeaderOrder
 	req.Header[http.PHeaderOrderKey] = pseudoHeaderOrder
-	body, err := c.doRotationRequest(req, "rotate cookies page")
+	body, err := c.doRotationRequest(req, "打开 Cookie 刷新页")
 	if err != nil {
 		return cookieRotation{}, err
 	}
 	match := rotationInitPattern.FindSubmatch(body)
 	if match == nil {
-		return cookieRotation{}, retryableProtocolError("rotate cookies page has no init parameters", nil)
+		return cookieRotation{}, retryableProtocolError("Cookie 刷新页缺少初始化参数", nil)
 	}
 	fields := make([]any, 4)
 	fields[1] = string(match[1])
@@ -229,7 +258,7 @@ func (c *Client) doRotationRequest(req *http.Request, operation string) ([]byte,
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, transportProtocolError("read "+operation+" response", err)
+		return nil, transportProtocolError(operation, err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		return nil, err
@@ -238,6 +267,19 @@ func (c *Client) doRotationRequest(req *http.Request, operation string) ([]byte,
 		return nil, responseStatusError(resp, operation)
 	}
 	return body, nil
+}
+
+// sendBound 以账号的客户端发出设备绑定会话刷新请求并写回响应 Cookie，返回状态码与响应头
+func (c *Client) sendBound(req *http.Request) (int, http.Header, error) {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, transportProtocolError("刷新设备绑定会话", err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return 0, nil, transportProtocolError("刷新设备绑定会话", err)
+	}
+	return resp.StatusCode, resp.Header, c.absorbResponseCookies(req.URL, resp)
 }
 
 // listAccountsSignedIn 以 Chrome 浏览器进程的方式请求 ListAccounts，返回是否列出账号与 Cookie 中目标账号的会话是否有效
@@ -251,13 +293,13 @@ func (c *Client) listAccountsSignedIn(ctx context.Context) (bool, bool, error) {
 	req.Header.Set("sec-fetch-site", "none")
 	req.Header.Set("sec-fetch-mode", "no-cors")
 	req.Header.Set("sec-fetch-dest", "empty")
-	req.Header.Set("user-agent", ChromeUserAgent)
+	req.Header.Set("user-agent", ChromeUserAgent(c.chromeBuild().major))
 	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
 	req.Header.Set("accept-language", c.language)
 	req.Header.Set("priority", "u=4, i")
 	req.Header[http.HeaderOrderKey] = listAccountsHeaderOrder
 	req.Header[http.PHeaderOrderKey] = pseudoHeaderOrder
-	body, err := c.doRotationRequest(req, "list accounts")
+	body, err := c.doRotationRequest(req, "读取 Cookie 中的账号列表")
 	if err != nil {
 		return false, false, err
 	}
@@ -268,18 +310,18 @@ func (c *Client) listAccountsSignedIn(ctx context.Context) (bool, bool, error) {
 func parseListAccounts(body []byte, index int) (bool, bool, error) {
 	data, err := base64.StdEncoding.DecodeString(string(bytes.TrimSpace(body)))
 	if err != nil {
-		return false, false, fmt.Errorf("decode list accounts response: %w", err)
+		return false, false, fmt.Errorf("解析 Cookie 中的账号列表: %w", err)
 	}
 	var account []byte
 	for position := 0; len(data) > 0; {
 		number, kind, size := protowire.ConsumeTag(data)
 		if size < 0 {
-			return false, false, fmt.Errorf("decode list accounts response: %w", protowire.ParseError(size))
+			return false, false, fmt.Errorf("解析 Cookie 中的账号列表: %w", protowire.ParseError(size))
 		}
 		data = data[size:]
 		size = protowire.ConsumeFieldValue(number, kind, data)
 		if size < 0 {
-			return false, false, fmt.Errorf("decode list accounts response: %w", protowire.ParseError(size))
+			return false, false, fmt.Errorf("解析 Cookie 中的账号列表: %w", protowire.ParseError(size))
 		}
 		if number == 1 && kind == protowire.BytesType {
 			if position == index {
@@ -295,7 +337,7 @@ func parseListAccounts(body []byte, index int) (bool, bool, error) {
 	}
 	fields, err := protoFields(account)
 	if err != nil {
-		return false, false, fmt.Errorf("decode list accounts account: %w", err)
+		return false, false, fmt.Errorf("解析 Cookie 中的账号: %w", err)
 	}
 	return true, fields[9] == uint64(1) && fields[14] != uint64(1), nil
 }

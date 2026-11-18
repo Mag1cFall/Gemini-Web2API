@@ -1,11 +1,13 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -35,6 +37,8 @@ type generationResult struct {
 	ProviderModel  string
 	// StopSequence 是截断正文的停止序列
 	StopSequence string
+	// Truncated 表示输出达到请求的输出上限后被截断
+	Truncated bool
 }
 
 type adapterEmitError struct{ err error }
@@ -360,9 +364,9 @@ func runGeneration(
 	if usage := result.Accumulator.Usage; usage != nil {
 		trace.SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
 	}
-	trace.SetResult(result.ProviderModel, result.ConversationID, string(result.Accumulator.FinishReason))
+	trace.SetResult(result.ProviderModel, result.Accumulator.Session.CID, string(result.Accumulator.FinishReason))
 	if len(bridge.Definitions) > 0 {
-		if _, calls, err := bridge.Parse(result.Accumulator.Primary().Text); err == nil {
+		if _, calls, err := bridge.truncated(result.Truncated).Parse(result.Accumulator.Primary().Text); err == nil {
 			trace.SetToolCalls(len(calls))
 		}
 	}
@@ -508,7 +512,7 @@ func runGenerationAttempts(
 		result, winnerID, err := raceFirstEvent(ctx, pool, requestedModel, client, accountID, releaseRequest, run, onEvent, target)
 		accountID = winnerID
 		if err == nil {
-			result.Model = requestedModel
+			result.Model = cmp.Or(result.Model, requestedModel)
 			if projection != nil {
 				projection.keepSentText(result.Accumulator.candidate(0))
 			}
@@ -537,6 +541,10 @@ func runGenerationAttempts(
 		if rebuildable && sessionKey != "" && !newSession && (isAccountContextError(err) || errors.Is(err, gemini.ErrGuestAttachments) || retryableAccountError(err) && !visibleOutput()) {
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
+			if (gemini.TransientError(err) || isOutputMismatchError(err)) && !visibleOutput() && regenerated < regenerations {
+				regenerated++
+				regenerating = true
+			}
 			sessionKey, newSession, requestAttempts = "", true, availableAccounts
 			continue
 		}
@@ -671,6 +679,7 @@ func runGenerationWithClient(
 	accumulator := NewEventAccumulator()
 	accumulator.candidate(0).Text, accumulator.candidate(0).Thought = resume.text, resume.thought
 	cutter := newStopCutter(bridge.Stop)
+	limit := newOutputLimit(bridge.MaxTokens, resume)
 	if cutter != nil {
 		cutter.text, cutter.sent, cutter.toolCalls = resume.text, len(resume.text), len(bridge.Definitions) > 0
 	}
@@ -683,7 +692,7 @@ func runGenerationWithClient(
 		}
 	}
 	handle := func(event gemini.Event) error {
-		if cutter != nil && cutter.matched != "" {
+		if cutter != nil && cutter.matched != "" || limit != nil && limit.hit {
 			return nil
 		}
 		if event.Candidate == 0 && event.Kind == gemini.EventText && resume.text != "" {
@@ -706,6 +715,9 @@ func runGenerationWithClient(
 				trace.UpstreamEvent(string(event.Kind))
 			}
 		}
+		if event.Candidate == 0 && event.Kind == gemini.EventThought && resume.text != "" {
+			return nil
+		}
 		if event.Kind == gemini.EventMetadata && event.Metadata != nil {
 			metadata := *event.Metadata
 			metadata.ModelName = actualProviderModel(client, model, event.Metadata)
@@ -713,6 +725,12 @@ func runGenerationWithClient(
 		}
 		if err := accumulator.Apply(event); err != nil {
 			return err
+		}
+		if limit != nil {
+			var hit bool
+			if event, hit = limit.apply(accumulator, event); hit {
+				stopStream()
+			}
 		}
 		if cutter != nil && event.Kind == gemini.EventText && event.Candidate == 0 {
 			delta, hit := cutter.cut(accumulator.Primary().Text)
@@ -754,7 +772,7 @@ func runGenerationWithClient(
 			err = handle(gemini.Event{Kind: gemini.EventText, Operation: gemini.SnapshotAppend, Delta: rest, Snapshot: aligner.held})
 		}
 	}
-	if cutter != nil && cutter.matched != "" && errors.Is(err, context.Canceled) && ctx.Err() == nil {
+	if (cutter != nil && cutter.matched != "" || limit != nil && limit.hit) && errors.Is(err, context.Canceled) && ctx.Err() == nil {
 		err = nil
 	}
 	if err == nil && cutter != nil {
@@ -767,9 +785,16 @@ func runGenerationWithClient(
 			}
 		}
 	}
+	if err != nil && len(bridge.Definitions) > 0 && ctx.Err() == nil && callsComplete(accumulator.Primary().Text) {
+		if _, calls, parseErr := bridge.Parse(accumulator.Primary().Text); parseErr == nil && len(calls) > 0 {
+			trace.AttemptFailed(accountID, upstreamStatus(err), err, false)
+			trace.Progress("WARN", accountID, "回答写完函数调用后上游出错，按已收到的调用正常结束", "原因", err.Error())
+			accumulator.FinishReason, err = gemini.FinishStop, nil
+		}
+	}
 	if err != nil {
 		if usage := estimatedUsage(accumulator, promptTokens); usage.CompletionTokens+usage.ThoughtTokens > 0 {
-			trace.SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
+			trace.AddAttemptUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
 		}
 		return generationResult{}, err
 	}
@@ -786,10 +811,15 @@ func runGenerationWithClient(
 		}
 	}
 	primary := accumulator.Primary()
-	if strings.TrimSpace(primary.Text) == "" && len(primary.Codes) == 0 && len(primary.Media) == 0 && (cutter == nil || cutter.matched == "") {
+	truncated := limit != nil && limit.hit
+	if truncated && len(bridge.Definitions) > 0 {
+		accumulator.candidate(0).Text = dropUnfinishedCalls(primary.Text)
+		primary = accumulator.Primary()
+	}
+	if strings.TrimSpace(primary.Text) == "" && len(primary.Codes) == 0 && len(primary.Media) == 0 && (cutter == nil || cutter.matched == "") && !truncated {
 		return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: "Gemini Web 完成了回答但没有正文、代码、媒体或工具调用", Retryable: true}}
 	}
-	if len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0 {
+	if (len(bridge.Definitions) > 0 || len(bridge.JSONSchema) > 0 || len(bridge.Enum) > 0) && !truncated {
 		if _, _, err := bridge.Parse(primary.Text); err != nil {
 			return generationResult{}, &outputMismatchError{err: &gemini.ProtocolError{HTTPStatus: 502, Message: err.Error(), Retryable: true}, validation: len(bridge.Definitions) == 0}
 		}
@@ -810,16 +840,18 @@ func runGenerationWithClient(
 			conversation.Update(accumulator.Session)
 			snapshot = conversation.Snapshot()
 		}
-		keys := []string{responseID, snapshot.CID}
-		remember := allowNewSession && sessionKey != "" && !isHistoryKey(sessionKey)
-		if remember {
-			keys = append(keys, sessionKey)
-		}
-		conversations.put(conversation, accountID, nextContextTokens, keys...)
-		pool.BindSession(responseID, accountID)
-		pool.BindSession(snapshot.CID, accountID)
-		if remember {
-			pool.BindSession(sessionKey, accountID)
+		if continueSession.Load() {
+			keys := []string{responseID, snapshot.CID}
+			remember := allowNewSession && sessionKey != "" && !isHistoryKey(sessionKey)
+			if remember {
+				keys = append(keys, sessionKey)
+			}
+			conversations.put(conversation, accountID, nextContextTokens, keys...)
+			pool.BindSession(responseID, accountID)
+			pool.BindSession(snapshot.CID, accountID)
+			if remember {
+				pool.BindSession(sessionKey, accountID)
+			}
 		}
 		accumulator.Session = snapshot
 	}
@@ -831,31 +863,80 @@ func runGenerationWithClient(
 			break
 		}
 	}
+	if len(bridge.SearchDomains) > 0 || len(bridge.SearchBlocked) > 0 {
+		for _, candidate := range accumulator.Candidates {
+			candidate.Citations = slices.DeleteFunc(candidate.Citations, func(citation gemini.Citation) bool {
+				return !domainsPermit(citation.URL, bridge.SearchDomains, bridge.SearchBlocked)
+			})
+		}
+	}
 	result := generationResult{
-		Accumulator:    accumulator,
-		Client:         client,
-		ConversationID: accumulator.Session.CID,
-		ResponseID:     responseID,
-		ProviderModel:  providerModel,
+		Model:         model.ID,
+		Accumulator:   accumulator,
+		Client:        client,
+		ResponseID:    responseID,
+		ProviderModel: providerModel,
+	}
+	if continueSession.Load() {
+		result.ConversationID = accumulator.Session.CID
 	}
 	if cutter != nil {
 		result.StopSequence = cutter.matched
 	}
+	result.Truncated = truncated
 	return result, nil
 }
 
-// estimatedUsage 按已收到的正文、代码与思考的本地计数估算用量
+// estimatedUsage 按已收到的正文、代码与思考的本地计数估算用量，生成图片按 Gemini API 图片模型的输出 token 数计入回答
 func estimatedUsage(accumulator *EventAccumulator, promptTokens int) *gemini.Usage {
 	primary := accumulator.Primary()
 	completionTokens := tokencount.Text(primary.Text)
 	for _, code := range primary.Codes {
 		completionTokens += tokencount.Text(code.Content)
 	}
+	for _, media := range primary.Media {
+		switch media.Type {
+		case gemini.MediaGeneratedImage:
+			completionTokens += generatedImageTokens(media.Width, media.Height)
+		case gemini.MediaGeneratedVideo:
+			completionTokens += generatedVideoTokens(media.Width, media.Height)
+		}
+	}
 	thoughtTokens := tokencount.Text(primary.Thought)
 	return &gemini.Usage{
 		PromptTokens: promptTokens, CompletionTokens: completionTokens, ThoughtTokens: thoughtTokens,
 		TotalTokens: promptTokens + completionTokens + thoughtTokens,
 	}
+}
+
+// generatedImageTokens 返回一张生成图片按 Gemini 3.1 Flash Image 计的输出 token 数：长边不超过 512、1024、2048 像素分别为 747、1120、1680，更大为 2520，尺寸未知时按 1024
+func generatedImageTokens(width, height int) int {
+	switch side := max(width, height); {
+	case side == 0 || side > 512 && side <= 1024:
+		return 1120
+	case side <= 512:
+		return 747
+	case side <= 2048:
+		return 1680
+	}
+	return 2520
+}
+
+// videoSegmentSeconds 是 Create video 每次生成的视频时长
+const videoSegmentSeconds = 10
+
+// generatedVideoTokens 返回一段生成视频按 Gemini Omni 1.2 Flash 计的输出 token 数：短边不超过 360、720、1080 像素时每秒分别为 1931、5792、8688，更大为 17376，尺寸未知时按 720
+func generatedVideoTokens(width, height int) int {
+	perSecond := 17376
+	switch side := min(width, height); {
+	case side == 0 || side > 360 && side <= 720:
+		perSecond = 5792
+	case side <= 360:
+		perSecond = 1931
+	case side <= 1080:
+		perSecond = 8688
+	}
+	return perSecond * videoSegmentSeconds
 }
 
 func retryableAccountError(err error) bool {
@@ -881,6 +962,33 @@ func isOutputMismatchError(err error) bool {
 func isAccountContextError(err error) bool {
 	var contextErr *accountContextError
 	return errors.As(err, &contextErr)
+}
+
+// publicModelID 返回响应中的模型 ID：别名取映射目标，改名前的旧 ID 取当前 ID，gemini-default 在各就绪账号（没有账号时为访客会话）的默认模型相同时取该模型
+func publicModelID(pool *balancer.AccountPool, requested string) string {
+	id := gemini.CanonicalModelID(config.MapModel(requested))
+	if id != gemini.DefaultModelID {
+		return id
+	}
+	accounts := pool.CatalogAccounts()
+	if slices.ContainsFunc(accounts, func(account balancer.CatalogAccount) bool { return account.Ready && !account.Guest }) {
+		accounts = slices.DeleteFunc(accounts, func(account balancer.CatalogAccount) bool { return account.Guest })
+	}
+	resolved := ""
+	for _, account := range accounts {
+		if !account.Ready {
+			continue
+		}
+		model, err := account.Client.ResolveModel(id)
+		if err != nil {
+			continue
+		}
+		if resolved != "" && resolved != model.ID {
+			return id
+		}
+		resolved = model.ID
+	}
+	return cmp.Or(resolved, id)
 }
 
 // actualProviderModel 返回上游实际回答的模型 ID：变体模型通过核对时取该变体的型号，其余按上游给出的模型名与 hash 在账号目录中查找

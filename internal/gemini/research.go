@@ -160,7 +160,7 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decode
 		turns, _ := arrayAt(payload, 0)
 		if !slices.ContainsFunc(turns, func(turn any) bool { rid, _ := stringPath(turn, 0, 1); return rid == session.RID }) {
 			if missing++; missing >= turnMissingPolls {
-				return retryableProtocolError("gemini conversation has no turn for this request", nil)
+				return retryableProtocolError("官网会话中没有本次请求的回答", nil)
 			}
 			continue
 		}

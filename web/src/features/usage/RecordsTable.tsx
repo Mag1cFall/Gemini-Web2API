@@ -7,6 +7,7 @@ import { SearchInput } from '@/components/ui/search-input'
 import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { Table, Td, Th } from '@/components/ui/table'
+import { Tooltip } from '@/components/ui/tooltip'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import { useUsageFormat } from '@/features/usage/format'
 import { usageMessages } from '@/features/usage/messages'
@@ -137,17 +138,17 @@ export function RecordsTable({
       case 'model':
         return (
           <Td key={column} className="max-w-cell">
-            <span title={record.model} className="block truncate font-mono">
-              {record.model || '—'}
-            </span>
+            <Tooltip overflow label={record.model}>
+              <span className="block truncate font-mono">{record.model || '—'}</span>
+            </Tooltip>
           </Td>
         )
       case 'account':
         return (
           <Td key={column} className="max-w-cell">
-            <span title={record.account} className="block truncate">
-              {f.label('account', record.account)}
-            </span>
+            <Tooltip overflow label={f.label('account', record.account)}>
+              <span className="block truncate">{f.label('account', record.account)}</span>
+            </Tooltip>
           </Td>
         )
       case 'protocol':
@@ -239,7 +240,7 @@ export function RecordsTable({
             ...codes.map((code) => ({ value: code, label: code })),
           ]}
           size="sm"
-          className="w-[144px]"
+          className="min-w-[144px]"
         />
         <Popover>
           <PopoverTrigger asChild>
@@ -369,7 +370,7 @@ export function RecordsTable({
             label: fill(m.pageSize, { count: size }),
           }))}
           size="sm"
-          className="w-[128px]"
+          className="min-w-[128px]"
         />
         <span className="ml-auto tabular-nums">{fill(m.page, { page: current.page + 1 })}</span>
         <Button

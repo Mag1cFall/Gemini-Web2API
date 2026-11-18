@@ -18,7 +18,7 @@ const rpcTimeout = 600 * time.Second
 var streamIdleTimeout = 600 * time.Second
 
 // errStreamIdle 表示生成流长时间没有语义事件
-var errStreamIdle = errors.New("gemini web stream idle")
+var errStreamIdle = errors.New("官网的回答长时间没有新内容")
 
 // idleKey 是生成流上下文中最近进展时间的键
 type idleKey struct{}
@@ -66,6 +66,6 @@ func streamIdleError(ctx context.Context) error {
 	}
 	return &ProtocolError{
 		HTTPStatus: 504, Code: 504, Retryable: true, Cause: errStreamIdle,
-		Message: fmt.Sprintf("Gemini Web 生成流 %s 没有新内容，只有心跳", streamIdleTimeout),
+		Message: fmt.Sprintf("官网的回答 %s 没有新内容", streamIdleTimeout),
 	}
 }

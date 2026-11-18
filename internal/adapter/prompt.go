@@ -363,20 +363,30 @@ type transcriptTurn struct {
 	Text string
 }
 
-// renderTranscript 把消息与协议说明写成网页提示词：单条用户消息与官网一样发送原文并接上协议说明；多轮消息写成 ChatML 角色块，协议说明作为最后一个系统块，末尾留出助手轮
+// renderTranscript 把消息与协议说明写成网页提示词：单条用户消息与官网一样发送原文并接上协议说明；开头的系统消息写成普通文字，其余消息写成 ChatML 角色块，协议说明作为最后一个系统块，末尾留出助手轮
 func renderTranscript(turns []transcriptTurn, suffix string) string {
+	turns = clientTurns(turns)
 	if len(turns) == 1 && turns[0].Role == "user" {
 		return turns[0].Text + suffix
 	}
 	var builder strings.Builder
+	for len(turns) > 0 && turns[0].Role == "system" {
+		builder.WriteString(strings.TrimSpace(turns[0].Text) + "\n\n")
+		turns = turns[1:]
+	}
 	for _, turn := range turns {
-		fmt.Fprintf(&builder, "<|im_start|>%s\n%s\n<|im_end|>\n", turn.Role, strings.TrimRightFunc(turn.Text, unicode.IsSpace))
+		builder.WriteString(transcriptBlock(turn))
 	}
 	if suffix = strings.TrimSpace(suffix); suffix != "" {
 		fmt.Fprintf(&builder, "<|im_start|>system\n%s\n<|im_end|>\n", suffix)
 	}
 	builder.WriteString("<|im_start|>assistant\n")
 	return builder.String()
+}
+
+// transcriptBlock 返回一轮对话在转录中的角色块
+func transcriptBlock(turn transcriptTurn) string {
+	return "<|im_start|>" + turn.Role + "\n" + strings.TrimRightFunc(turn.Text, unicode.IsSpace) + "\n<|im_end|>\n"
 }
 
 func appendTranscriptObject(builder *strings.Builder, value interface{}) {

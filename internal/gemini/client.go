@@ -30,7 +30,6 @@ const (
 	geminiOrigin = "https://gemini.google.com"
 	pathInit     = "/app"
 	pathBatch    = "/_/BardChatUi/data/batchexecute"
-	pathGenerate = "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
 )
 
 // Client 表示与单一账号身份绑定的 Gemini Web 协议客户端
@@ -40,6 +39,8 @@ type Client struct {
 	mediaClient tls_client.HttpClient
 	accountID   string
 	language    string
+	// chrome 是账号绑定的 Chrome 构建
+	chrome      *chromeBuild
 	clientID    string
 	saveHistory bool
 	// guest 表示未登录的访客会话
@@ -60,6 +61,8 @@ type Client struct {
 	// releaseHook 在请求槽释放后调用，由账号池设置
 	releaseHook atomic.Pointer[func()]
 	usage       atomic.Pointer[UsageInfo]
+	// abuse 是最近一次初始化读取的账号异常状态
+	abuse atomic.Pointer[AbuseStatus]
 	// authUser 是目标账号在多账号 Cookie 中的序号，pathPrefix 是它在官网路径中的 /u/N 前缀，默认账号为 0 与空
 	authUser   int
 	pathPrefix string
@@ -71,6 +74,7 @@ type Client struct {
 	cookies     map[string]Cookie
 	save        func([]Cookie) error
 	refresh     func(context.Context) ([]Cookie, error)
+	rotateBound func(context.Context, func() []Cookie, func(*http.Request) (int, http.Header, error)) (time.Duration, error)
 	refreshSlot *semaphore.Weighted
 	// cookieVersion 是续签成功的次数，请求发出前读取，续签时与之比较以复用其他请求刚完成的续签
 	cookieVersion atomic.Uint64
@@ -160,11 +164,15 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		language = defaultLanguage
 	}
 	concurrency := max(source.Concurrency, 1)
-	httpClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL)
+	chrome, err := chromeBuildFor(source.Chrome)
+	if err != nil {
+		return nil, err
+	}
+	httpClient, err := chrome.httpClient(requestCeilingSeconds, tls_client.WithProxyUrl(proxyURL))
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
-	mediaClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL)
+	mediaClient, err := newMediaClient(requestCeilingSeconds, proxyURL, chrome.major)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
@@ -177,6 +185,7 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		mediaClient: mediaClient,
 		accountID:   source.ID,
 		language:    language,
+		chrome:      chrome,
 		clientID:    clientID,
 		saveHistory: saveHistory,
 		requestSlot: semaphore.NewWeighted(int64(concurrency)),
@@ -186,6 +195,7 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 		cookies:     make(map[string]Cookie, len(source.Cookies)),
 		save:        source.Save,
 		refresh:     source.Refresh,
+		rotateBound: source.RotateBound,
 		timer:       pageTimer{origin: time.Now()},
 	}
 	if source.AuthUser > 0 {
@@ -262,10 +272,10 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	c.applyNavigationHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return transportProtocolError("bootstrap request", err)
+		return transportProtocolError("打开 Gemini 页面", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		protocolErr := responseStatusError(resp, "bootstrap")
+		protocolErr := responseStatusError(resp, "打开 Gemini 页面")
 		if allowRefresh && renewable(protocolErr) && c.refresh != nil {
 			resp.Body.Close()
 			if err := c.refreshCookies(ctx, version); err != nil {
@@ -279,7 +289,7 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
-		return transportProtocolError("read bootstrap page", err)
+		return transportProtocolError("打开 Gemini 页面", err)
 	}
 	bootstrap, err := parseBootstrap(string(body))
 	if err == nil && bootstrap.SNlM0e == "" && !c.guest {
@@ -312,12 +322,25 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 			}
 			return c.init(ctx, false)
 		}
-		return retryableProtocolError(fmt.Sprintf("initialize models and preferences: %v", err), err)
+		return retryableProtocolError(err.Error(), err)
+	}
+	if !c.guest {
+		if status, err := c.fetchAbuseStatus(ctx, bootstrap); err != nil {
+			logging.Warn(c.displayAccountID(), "读取账号异常状态失败", "原因", err)
+		} else {
+			c.abuse.Store(&status)
+			if status.Restricted {
+				logging.Warn(c.displayAccountID(), "Google 对该账号给出异常标记，账号可能受限，可在浏览器打开 Gemini 查看提示", "状态码", status.Code, "信号", status.Signal)
+			}
+		}
 	}
 	if c.guest {
 		catalog.removeTools()
 	} else if gems, err := c.fetchGems(ctx, bootstrap); err != nil {
 		logging.Warn(c.displayAccountID(), "读取 Gem 列表失败", "原因", err)
+		if previous, err := c.bootstrapSnapshot(); err == nil {
+			catalog.addGems(previous.Catalog.gems())
+		}
 	} else {
 		catalog.addGems(gems)
 	}
@@ -358,6 +381,9 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	request.tools = bootstrap.Catalog.toolSelection(request.Feature, request.AspectRatio)
 	request.personalIntelligence = bootstrap.Catalog.personalIntelligence
 	temporaryChat := c.TemporaryChats() && !request.Feature.savedChatOnly() && !request.ClientTools
+	if request.Conversation.Snapshot().Saved {
+		temporaryChat = false
+	}
 	if allowRefresh && c.freeTier() {
 		if listed, signedIn, err := c.listAccountsSignedIn(ctx); err == nil && listed && !signedIn {
 			return c.restream(ctx, version, request, emit)
@@ -394,7 +420,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		return err
 	}
 	if uploads > 0 {
-		trace.SetStage("接受上传条款")
+		trace.SetStage("同意上传条款")
 		if err := c.acceptUploadTerms(ctx, bootstrap, model, request.ThinkingLevel); err != nil {
 			return uploadFailed(err)
 		}
@@ -440,18 +466,9 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if previousMode == 0 {
 		previousMode = selectedModelMode(bootstrap.Catalog, bootstrap.Preferences)
 	}
-	payload, err := buildGeneratePayload(request, bootstrap.Language, bootstrap.Preferences, streamRequestID, contextID, temporaryChat, model.Mode != previousMode)
-	if err != nil {
-		return err
-	}
+	inner := buildGeneratePayload(request, bootstrap.Language, bootstrap.Preferences, streamRequestID, contextID, temporaryChat, model.Mode != previousMode)
 	streamCtx, stopWatch := watchStreamIdle(ctx)
 	defer stopWatch()
-	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.pageURL(pathGenerate), strings.NewReader(protocolForm(payload, bootstrap.SNlM0e)))
-	if err != nil {
-		return err
-	}
-	req.URL.RawQuery = c.frontendQuery(bootstrap, bootstrap.Language)
-	c.applyXHRHeaders(req)
 	chatMode := any(0)
 	if temporaryChat {
 		chatMode = 1
@@ -459,49 +476,45 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if request.researchConfirm {
 		chatMode = nil
 	}
-	modelHeader, err := buildModelHeader(c.features(), model, bootstrap.Language, chatMode, c.tierCode(), request.ThinkingLevel, c.clientID, bootstrap.BL, c.pageTiming())
-	if err != nil {
-		return err
-	}
-	req.Header.Set("x-goog-ext-525001261-jspb", modelHeader)
-	requestHeader, _ := json.Marshal([]any{streamRequestID, 1})
-	req.Header.Set("x-goog-ext-525005358-jspb", string(requestHeader))
-	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
-	req.Header.Set("x-goog-ext-73010990-jspb", "[0,0,0]")
+	modelHeader := buildModelHeader(c.features(), model, bootstrap.Language, chatMode, c.tierCode(), request.ThinkingLevel, c.clientID, bootstrap.BL, c.pageTiming())
 
-	trace.SetStage("等待上游响应头")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
+	failed := func(err error) error {
 		if idle := streamIdleError(streamCtx); idle != nil {
 			return idle
 		}
-		return transportProtocolError("generate request", err)
-	}
-	progress(streamCtx)
-	trace.UpstreamResponse(resp.StatusCode)
-	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
-		resp.Body.Close()
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		protocolErr := responseStatusError(resp, "generate")
-		if allowRefresh && renewable(protocolErr) && c.refresh != nil {
-			resp.Body.Close()
+		if allowRefresh && renewable(err) && c.refresh != nil {
 			return c.restream(ctx, version, request, emit)
 		}
-		if err := emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError}); err != nil {
-			return err
+		var protocolErr *ProtocolError
+		if errors.As(err, &protocolErr) && !errors.Is(err, ErrTransport) {
+			if err := emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError}); err != nil {
+				return err
+			}
 		}
-		return protocolErr
+		return err
 	}
-	if taskTerms {
-		if err := c.acceptTaskTerms(ctx, bootstrap, model, request.ThinkingLevel); err != nil {
-			return err
+	trace.SetStage("等待官网响应")
+	session, err := c.openChannel(streamCtx, c.channelHeaders(bootstrap, modelHeader, streamRequestID))
+	if err != nil {
+		return failed(err)
+	}
+	pollCtx, stopPoll := context.WithCancelCause(streamCtx)
+	defer stopPoll(nil)
+	go func() {
+		err := session.send(streamCtx,
+			[]any{[]any{[]any{1, model.Hash, bootstrap.Language, streamRequestID}, 0, nil, nil, nil, nil, nil, []any{nil, nil, nil, nil, []any{inner, nil, nil, 1}}}},
+			[]any{nil, []any{1, nil, nil, nil, nil, nil, nil, nil, []any{request.Prompt}}},
+		)
+		if err == nil && taskTerms {
+			err = c.acceptTaskTerms(ctx, bootstrap, model, request.ThinkingLevel)
 		}
-	}
+		if err != nil {
+			stopPoll(err)
+		}
+	}()
 	next := request.Conversation.Snapshot()
 	next.Turns++
+	next.Saved = !temporaryChat
 	decodeState := NewConversationStateFrom(next)
 	withDownload := func(event Event) error {
 		if event.Media != nil && event.Media.download != nil {
@@ -513,20 +526,27 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	decoder := NewFrameDecoder()
 	decoder.heartbeat = trace.UpstreamHeartbeat
 	decoder.awaitIncomplete = request.researchPlan != nil
-	err = decoder.Decode(tracedReader{reader: resp.Body, trace: trace}, decodeState, func(event Event) error {
+	err = decoder.Decode(func(yield func(streamRecord) error) error {
+		return session.records(pollCtx, trace, yield)
+	}, decodeState, func(event Event) error {
 		progress(streamCtx)
 		return guard.Emit(event)
 	})
+	if cause := context.Cause(pollCtx); cause != nil && streamCtx.Err() == nil {
+		go session.terminate()
+		return failed(cause)
+	}
 	if idle := streamIdleError(streamCtx); idle != nil && ctx.Err() == nil {
 		snapshot := decodeState.Snapshot()
-		go c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model, request.ThinkingLevel)
+		go c.cancelGeneration(session, bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model, request.ThinkingLevel)
 		return idle
 	}
 	if ctx.Err() != nil {
 		snapshot := decodeState.Snapshot()
-		go c.stopGeneration(bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model, request.ThinkingLevel)
+		go c.cancelGeneration(session, bootstrap, snapshot.CID, snapshot.RID, decoder.metadata.ControlToken, model, request.ThinkingLevel)
 		return ctx.Err()
 	}
+	go session.close()
 	if request.researchPlan != nil {
 		*request.researchPlan = decoder.researchConfirm
 	}
@@ -546,7 +566,7 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		}
 	}
 	if err != nil {
-		if allowRefresh && !guard.Emitted() && isAuthenticationError(err) && c.refresh != nil {
+		if allowRefresh && !guard.Emitted() && renewable(err) && c.refresh != nil {
 			return c.restream(ctx, version, request, emit)
 		}
 		return err
@@ -575,6 +595,17 @@ func (c *Client) restream(ctx context.Context, version uint64, request GenerateR
 
 // stopTimeout 是客户端取消后通知上游停止生成的最长等待
 const stopTimeout = 10 * time.Second
+
+// cancelGeneration 在客户端取消或生成流停顿后按官网停止回答的顺序发送结束消息与 NkpXw，再关闭生成会话
+func (c *Client) cancelGeneration(session *channel, bootstrap Bootstrap, cid string, rid string, token string, model Model, level ThinkingLevel) {
+	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+	defer cancel()
+	if err := session.end(ctx); err != nil {
+		logging.Warn(c.displayAccountID(), "通知上游停止生成失败", "原因", err)
+	}
+	c.stopGeneration(bootstrap, cid, rid, token, model, level)
+	session.terminate()
+}
 
 // stopGeneration 在客户端取消后发送官网“停止回答”的 NkpXw 请求，参数为会话、回答标识与首帧的控制令牌
 func (c *Client) stopGeneration(bootstrap Bootstrap, cid string, rid string, token string, model Model, level ThinkingLevel) {
@@ -716,6 +747,22 @@ func (c *Client) accountStatusError(status int) error {
 	return nil
 }
 
+// rpcActions 是各 batchexecute RPC 的用途，写入错误消息代替 RPC 名
+var rpcActions = map[string]string{
+	"otAQ7b":       "读取模型目录",
+	preferencesRPC: "读取账号偏好",
+	"GPRiHf":       "读取账号异常状态",
+	listGemsRPC:    "读取 Gem 列表",
+	"NkpXw":        "通知官网停止生成",
+	"GzXR5e":       "删除网页会话",
+	"F6qrid":       "读取服务条款版本",
+	"UVb0T":        "同意服务条款",
+	"L5adhe":       "保存账号偏好",
+	"c8o8Fe":       "读取原图下载地址",
+	"hNvQHb":       "读取会话中的回答",
+	speechRPC:      "生成朗读音频",
+}
+
 // batchRequest 是一次 batchexecute RPC 的参数，mode、variant 与 level 为页面当前选中的模型 mode、变体键与思考强度，页面加载阶段为零值
 type batchRequest struct {
 	rpcID      string
@@ -729,8 +776,6 @@ type batchRequest struct {
 	// conversation 表示会话内请求，请求头第 7 槽写 Temporary Chat 状态，功能编号与生成请求相同重复两遍
 	conversation  bool
 	temporaryChat bool
-	// untimed 表示请求头计时槽的耗时为空数组，页面发送 UVb0T 时如此
-	untimed bool
 }
 
 // batchExecute 以页面 XHR 发送单个 batchexecute RPC 并返回其 payload
@@ -749,15 +794,9 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 	}
 	req.URL.RawQuery = c.batchQuery(bootstrap, rpcID, call.sourcePath, call.language)
 	c.applyXHRHeaders(req)
-	var timing []any
-	if call.untimed {
-		timing = []any{[]any{}, pageDuration(float64(time.Now().UnixMilli())), hostTimezone}
-	} else {
-		timing = c.pageTiming()
-	}
-	header := buildGenericHeader(c.features(), call.language, c.clientID, bootstrap.BL, call.mode, call.variant, call.level, timing)
+	header := buildGenericHeader(c.features(), call.language, c.clientID, bootstrap.BL, call.mode, call.variant, call.level)
 	if call.conversation {
-		header = buildConversationHeader(c.features(), call.language, c.clientID, bootstrap.BL, call.temporaryChat, call.mode, call.variant, call.level, timing)
+		header = buildConversationHeader(c.features(), call.language, c.clientID, bootstrap.BL, call.temporaryChat, call.mode, call.variant, call.level)
 	}
 	req.Header.Set("x-goog-ext-525001261-jspb", header)
 	req.Header.Set("x-goog-ext-73010989-jspb", call.extension)
@@ -765,7 +804,7 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		logging.Debug(c.displayAccountID(), "上游 RPC 失败", "rpc", rpcID, "耗时", time.Since(started), "错误", err)
-		return nil, transportProtocolError(rpcID+" request", err)
+		return nil, transportProtocolError(rpcActions[rpcID], err)
 	}
 	logging.Debug(c.displayAccountID(), "上游 RPC", "rpc", rpcID, "状态", resp.StatusCode, "耗时", time.Since(started))
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
@@ -774,7 +813,7 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, responseStatusError(resp, rpcID)
+		return nil, responseStatusError(resp, rpcActions[rpcID])
 	}
 
 	var payload []any
@@ -787,10 +826,10 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 		}
 		encoded, _ := stringAt(record, 2)
 		if encoded == "" {
-			return rpcStatusError(rpcID, record)
+			return rpcStatusError(rpcActions[rpcID], record)
 		}
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("decode %s payload: %w", rpcID, err)
+			return fmt.Errorf("解析上游响应失败: %w", err)
 		}
 		found = true
 		return nil
@@ -799,7 +838,7 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 		return nil, err
 	}
 	if !found {
-		return nil, retryableProtocolError(fmt.Sprintf("%s response has no payload", rpcID), nil)
+		return nil, retryableProtocolError("上游没有返回数据", nil)
 	}
 	return payload, nil
 }
@@ -826,12 +865,12 @@ var navigationHeaderOrder = []string{
 	"sec-ch-ua-platform", "sec-ch-ua-platform-version", "sec-ch-ua-model", "sec-ch-ua-bitness",
 	"sec-ch-ua-wow64", "sec-ch-ua-full-version-list", "sec-ch-ua-form-factors",
 	"upgrade-insecure-requests", "user-agent", "accept",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
 
-// xhrHeaderOrder 是 Chrome 稳定版页面 batchexecute 与 StreamGenerate XHR 的请求头顺序
+// xhrHeaderOrder 是 Chrome 稳定版页面 batchexecute XHR 的请求头顺序
 var xhrHeaderOrder = []string{
 	"content-length", "sec-ch-ua-full-version-list", "sec-ch-ua-platform", "sec-ch-ua",
 	"sec-ch-ua-bitness", "sec-ch-ua-model", "sec-ch-ua-mobile", "x-same-domain",
@@ -839,7 +878,7 @@ var xhrHeaderOrder = []string{
 	"sec-ch-ua-full-version", "content-type", "x-goog-ext-525001261-jspb",
 	"x-goog-ext-525005358-jspb", "x-goog-ext-73010990-jspb", "user-agent",
 	"sec-ch-ua-platform-version", "accept", "origin",
-	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-sec-ch-ua-not-a-border",
+	"x-browser-channel", "x-browser-year", "x-browser-validation", "x-browser-copyright", "x-client-data", "x-sec-ch-ua-not-a-border",
 	"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
 	"accept-encoding", "accept-language", "cookie", "priority",
 }
@@ -848,8 +887,8 @@ var xhrHeaderOrder = []string{
 var pseudoHeaderOrder = []string{":method", ":authority", ":scheme", ":path"}
 
 func (c *Client) applyNavigationHeaders(req *http.Request) {
-	applyChromeHeaders(req, c.language, true)
-	req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	c.applyChromeHeaders(req, true)
+	req.Header.Set("accept", c.chromeBuild().accept)
 	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
 	req.Header.Set("sec-fetch-dest", "document")
 	req.Header.Set("sec-fetch-mode", "navigate")
@@ -862,7 +901,7 @@ func (c *Client) applyNavigationHeaders(req *http.Request) {
 }
 
 func (c *Client) applyXHRHeaders(req *http.Request) {
-	applyChromeHeaders(req, c.language, true)
+	c.applyChromeHeaders(req, true)
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
 	req.Header.Set("content-type", "application/x-www-form-urlencoded;charset=utf-8")
@@ -988,7 +1027,7 @@ func (c *Client) refreshCookies(ctx context.Context, version uint64) error {
 	c.cookieMu.Unlock()
 	if c.save != nil {
 		if err := c.save(snapshot); err != nil {
-			return retryableProtocolError(fmt.Sprintf("persist refreshed account cookies: %v", err), err)
+			return retryableProtocolError(fmt.Sprintf("保存续签的 Cookie 失败: %v", err), err)
 		}
 	}
 	return nil
@@ -1025,7 +1064,7 @@ func (c *Client) CloseIdleConnections() {
 
 // ProbeProxy 经代理以浏览器导航请求官网首页，首页返回 200 时报告耗时
 func ProbeProxy(ctx context.Context, proxyURL string) (time.Duration, error) {
-	httpClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL)
+	httpClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -1042,7 +1081,7 @@ func ProbeProxy(ctx context.Context, proxyURL string) (time.Duration, error) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, responseStatusError(resp, "proxy probe")
+		return 0, responseStatusError(resp, "检测代理")
 	}
 	return time.Since(started), nil
 }
@@ -1098,13 +1137,13 @@ func responseStatusError(resp *http.Response, operation string) *ProtocolError {
 	if err == nil && strings.HasSuffix(location.Hostname(), "google.com") && strings.HasPrefix(location.Path, "/sorry") {
 		return &ProtocolError{
 			HTTPStatus: http.StatusTooManyRequests, Code: http.StatusTooManyRequests, Retryable: true, Cause: ErrCaptcha,
-			Message: fmt.Sprintf("gemini %s 被 Google 人机验证页拦截（HTTP %d 重定向到 %s%s）", operation, resp.StatusCode, location.Host, location.Path),
+			Message: fmt.Sprintf("%s时被 Google 人机验证页拦截（HTTP %d 重定向到 %s%s）", operation, resp.StatusCode, location.Host, location.Path),
 		}
 	}
 	if err == nil && location.Hostname() == resp.Request.URL.Hostname() && strings.HasPrefix(resp.Request.URL.Path, "/u/") {
 		return &ProtocolError{
 			HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,
-			Message: fmt.Sprintf("gemini %s 的 %s 重定向到 %s，Cookie 会话中没有该账号序号", operation, resp.Request.URL.Path, location.Path),
+			Message: fmt.Sprintf("%s时 %s 重定向到 %s，Cookie 会话中没有该账号序号", operation, resp.Request.URL.Path, location.Path),
 		}
 	}
 	return httpStatusError(resp.StatusCode, operation)
@@ -1115,7 +1154,7 @@ func httpStatusError(status int, operation string) *ProtocolError {
 	err := &ProtocolError{
 		HTTPStatus: status,
 		Code:       status,
-		Message:    fmt.Sprintf("gemini %s returned HTTP %d", operation, status),
+		Message:    fmt.Sprintf("%s时官网返回 HTTP %d", operation, status),
 		Retryable:  status == 401 || status == 403 || status == 429 || status >= 500,
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
@@ -1130,7 +1169,7 @@ func streamInterrupted(err error) bool {
 }
 
 // ErrTransport 表示连接、TLS 或代理等网络层失败，与账号状态无关
-var ErrTransport = errors.New("gemini web transport failure")
+var ErrTransport = errors.New("网络或上游临时故障")
 
 // TransientError 判断错误是否为与账号状态无关的一次性上游失败：网络层失败、生成流在结束帧前中断或停顿，以及没有具体原因的 5xx（上游 HTTP 5xx、5xx 错误记录、没有完成的候选）
 func TransientError(err error) bool {
@@ -1142,16 +1181,25 @@ func transportProtocolError(operation string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return retryableProtocolError(fmt.Sprintf("gemini %s: %v", operation, err), errors.Join(ErrTransport, err))
+	cause := err
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		cause = urlErr.Err
+	}
+	return retryableProtocolError(fmt.Sprintf("%s时网络连接出错: %v", operation, cause), errors.Join(ErrTransport, err))
 }
 
-// rpcStatusError 把没有载荷的 wrb.fr 记录第 5 项的 RPC 状态转为协议错误，会话失效时状态为 7（PERMISSION_DENIED），按 HTTP 403 处理
-func rpcStatusError(rpcID string, record []any) *ProtocolError {
+// rpcStatusError 把没有载荷的 wrb.fr 记录第 5 项的 RPC 状态转为协议错误，operation 为该 RPC 的用途；会话失效时状态为 7（PERMISSION_DENIED），按 HTTP 403 处理；消息只带状态码，不带 RPC 名与原始数组
+func rpcStatusError(operation string, record []any) *ProtocolError {
 	status, _ := arrayAt(record, 5)
-	if code, _ := intAt(status, 0); code == 7 {
-		return httpStatusError(http.StatusForbidden, rpcID)
+	code, ok := intAt(status, 0)
+	if code == 7 {
+		return httpStatusError(http.StatusForbidden, operation)
 	}
-	return retryableProtocolError(fmt.Sprintf("%s returned no payload, status %v", rpcID, status), nil)
+	if !ok {
+		return retryableProtocolError(operation+"时官网没有返回数据", nil)
+	}
+	return retryableProtocolError(fmt.Sprintf("%s时官网没有返回数据，状态码 %d", operation, code), nil)
 }
 
 func retryableProtocolError(message string, cause error) *ProtocolError {

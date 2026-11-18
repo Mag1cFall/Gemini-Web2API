@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
-	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
@@ -39,6 +40,11 @@ type ResponsesTool struct {
 	Size              string          `json:"size,omitempty"`
 	Format            json.RawMessage `json:"format,omitempty"`
 	Tools             []ResponsesTool `json:"tools,omitempty"`
+	Filters           json.RawMessage `json:"filters,omitempty"`
+	UserLocation      json.RawMessage `json:"user_location,omitempty"`
+	DisplayWidth      int             `json:"display_width,omitempty"`
+	DisplayHeight     int             `json:"display_height,omitempty"`
+	Environment       json.RawMessage `json:"environment,omitempty"`
 }
 
 // ResponsesRequest 表示 OpenAI Responses 请求
@@ -93,6 +99,10 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "input 与 instructions 不能同时为空")
 			return
 		}
+		if err := continuationInputError("X-Conversation-ID", c.GetHeader("X-Conversation-ID")); err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
 		if err := awaitModel(c, pool, request.Model); err != nil {
 			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
@@ -121,7 +131,11 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			turns = responsesHistoryTurns(request.Input)
 			sessionKey = continuedHistoryKey(request.Instructions, bridge, turns)
 		}
-		rebuilt, instructionsChanged := rebuiltResponsesRequest(c.Request.Context(), store, request)
+		rebuilt, instructionsChanged := rebuiltResponsesRequest(c.Request.Context(), store, request, conversationID)
+		if rebuilt == nil && request.PreviousResponseID != "" && sessionKey == "" {
+			writeResponseNotFound(c, request.PreviousResponseID)
+			return
+		}
 		policy := previousResponsePolicy(request.PreviousResponseID)
 		if rebuilt != nil {
 			policy = sessionRebuild
@@ -154,14 +168,14 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 				responseJobs.Unlock()
 				defer finishResponseJob(responseID)
 				c.Writer = &detachedWriter{ResponseWriter: c.Writer}
-				running := responseShell(responseID, config.MapModel(request.Model), created, "in_progress")
+				running := responseShell(responseID, publicModelID(pool, request.Model), created, "in_progress")
 				applyRequestFields(running, request)
 				saveResponse(ctx, store, request, responseID, created, running)
 			}
 			stream, stop := startStreamWriter(c, openAIKeepalive, !request.Background)
 			defer stop()
 			writer := responseSequenceWriter{writer: c.Writer}
-			streamModel := config.MapModel(request.Model)
+			streamModel := publicModelID(pool, request.Model)
 			startStatus := "in_progress"
 			if request.Background {
 				startStatus = "queued"
@@ -169,7 +183,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			if err := writer.startWith(responseID, streamModel, created, startStatus, request); err != nil {
 				return
 			}
-			stream.setFrame(writer.progressFrame())
+			stream.setPulse(writer.progress)
 			projection := newStreamProjection(bridge, includeThoughts)
 			result, accountID, err := runGeneration(
 				ctx, pool, sessionKey, policy, request.Model, responseID, media, thinkingLevel, bridge,
@@ -245,7 +259,8 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 		saveResponse(ctx, store, request, responseID, created, response)
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
-		c.JSON(http.StatusOK, response)
+		c.Header("X-Provider-Model", result.ProviderModel)
+		c.JSON(http.StatusOK, fieldorder.Official("responses", response))
 	}
 }
 
@@ -273,6 +288,9 @@ func buildResponsesPrompt(c *gin.Context, client *gemini.Client, request Respons
 		messages = append([]ChatMessage{{Role: "system", Content: instructions}}, messages...)
 	}
 	chatRequest := ChatRequest{Messages: messages, Model: request.Model}
+	if request.Truncation == "auto" && !continuation && client != nil {
+		chatRequest.TruncateTo = client.ContextWindow()
+	}
 	return buildOpenAIChatPrompt(c, client, chatRequest, continuation, bridge)
 }
 
@@ -296,7 +314,7 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 		return nil, fmt.Errorf("input 必须是字符串或输入项数组")
 	}
 	messages := make([]ChatMessage, 0, len(items))
-	for _, item := range items {
+	for index, item := range items {
 		var envelope struct {
 			Type      string          `json:"type"`
 			Role      string          `json:"role"`
@@ -306,10 +324,11 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 			Output    json.RawMessage `json:"output"`
 			Name      string          `json:"name"`
 			Namespace string          `json:"namespace"`
-			Arguments string          `json:"arguments"`
+			Arguments json.RawMessage `json:"arguments"`
 			Result    string          `json:"result"`
 			Input     string          `json:"input"`
 			Action    json.RawMessage `json:"action"`
+			Actions   json.RawMessage `json:"actions"`
 			Operation json.RawMessage `json:"operation"`
 			Status    string          `json:"status"`
 		}
@@ -322,7 +341,12 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 		case "function_call_output":
 			messages = append(messages, ChatMessage{Role: "tool", Content: envelope.Output, ToolCallID: envelope.CallID})
 		case "function_call":
-			arguments := envelope.Arguments
+			var arguments string
+			if len(envelope.Arguments) > 0 {
+				if err := json.Unmarshal(envelope.Arguments, &arguments); err != nil {
+					return nil, fmt.Errorf("function_call.arguments: %w", err)
+				}
+			}
 			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(envelope.CallID, qualified(envelope.Namespace, envelope.Name), arguments)}})
 		case "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call":
 			name, arguments := responsesClientCall(envelope.Type, envelope.Input, envelope.Action, envelope.Operation)
@@ -342,9 +366,28 @@ func responsesMessages(raw json.RawMessage, definitions []ToolDefinition) ([]Cha
 				return nil, fmt.Errorf("agent_message: %w", err)
 			}
 			messages = append(messages, ChatMessage{Role: "user", Content: content})
-		case "reasoning":
-		case "code_interpreter_call", "web_search_call":
+		case "computer_call":
+			arguments := rawObject(envelope.Action)
+			if len(envelope.Actions) > 0 && string(envelope.Actions) != "null" {
+				encoded, _ := json.Marshal(map[string]json.RawMessage{"actions": envelope.Actions})
+				arguments = string(encoded)
+			}
+			messages = append(messages, ChatMessage{Role: "assistant", ToolCalls: []OpenAIToolCall{responsesPriorToolCall(cmp.Or(envelope.CallID, envelope.ID), "computer", arguments)}})
+		case "computer_call_output":
+			content, err := computerScreenshotContent(envelope.Output)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, ChatMessage{Role: "tool", Content: content, ToolCallID: envelope.CallID})
+		case "reasoning", "configuration_update", "additional_tools":
+		case "compaction_trigger":
+			if index != len(items)-1 {
+				return nil, fmt.Errorf("compaction_trigger 必须是最后一个输入项")
+			}
+		case "code_interpreter_call", "web_search_call", "file_search_call", "mcp_call", "mcp_list_tools", "mcp_approval_request", "tool_search_call", "tool_search_output", "program", "program_output":
 			messages = append(messages, ChatMessage{Role: "assistant", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
+		case "mcp_approval_response":
+			messages = append(messages, ChatMessage{Role: "user", TranscriptItems: []json.RawMessage{append(json.RawMessage(nil), item...)}})
 		case "image_generation_call":
 			content, err := responseImageContent(envelope.Result)
 			if err != nil {
@@ -382,6 +425,20 @@ func agentMessageContent(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(parts)
 }
 
+// computerScreenshotContent 把 computer_call_output 的截图转为 input_image 内容段
+func computerScreenshotContent(output json.RawMessage) (json.RawMessage, error) {
+	var screenshot struct {
+		Type     string `json:"type"`
+		ImageURL string `json:"image_url,omitempty"`
+		FileID   string `json:"file_id,omitempty"`
+	}
+	if err := json.Unmarshal(output, &screenshot); err != nil {
+		return nil, fmt.Errorf("computer_call_output.output: %w", err)
+	}
+	screenshot.Type = "input_image"
+	return json.Marshal([]any{screenshot})
+}
+
 func responseImageContent(result string) (json.RawMessage, error) {
 	if strings.TrimSpace(result) == "" {
 		return nil, fmt.Errorf("image_generation_call 缺少 result")
@@ -405,6 +462,9 @@ func responsesPriorToolCall(id string, name string, arguments string) OpenAITool
 
 func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), SingleCall: request.ParallelToolCalls != nil && !*request.ParallelToolCalls}
+	if request.MaxOutputTokens != nil {
+		bridge.MaxTokens = *request.MaxOutputTokens
+	}
 	addFunction := func(tool ResponsesTool, namespace string) error {
 		if tool.Name == "" {
 			return fmt.Errorf("function 工具 name 不能为空")
@@ -420,7 +480,7 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 		bridge.Definitions = append(bridge.Definitions, ToolDefinition{Name: tool.Name, Description: tool.Description, Parameters: parameters, Namespace: namespace})
 		return nil
 	}
-	for _, tool := range request.Tools {
+	for _, tool := range slices.Concat(request.Tools, additionalTools(request.Input)) {
 		switch tool.Type {
 		case "function", "custom":
 			if err := addFunction(tool, ""); err != nil {
@@ -428,6 +488,8 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 			}
 		case "local_shell", "shell", "apply_patch":
 			bridge.Definitions = append(bridge.Definitions, responsesClientTools[tool.Type])
+		case "computer", "computer_use_preview":
+			bridge.Definitions = append(bridge.Definitions, computerToolDefinition(tool))
 		case "namespace":
 			for _, inner := range tool.Tools {
 				if inner.Type != "function" && inner.Type != "custom" {
@@ -439,11 +501,16 @@ func responsesToolBridge(request ResponsesRequest) (ToolBridge, error) {
 			}
 		case "code_interpreter":
 			bridge.CodeExecution = true
-		case "web_search", "web_search_preview":
-			bridge.WebSearch = true
+		case "web_search", "web_search_preview", "web_search_2025_08_26", "web_search_preview_2025_03_11":
+			var filters struct {
+				AllowedDomains []string `json:"allowed_domains"`
+			}
+			_ = json.Unmarshal(tool.Filters, &filters)
+			bridge.WebSearch, bridge.SearchDomains, bridge.SearchLocation = true, filters.AllowedDomains, searchLocation(tool.UserLocation)
 		case "image_generation":
 			bridge.ImageGeneration = true
 			bridge.AspectRatio = tool.Size
+		case "file_search", "mcp", "tool_search", "programmatic_tool_calling":
 		default:
 			return ToolBridge{}, fmt.Errorf("不支持的 Responses 工具 %q", tool.Type)
 		}
@@ -527,7 +594,7 @@ func buildResponsesObject(id string, created int64, previousResponseID string, r
 	if err := validateHostedOutput(primary, bridge); err != nil {
 		return nil, err
 	}
-	content, calls, err := bridge.Parse(primary.Text)
+	content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +637,13 @@ func buildResponsesObject(id string, created int64, previousResponseID string, r
 		response["previous_response_id"] = previousResponseID
 	}
 	response["completed_at"] = time.Now().Unix()
-	response["output"], response["conversation_id"], response["provider_model"] = output, result.ConversationID, result.ProviderModel
+	if result.Truncated && len(calls) == 0 {
+		response["status"], response["completed_at"], response["incomplete_details"] = "incomplete", nil, gin.H{"reason": "max_output_tokens"}
+	}
+	response["output"], response["provider_model"] = output, result.ProviderModel
+	if result.ConversationID != "" {
+		response["conversation_id"] = result.ConversationID
+	}
 	if result.Accumulator.Usage != nil {
 		outputTokens := result.Accumulator.Usage.OutputTokens()
 		reasoningTokens := result.Accumulator.Usage.ThoughtTokens
@@ -693,6 +766,8 @@ func responseShell(id string, model string, created int64, status string) gin.H 
 }
 
 type responseSequenceWriter struct {
+	// mu 串行化处理函数与保活协程的事件写出，保证序号连续
+	mu       sync.Mutex
 	writer   http.ResponseWriter
 	sequence int
 	// startAt 是开始写出的事件序号，流式取回保存的响应时为 starting_after 加 1
@@ -710,13 +785,15 @@ type responseSequenceWriter struct {
 }
 
 func (w *responseSequenceWriter) emit(eventType string, payload gin.H) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	payload["type"] = eventType
 	payload["sequence_number"] = w.sequence
 	w.sequence++
 	if w.sequence <= w.startAt {
 		return nil
 	}
-	data, err := json.Marshal(payload)
+	data, err := json.Marshal(fieldorder.Official("responses", payload))
 	if err != nil {
 		return err
 	}
@@ -746,10 +823,9 @@ func (w *responseSequenceWriter) startWith(responseID string, model string, crea
 	return w.emit("response.in_progress", gin.H{"response": running})
 }
 
-// progressFrame 返回上游静默时重发的 response.in_progress 帧，序号沿用开场事件
-func (w *responseSequenceWriter) progressFrame() []byte {
-	data, _ := json.Marshal(gin.H{"type": "response.in_progress", "sequence_number": 1, "response": responseShell(w.responseID, w.model, w.created, "in_progress")})
-	return fmt.Appendf(nil, "event: response.in_progress\ndata: %s\n\n", data)
+// progress 在上游静默时以下一个序号重发 response.in_progress
+func (w *responseSequenceWriter) progress() {
+	_ = w.emit("response.in_progress", gin.H{"response": responseShell(w.responseID, w.model, w.created, "in_progress")})
 }
 
 func (w *responseSequenceWriter) live(event gemini.Event) error {
@@ -943,6 +1019,9 @@ func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *Ev
 			return err
 		}
 	}
+	if response["status"] == "incomplete" {
+		return w.emit("response.incomplete", gin.H{"response": response})
+	}
 	return w.emit("response.completed", gin.H{"response": response})
 }
 
@@ -1052,17 +1131,11 @@ func addedResponseItem(item gin.H) gin.H {
 
 func unsupportedResponsesParameters(request ResponsesRequest) []string {
 	var fields []string
-	if request.MaxOutputTokens != nil {
-		fields = append(fields, "max_output_tokens")
-	}
 	if request.Temperature != nil {
 		fields = append(fields, "temperature")
 	}
 	if request.TopP != nil {
 		fields = append(fields, "top_p")
-	}
-	if request.Truncation != "" {
-		fields = append(fields, "truncation")
 	}
 	for index, tool := range request.Tools {
 		if tool.Type != "image_generation" {

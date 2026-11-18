@@ -93,6 +93,30 @@ Release 的 Windows 包是只含桌面版 `gemini-web2api.exe` 的 zip，`setup`
 
 桌面窗口加载服务的管理端页面，注入脚本 `internal/desktop/page.js` 把外链交给系统浏览器、拦截页面未处理的拖放，在 macOS 与 Linux 上实现标题栏拖动（Linux 另有无边框窗口的边缘缩放），在 Windows 上把标题栏中控件以外的部分与带 `--wails-non-client-region` 的三个窗口按钮报给宿主（WebView2 以 `WebView2CompositionHosting` 组合承载），由系统做标题栏拖动、系统菜单、边缘缩放与最大化按钮的贴靠布局，并在 `<html lang>` 变化时把界面语言报给桌面壳，托盘菜单与 macOS 应用菜单随之换成该语言（`internal/desktop/menu.go`）。窗口按服务实际监听的地址打开；Windows 与 macOS 关闭窗口后留在托盘，macOS 同时隐藏 Dock 图标，Linux 关闭窗口即退出。macOS 菜单栏使用单色模板图标 `internal/desktop/tray-template.png`。
 
+桌面壳的各项位置与消息：
+
+| 项目 | 位置 |
+| --- | --- |
+| 托盘菜单与 macOS 应用菜单文字 | `internal/desktop/menu.go` 的 `menuTexts`，按管理端界面语言给出七种语言的全部菜单项 |
+| 对话框与启动错误消息框文案 | 中文原文经 `internal/i18n` 按系统语言翻译，译文表在 `internal/i18n/messages/` |
+| Windows 开机启动 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的值 `com.mag1cfall.gemini-web2api`（命令带 `--hidden`）；任务管理器的启用状态在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run` 的同名值，首字节 `02` 为启用、`03` 为已停用，托盘菜单的勾选按两处一起判断 |
+| macOS 登录时打开 | `~/Library/LaunchAgents/com.mag1cfall.gemini-web2api.plist` |
+| Linux 开机启动 | `~/.config/autostart/com.mag1cfall.gemini-web2api.desktop` |
+| Windows WebView2 数据 | `%LocalAppData%\Gemini-Web2API\WebView2`，关闭到托盘后窗口销毁、WebView2 进程退出，唤回时按上次的位置与大小重建 |
+| 崩溃记录 | `data/logs/crash.log`，未恢复的 panic 与运行时致命错误连同全部 goroutine 栈追加写入 |
+| 窗口与 WebView 的错误 | Wails 的错误与警告写入服务日志 `桌面窗口错误`、`桌面窗口警告`；Wails 的 WebView2 层在退出进程前经标准库 `log` 输出的 `[WebView2 Error]` 也记为 `桌面窗口错误` |
+
+Windows 托盘图标的消息在 `internal/desktop/menu_windows.go` 处理：
+
+| 消息 | 处理 |
+| --- | --- |
+| `WM_USER+1` 低字 `WM_CONTEXTMENU` | 右键或键盘打开菜单，在托盘图标旁弹出自绘菜单（窗口类 `GeminiWeb2APITrayMenu`），配色随管理端深浅色 |
+| 托盘双击 | 显示窗口，单击不做任何事 |
+| 菜单 `WM_PAINT`、`WM_PRINTCLIENT`、`WM_ERASEBKGND` | 按 `menuPalette` 绘制各项与勾选 |
+| 菜单 `WM_MOUSEMOVE`、`WM_MOUSELEAVE`、`WM_LBUTTONUP`、`WM_RBUTTONUP` | 悬停高亮与点击执行 |
+| 菜单 `WM_KEYDOWN` | 方向键、Home、End 移动高亮，回车或空格执行，Esc 关闭 |
+| 菜单 `WM_ACTIVATE` 失活 | 关闭菜单 |
+
 在线更新在 `internal/app/update*.go`：`GET /api/update` 读取 GitHub 最新发行版本（缓存一小时，`?refresh=1` 重新读取），`POST /api/update` 按发行版本记录的 `sha256:` 摘要校验当前平台的发行包。命令行版取 `gemini-web2api-<版本>-<系统>-<架构>` 包中的可执行文件，经 `minio/selfupdate` 替换后停机，以原参数加 `--open-ui=false` 启动新版本；桌面版在 Windows 上取同一个 Windows 包，在 macOS 与 Linux 上取 `gemini-web2api-desktop-<版本>-…` 包，经 Wails 更新器暂存，退出后由更新器的辅助进程替换文件并启动新版本，macOS 替换整个 `Gemini-Web2API.app`；Linux 与 macOS 上新版本暂存在被替换的可执行文件或 `.app` 所在目录，与替换目标位于同一文件系统。重启前移除启动时从 `.env` 写入进程环境的变量，新版本按当前 `.env` 读取配置，启动前已有的环境变量保持优先。Windows 上运行中的可执行文件只能改名，替换后旧文件以 `.gemini-web2api.exe.old`（命令行版，隐藏文件）或 `gemini-web2api.exe.old.<时间戳>`（桌面版）留在同一目录，新版本启动时删除。安装期间 `GET /api/update` 的 `progress` 给出阶段（`download`、`verify`、`install`、`restart`）与发行包的已下载、总字节数，“关于”页据此显示进度。版本号不是正式 semver 标签的构建按源码构建处理，在 Docker 容器中运行时随镜像更新，“关于”页对这两种运行方式显示对应的更新方法。
 
 ## 请求链路
@@ -135,7 +159,7 @@ Release 的 Windows 包是只含桌面版 `gemini-web2api.exe` 的 zip，`setup`
 | 写回 | `internal/auth` | 变化的 Cookie 原子写回认证文件 |
 
 - **启动**：`internal/app` 读取配置后创建 `AccountPool` 与 `accounts.Manager`，`Start` 为每个账号启动独立的初始化与轮换循环，并另建访客会话
-- **管理端操作**：`internal/admin` 的账号接口调用 `Manager` 的对应方法，Chrome 导入、Cookie 导入与远程配对分别经 `ChromeImporter`、`ImportCookie`、`ImportState` 写入认证目录后加入调度；一次 Chrome 导入任务的各账号共用 `chromeauth.OpenChrome` 的账号发现结果与主密钥；三种导入写入已导入的账号时都经 `auth.Inherit` 沿用原有的停用标记与未重新填写的固定代理；Chrome 与 Cookie 导入是 `internal/admin/tasks.go` 的后台任务，发起请求结束后逐个账号继续，进度由 `GET /api/accounts/tasks` 读取；粘贴的 Cookie 由 `DiscoverCookie` 按 authuser 读出登录邮箱
+- **管理端操作**：`internal/admin` 的账号接口调用 `Manager` 的对应方法，Chrome 导入、Cookie 导入与远程配对分别经 `ChromeImporter`、`ImportCookie`、`ImportState` 写入认证目录后加入调度；一次 Chrome 导入任务的各账号共用 `chromeauth.OpenChrome` 的账号发现结果与主密钥；三种导入写入已导入的账号时都经 `auth.Inherit` 沿用原有的停用标记与未重新填写的固定代理；已导入账号的重新导入与配对上传，以及修改代理、保存历史或单账号并发的设置保存，都以新客户端替换账号原有的客户端，新客户端首轮初始化结束前账号状态不变、由原客户端处理请求，结束后改用新客户端并停止原客户端的轮换；Chrome 与 Cookie 导入是 `internal/admin/tasks.go` 的后台任务，发起请求结束后逐个账号继续，进度由 `GET /api/accounts/tasks` 读取；粘贴的 Cookie 由 `DiscoverCookie` 按 authuser 读出登录邮箱
 - **预热**：`POST /api/warmup`（`internal/admin/warmup.go`）占用选定账号的请求槽，对选定模型发一条最小生成请求，结果写入请求账本，协议记为 `warmup`
 - **状态读取**：管理端读取 `AccountPool.Status` 并附上各账号首页 `oPEP7c` 的登录邮箱，账号用量读取 `AccountPool.Usage`
 - **冷却原因**：以代码记录，取值为 `usage_limit`、`rate_limited`、`model_mismatch`、`ip_restricted`、`captcha` 与 `upstream_error`，管理端按代码显示当前语言的文案
@@ -146,8 +170,8 @@ Release 的 Windows 包是只含桌面版 `gemini-web2api.exe` 的 zip，`setup`
 - **控制台与管理端**：`internal/logging` 把阶段与结果写到控制台，并经 `logging.Subscribe` 推送给管理端 `/api/events`；日志格式与各条消息见 [logging.md](logging.md)
 - **账本写入**：请求结束时 `RequestMiddleware` 调用 `Finish` 取得结果，调用过 `Begin` 的请求由 `requestdb.Store.Record` 写入 `data/requests.db`；`REQUEST_BODY_LOG=true` 时同时把截断的请求与响应正文以 gzip 压缩写入 `request_bodies` 表；写入协程把 200 ms 内到达的记录与会话合并为一个事务，写入用单连接，查询用 4 个只读连接，查询前先提交排队的内容
 - **其他数据**：同一数据库保存 Responses、文件、视频任务与会话登记，分别在 `internal/requestdb` 的 `responses.go`、`files.go`、`videos.go`、`sessions.go`；保存的 Responses 的响应与输入以 gzip 压缩写入 `stored_responses` 表
-- **保留与收缩**：`prune` 启动时与每小时删除过期的请求记录与汇总（90 天）、Responses（30 天）、视频任务与生成文件（48 小时）和到期的上传文件，再以 `incremental_vacuum` 交还空闲页、`wal_checkpoint(PASSIVE)` 写回 WAL，WAL 达到 4096 帧且已全部写回时截短文件；`Open` 把非增量收缩的库整理为增量收缩，按 `schema` 补上缺少的列并删除定义之外的表、索引、视图与触发器（`schema.go`）
-- **管理端查询**：`/api/usage`、`/api/usage/records`、`/api/usage/records.csv` 与 `/api/requests/:id/body` 由 `internal/requestdb/http.go` 提供，费用按 `internal/pricing` 的单价计算
+- **保留与收缩**：`prune` 启动时与每小时删除过期的请求记录与汇总（90 天）、Responses（30 天）、视频任务与生成文件（48 小时）、到期的上传文件与文件总量超过 4 GiB 时最早的文件，再以 `incremental_vacuum` 交还空闲页、`wal_checkpoint(PASSIVE)` 写回 WAL，WAL 达到 4096 帧且已全部写回时截短文件；`Open` 把非增量收缩的库整理为增量收缩，按 `schema` 补上缺少的列并删除定义之外的表、索引、视图与触发器（`schema.go`）
+- **管理端查询**：`/api/usage`、`/api/usage/records`、`/api/usage/records.csv` 与 `/api/requests/:id/body` 由 `internal/requestdb/http.go` 提供，费用逐条按 `internal/pricing` 中实际回答的模型在请求时刻的单价计算；请求记录的用量为各次尝试之和
 - **管理接口压缩**：`internal/app/router.go` 的 `compressAdmin` 把 `/api/` 下的 JSON、CSV 与事件流响应以 gzip 发给接受 gzip 的客户端，其余客户端收到原文
 
 ## 常见修改
@@ -180,7 +204,7 @@ Release 的 Windows 包是只含桌面版 `gemini-web2api.exe` 的 zip，`setup`
 
 协议修改从一个最短真实场景开始：保存网页端成功请求，重放相同请求，逐项确认动态字段来源，再修改对应编码器或解码器。原始抓包只放在本地实验目录，提交内容只包含脱敏后的结构结论。
 
-抓包用浏览器开发者工具：在已登录 Gemini 网页的 Chrome 中打开 Network 面板并勾选 Preserve log，完成一次最短操作，右键目标请求选择 Copy as cURL (bash)，得到含 Cookie、header 与 `f.req` 载荷的完整请求。在同一出口 IP 下执行这条 curl 即为纯 HTTP 重放；每次只改一个字段再执行，按响应变化确认该字段的作用。
+采集步骤、各请求对应的代码位置与对照顺序见 [官网采集与重新对齐](upstream.md)。抓包用浏览器开发者工具：在已登录 Gemini 网页的 Chrome 中打开 Network 面板并勾选 Preserve log，完成一次最短操作，右键目标请求选择 Copy as cURL (bash)，得到含 Cookie、header 与 `f.req` 载荷的完整请求。在同一出口 IP 下执行这条 curl 即为纯 HTTP 重放；每次只改一个字段再执行，按响应变化确认该字段的作用。
 
 每个结论至少包含请求入口、必需 header、载荷位置、响应事件顺序、Cookie 变化、错误状态和实际模型，并附上页面结果、官方网络记录与纯 HTTP 重放结果。
 

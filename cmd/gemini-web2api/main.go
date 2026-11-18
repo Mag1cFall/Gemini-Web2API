@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"flag"
-	"fmt"
 	"os"
 	_ "time/tzdata"
 
@@ -16,7 +15,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		fmt.Fprintln(os.Stderr, err)
+		alert(err)
 		os.Exit(1)
 	}
 }

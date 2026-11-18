@@ -5,7 +5,6 @@ import (
 	"context"
 	"maps"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
@@ -27,14 +26,26 @@ func (p *AccountPool) SetAPIKeyAccounts(accounts map[string][]string) {
 	p.notifyLocked()
 }
 
-// scopeExcluded 返回并入请求 API key 与目标模型绑定范围之外账号与访客会话的排除集合，都没有绑定时原样返回
+// scopeExcluded 返回并入请求范围之外账号与访客会话的排除集合：请求指定了处理账号时只留该账号，否则按 API key 与目标模型的绑定排除，都没有绑定时原样返回
 func (p *AccountPool) scopeExcluded(ctx context.Context, modelID string, excluded map[string]struct{}) map[string]struct{} {
 	key, _ := ctx.Value(apiKeyContextKey{}).(string)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if requested := requestAccount(ctx); requested != "" {
+		result := maps.Clone(excluded)
+		if result == nil {
+			result = make(map[string]struct{})
+		}
+		for _, entry := range p.entries {
+			if entry.AccountID != requested {
+				result[entry.AccountID] = struct{}{}
+			}
+		}
+		return result
+	}
 	keyScope, keyBound := p.apiKeyAccounts[key]
 	keyBound = keyBound && key != ""
-	modelScope, modelBound := p.modelAccounts[modelKey(modelID)]
+	modelScope, modelBound := p.modelBinding(modelID)
 	if !keyBound && !modelBound {
 		return excluded
 	}
@@ -56,14 +67,20 @@ func (p *AccountPool) SetModelAccounts(accounts map[string][]string) {
 	defer p.mu.Unlock()
 	p.modelAccounts = make(map[string][]string, len(accounts))
 	for model, ids := range accounts {
-		p.modelAccounts[modelKey(model)] = ids
+		p.modelAccounts[gemini.NormalizeModelID(model)] = ids
 	}
 	p.notifyLocked()
 }
 
-// modelKey 返回模型绑定的查找键，与账号目录解析模型名相同：去掉 models/ 前缀，不区分大小写
-func modelKey(model string) string {
-	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(model), "models/"))
+// modelBinding 返回模型绑定的账号：绑定中的模型 ID 与 modelID 都换成改名后的当前 ID 再比较，调用方持有 p.mu
+func (p *AccountPool) modelBinding(modelID string) ([]string, bool) {
+	current := gemini.CanonicalModelID(modelID)
+	for model, ids := range p.modelAccounts {
+		if gemini.CanonicalModelID(model) == current {
+			return ids, true
+		}
+	}
+	return nil, false
 }
 
 // SetAccountOrder 设置 fill-first 依次使用的账号 ID，未列出的账号排在后面并保持登记顺序
@@ -97,7 +114,7 @@ func (p *AccountPool) TryAcquireIdle(ctx context.Context, modelID string, exclud
 	for _, entry := range p.entries {
 		_, excluded := excludedAccountIDs[entry.AccountID]
 		_, out := outside[entry.AccountID]
-		if excluded || out || entry.guest() || !entry.schedulable(now, modelID) || entry.Client.Pending() > 0 {
+		if excluded || out || entry.guest() || !p.schedulable(entry, now, modelID) || entry.Client.Pending() > 0 {
 			continue
 		}
 		if release, ok := entry.Client.TryAcquireRequest(); ok {
@@ -106,7 +123,7 @@ func (p *AccountPool) TryAcquireIdle(ctx context.Context, modelID string, exclud
 		}
 	}
 	if _, out := outside[fallback]; !out {
-		if entry := p.entry(fallback); entry != nil && entry.schedulable(now, modelID) {
+		if entry := p.entry(fallback); entry != nil && p.schedulable(entry, now, modelID) {
 			if release, ok := entry.Client.TryAcquireRequest(); ok {
 				return entry.Client, entry.AccountID, release
 			}

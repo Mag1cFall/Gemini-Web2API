@@ -1,11 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Globe, MoreHorizontal, Power, RefreshCw, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, Globe, MoreHorizontal, Power, RefreshCw, ShieldCheck } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogClose, DialogContent, DialogTrigger } from '@/components/ui/dialog'
+import { Callout } from '@/components/ui/callout'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,9 +14,11 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Meter } from '@/components/ui/meter'
 import { Card, CardHeader, PageHeader, Section } from '@/components/ui/page'
-import { EmptyState, Loading } from '@/components/ui/states'
+import { EmptyState, PagePlaceholder } from '@/components/ui/states'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
+import { abuseText } from '@/features/accounts/AbuseBadge'
+import { tierLabel } from '@/features/accounts/list'
 import {
   accountsMessages,
   accountStateMessages,
@@ -25,68 +27,18 @@ import {
 } from '@/features/accounts/messages'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { ProxyValue } from '@/features/accounts/ProxyValue'
-import { accountsKey, useAccounts, useClearCooldown } from '@/features/accounts/queries'
-import type { Account, AccountsUsage, UsageWindow } from '@/features/accounts/types'
+import {
+  accountsKey,
+  useAccounts,
+  useClearCooldown,
+  useDeleteAccounts,
+} from '@/features/accounts/queries'
+import type { UsageWindow } from '@/features/accounts/types'
 import { stateTone, windowTone } from '@/features/accounts/usage'
 import { api } from '@/lib/api'
 import { formatDateTime, formatNumber, formatPercent } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
-
-// DeleteDialog 是删除账号的确认对话框
-function DeleteDialog({ account }: { account: Account }) {
-  const m = useMessages(accountsMessages)
-  const client = useQueryClient()
-  const navigate = useNavigate()
-  const remove = useMutation({
-    mutationFn: () =>
-      api('/api/accounts/' + encodeURIComponent(account.account_id), { method: 'DELETE' }),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: accountsKey })
-      void navigate('/accounts')
-    },
-    onError: (error) => {
-      toast({ tone: 'error', title: error.message })
-    },
-  })
-  return (
-    <Dialog>
-      <DialogTrigger asChild>
-        <DropdownMenuItem
-          destructive
-          onSelect={(event) => {
-            event.preventDefault()
-          }}
-        >
-          {m.delete}
-        </DropdownMenuItem>
-      </DialogTrigger>
-      <DialogContent
-        title={m.deleteTitle}
-        description={fill(m.deleteHint, { id: account.account_id })}
-        closeLabel={m.cancel}
-        footer={
-          <>
-            <DialogClose asChild>
-              <Button variant="secondary">{m.cancel}</Button>
-            </DialogClose>
-            <Button
-              variant="destructive"
-              loading={remove.isPending}
-              onClick={() => {
-                remove.mutate()
-              }}
-            >
-              {m.confirmDelete}
-            </Button>
-          </>
-        }
-      >
-        <span className="sr-only">{m.deleteTitle}</span>
-      </DialogContent>
-    </Dialog>
-  )
-}
 
 // AccountPage 是账号详情：状态胶囊、用量窗口与模型冷却
 export function AccountPage() {
@@ -100,6 +52,8 @@ export function AccountPage() {
   const accounts = useAccounts()
   const [proxyOpen, setProxyOpen] = useState(false)
   const clearCooldown = useClearCooldown()
+  const remove = useDeleteAccounts()
+  const navigate = useNavigate()
   const verify = useMutation({
     mutationFn: () =>
       api('/api/accounts/' + encodeURIComponent(id) + '/verify', { method: 'POST' }),
@@ -133,17 +87,16 @@ export function AccountPage() {
     },
   })
   const refreshUsage = useMutation({
-    mutationFn: () => api<AccountsUsage>('/api/accounts/usage?refresh=true'),
-    onSuccess: (usage) => {
+    mutationFn: () => api('/api/accounts/' + encodeURIComponent(id) + '/usage', { method: 'POST' }),
+    onSuccess: () => {
       void client.invalidateQueries({ queryKey: accountsKey })
-      const failure = usage.accounts.find((item) => item.account_id === id)?.error
-      if (failure) toast({ tone: 'error', title: failure })
+      toast({ tone: 'success', title: m.usageRefreshed })
     },
     onError: (error) => {
       toast({ tone: 'error', title: error.message })
     },
   })
-  if (accounts.isPending) return <Loading label={m.title} />
+  if (accounts.isPending) return <PagePlaceholder title={id} label={m.title} />
   const account = accounts.data?.accounts.find((item) => item.account_id === id)
   if (!account) {
     return (
@@ -168,16 +121,26 @@ export function AccountPage() {
   return (
     <>
       <PageHeader
+        back={
+          <Link
+            to="/accounts"
+            className="mb-2 inline-flex items-center gap-1 text-sm text-foreground-muted hover:text-foreground"
+          >
+            <ArrowLeft size={16} aria-hidden />
+            {m.back}
+          </Link>
+        }
         title={
           <span className="flex flex-wrap items-center gap-3">
             <Badge tone={stateTone(account.state)}>{sm[account.state]}</Badge>
+            {account.abuse?.restricted && <Badge tone="warning">{m.abuseFlag}</Badge>}
             <span className="break-all">{account.email ?? account.account_id}</span>
           </span>
         }
         description={[
           account.source === 'chrome' ? m.sourceChrome : m.sourceCookie,
           account.profile,
-          account.tier,
+          account.tier && tierLabel(account.tier, m.tierFree),
         ]
           .filter(Boolean)
           .join(' · ')}
@@ -235,12 +198,25 @@ export function AccountPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent>
-                <DeleteDialog account={account} />
+                <DropdownMenuItem
+                  destructive
+                  onSelect={() => {
+                    remove([account])
+                    void navigate('/accounts')
+                  }}
+                >
+                  {m.delete}
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </>
         }
       />
+      {account.abuse?.restricted && (
+        <Callout tone="warning" role="status">
+          {abuseText(m, account.abuse)}
+        </Callout>
+      )}
 
       {account.cooldown_until && new Date(account.cooldown_until) > now && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-warning-soft px-4 py-3 text-sm text-warning-text">
@@ -366,9 +342,11 @@ export function AccountPage() {
           </div>
           <div className="flex min-w-0 flex-col gap-1">
             <dt className="text-foreground-muted">{m.proxy}</dt>
-            <dd className="truncate font-mono" title={account.proxy}>
-              <ProxyValue account={account} source />
-            </dd>
+            <Tooltip overflow label={account.proxy}>
+              <dd className="truncate font-mono">
+                <ProxyValue account={account} source />
+              </dd>
+            </Tooltip>
           </div>
           <div className="flex flex-col gap-1">
             <dt className="text-foreground-muted">{m.readyAt}</dt>
@@ -395,7 +373,7 @@ export function AccountPage() {
                 {account.last_error_at &&
                   ' · ' + formatDateTime(new Date(account.last_error_at), now, locale)}
               </dt>
-              <dd className="font-medium break-words">{account.last_error}</dd>
+              <dd className="font-medium break-words">{serverText(account.last_error)}</dd>
             </div>
           )}
         </dl>

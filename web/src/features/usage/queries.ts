@@ -30,6 +30,27 @@ export function useUsage(rangeMs: number) {
   })
 }
 
+// historySpan 是判断是否有过请求时查询的时间范围，与账本保留时长相同
+const historySpan = 90 * 24 * 3_600_000
+
+// useHadRequests 读取近 90 天是否有过请求，打开页面时读取一次，不随请求结束重读
+export function useHadRequests() {
+  return useQuery({
+    queryKey: ['had-requests'],
+    queryFn: ({ signal }) => {
+      const now = Date.now()
+      const query = new URLSearchParams({
+        from: new Date(now - historySpan).toISOString(),
+        to: new Date(now).toISOString(),
+        tz: timeZone,
+      })
+      return api<UsageReport>('/api/usage?' + query.toString(), { signal })
+    },
+    select: (report) => report.totals.requests > 0,
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+}
+
 // useUsageReport 读取用量页视图的报告，跟随当前时间的范围在每次读取时重新解析，interval 为自动刷新间隔
 export function useUsageReport(view: UsageView, interval: number | false) {
   const { range, from, to, stack, filters } = view

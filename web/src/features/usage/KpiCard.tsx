@@ -48,7 +48,6 @@ function sparkPath(values: number[]) {
 // KpiCard 是用量页顶部的一张指标卡片：名称与说明、变化、主值、补充行与趋势线
 export function KpiCard({ kpi }: { kpi: Kpi }) {
   const path = sparkPath(kpi.spark)
-  const note = kpi.details.map((detail) => `${detail.label} ${detail.value}`.trim()).join(' · ')
   const Icon = kpi.icon
   return (
     <article className="flex min-w-0 flex-col overflow-hidden rounded-md border border-border bg-surface">
@@ -84,14 +83,13 @@ export function KpiCard({ kpi }: { kpi: Kpi }) {
       </div>
       <div className="flex min-w-0 flex-1 flex-col px-5 pt-3 pb-4">
         <p
-          title={kpi.value}
           className={
             'text-2xl font-semibold break-words tabular-nums ' + (kpi.tone ?? 'text-foreground')
           }
         >
           {kpi.value}
         </p>
-        <p title={note} className="mt-1 text-xs break-words text-foreground-muted">
+        <p className="mt-1 text-xs break-words text-foreground-muted">
           {kpi.details.map((detail, index) => (
             <span key={detail.label}>
               {index > 0 && <span aria-hidden> · </span>}

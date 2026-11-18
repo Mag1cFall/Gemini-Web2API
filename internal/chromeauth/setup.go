@@ -44,6 +44,7 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	chromeRoot := flags.String("chrome-root", "", "Chrome User Data 目录")
 	output := flags.String("output", "auth", "认证状态输出目录")
 	remote := flags.String("remote", "", "把导入的账号上传到远程实例，例如 https://example.com，配对令牌从标准输入读取")
+	renew := flags.Bool("renew", false, "恢复本机已保存的远程配对账号持续续签")
 	proxy := flags.String("proxy", "", "账号固定代理 URL")
 	cookieHeader := flags.String("cookie", "", "从一行 Cookie Header 导入账号")
 	cookieFile := flags.String("cookie-file", "", "从浏览器导出的 Cookie JSON 或 Netscape cookies.txt 文件导入账号")
@@ -65,6 +66,17 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	if err != nil {
 		return fmt.Errorf("解析输出目录: %w", err)
 	}
+	if *renew {
+		origin, err := RemoteOrigin(*remote)
+		if err != nil {
+			return err
+		}
+		renewals, err := originRemoteRenewals(remoteRenewalsFile, origin)
+		if err != nil {
+			return err
+		}
+		return renewRemoteStates(ctx, remoteRenewalsFile, renewals, 0, stderr)
+	}
 	origin := ""
 	if strings.TrimSpace(*remote) != "" {
 		if origin, err = RemoteOrigin(*remote); err != nil {
@@ -85,11 +97,23 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 		if err != nil {
 			return err
 		}
-		ids, err := uploadStates(ctx, origin, token, paths)
+		ids, renewals, err := uploadStates(ctx, origin, token, paths, requestProxy)
 		if err != nil {
 			return err
 		}
-		return writeJSON(stdout, map[string]any{"setup": true, "accounts": len(ids), "remote": origin, "ids": ids})
+		if err := os.RemoveAll(outputPath); err != nil {
+			return err
+		}
+		if err := writeJSON(stdout, map[string]any{"setup": true, "accounts": len(ids), "remote": origin, "ids": ids}); err != nil {
+			return err
+		}
+		if len(renewals) == 0 {
+			return nil
+		}
+		if err := saveRemoteRenewals(remoteRenewalsFile, renewals); err != nil {
+			return err
+		}
+		return renewRemoteStates(ctx, remoteRenewalsFile, renewals, remoteRenewalInterval, stderr)
 	}
 	cookies := strings.TrimSpace(*cookieHeader)
 	if path := strings.TrimSpace(*cookieFile); path != "" {

@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
-	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 	"github.com/gin-gonic/gin"
 )
 
@@ -94,6 +96,8 @@ type ChatRequest struct {
 	Audio               *ChatAudioOptions  `json:"audio,omitempty"`
 	ExtraBody           ChatExtraBody      `json:"extra_body,omitempty"`
 	legacyFunctions     bool
+	// TruncateTo 大于 0 时提示词超过这个 token 数就从最早的轮次删起
+	TruncateTo int `json:"-"`
 }
 
 // ChatExtraBody 表示 Gemini OpenAI 兼容层的 extra_body 扩展
@@ -150,6 +154,10 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		if !ok {
 			return
 		}
+		if err := continuationInputError("previous_response_id", request.PreviousResponseID, "conversation_id", request.ConversationID, "X-Conversation-ID", c.GetHeader("X-Conversation-ID")); err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
 		if err := awaitModel(c, pool, request.Model); err != nil {
 			writeOpenAIError(c, upstreamStatus(err), openAIUpstreamCode(err), err.Error())
 			return
@@ -200,7 +208,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			setSSEHeaders(c)
 			stream, stop := holdStream(c, openAIKeepalive)
 			defer stop()
-			streamModel := config.MapModel(request.Model)
+			streamModel := publicModelID(pool, request.Model)
 			for choice := range n {
 				roleSent := false
 				writeRole := func() error {
@@ -248,7 +256,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					_ = writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "media_download_error", streamFailure(c, err))
 					return
 				}
-				if err := writeProjectedOpenAI(c.Writer, responseID, created, streamModel, choice, result.Accumulator, bridge, projection, request.Audio); err != nil {
+				if err := writeProjectedOpenAI(c.Writer, responseID, created, streamModel, choice, result.Accumulator, bridge.truncated(result.Truncated), projection, request.Audio); err != nil {
 					_ = writeOpenAIStreamError(c.Writer, http.StatusBadGateway, "output_validation_error", streamFailure(c, err))
 					return
 				}
@@ -290,6 +298,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			if choice == 0 {
 				rememberHistory(pool, result, "", bridge, turns)
 				c.Header("X-Conversation-ID", result.ConversationID)
+				c.Header("X-Provider-Model", result.ProviderModel)
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
 			if response == nil {
@@ -304,7 +313,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		if usage != nil {
 			response["usage"] = openAIUsage(usage)
 		}
-		c.JSON(http.StatusOK, response)
+		c.JSON(http.StatusOK, fieldorder.Official("chat", response))
 	}
 }
 
@@ -365,13 +374,13 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 		messages = continuationMessages(messages)
 	}
 	turns := make([]transcriptTurn, 0, len(messages))
-	var files []gemini.FileData
+	turnFiles := make([][]gemini.FileData, 0, len(messages))
 	for _, message := range messages {
 		content, attachments, err := decodeMessageContent(c.Request.Context(), message.Content, client, nil)
 		if err != nil {
 			return "", nil, err
 		}
-		files = append(files, attachments...)
+		turnFiles = append(turnFiles, attachments)
 		role := transcriptRole(message.Role)
 		var builder strings.Builder
 		if role == "tool" {
@@ -388,13 +397,40 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 		turns = append(turns, transcriptTurn{Role: role, Text: builder.String()})
 	}
 	if len(turns) == 0 {
-		turns = append(turns, transcriptTurn{Role: "user", Text: "Hello"})
+		turns, turnFiles = append(turns, transcriptTurn{Role: "user", Text: "Hello"}), append(turnFiles, nil)
 	}
 	suffix, err := bridge.PromptSuffix()
 	if err != nil {
 		return "", nil, err
 	}
-	return renderTranscript(turns, suffix), files, nil
+	if request.TruncateTo > 0 {
+		turns, turnFiles = truncateTurns(turns, turnFiles, suffix, request.TruncateTo)
+	}
+	return renderTranscript(turns, suffix), slices.Concat(turnFiles...), nil
+}
+
+// truncateTurns 在提示词超过 limit 个 token 时从最早的一轮起整轮删除，每删一轮减去其角色块的 token 数：一轮从系统消息之后第一条消息开始，到下一条 user 消息之前，最后一条 user 消息所在的轮次保留
+func truncateTurns(turns []transcriptTurn, turnFiles [][]gemini.FileData, suffix string, limit int) ([]transcriptTurn, [][]gemini.FileData) {
+	tokens := tokencount.Content(renderTranscript(turns, suffix)) + mediaTokens(slices.Concat(turnFiles...))
+	start := 0
+	for start < len(turns) && turns[start].Role == "system" {
+		start++
+	}
+	for tokens > limit {
+		end := start + 1
+		for end < len(turns) && turns[end].Role != "user" {
+			end++
+		}
+		if end >= len(turns) {
+			break
+		}
+		for _, turn := range clientTurns(turns[start:end]) {
+			tokens -= tokencount.Text(transcriptBlock(turn))
+		}
+		tokens -= mediaTokens(slices.Concat(turnFiles[start:end]...))
+		turns, turnFiles = slices.Delete(turns, start, end), slices.Delete(turnFiles, start, end)
+	}
+	return turns, turnFiles
 }
 
 // speakerText 在带 name 的消息正文前写上说话人名称
@@ -407,7 +443,7 @@ func speakerText(name string, text string) string {
 
 func buildOpenAIResponse(responseID string, created int64, result generationResult, bridge ToolBridge, includeThoughts bool, audioOptions *ChatAudioOptions) (gin.H, error) {
 	primary := result.Accumulator.Primary()
-	content, calls, err := bridge.Parse(primary.Text)
+	content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -422,6 +458,9 @@ func buildOpenAIResponse(responseID string, created int64, result generationResu
 		message["audio"] = audio
 	}
 	finishReason := "stop"
+	if result.Truncated {
+		finishReason = "length"
+	}
 	if includeThoughts && primary.Thought != "" {
 		message["reasoning_content"] = primary.Thought
 	}
@@ -442,8 +481,11 @@ func buildOpenAIResponse(responseID string, created int64, result generationResu
 	}
 	response := gin.H{
 		"id": responseID, "object": "chat.completion", "created": created, "model": result.Model,
-		"provider_model": result.ProviderModel, "conversation_id": result.ConversationID, "response_id": responseID,
+		"provider_model": result.ProviderModel, "response_id": responseID,
 		"choices": []gin.H{{"index": 0, "message": message, "finish_reason": finishReason}},
+	}
+	if result.ConversationID != "" {
+		response["conversation_id"] = result.ConversationID
 	}
 	if result.Accumulator.Usage != nil {
 		response["usage"] = openAIUsage(result.Accumulator.Usage)
@@ -536,16 +578,19 @@ func writeOpenAIRole(w io.Writer, id string, created int64, model string, choice
 }
 
 func writeOpenAIDelta(w io.Writer, id string, created int64, model string, choice int, delta gin.H) error {
-	return writeSSEJSON(w, gin.H{
+	return writeSSEJSON(w, fieldorder.Official("chat", gin.H{
 		"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
 		"choices": []gin.H{{"index": choice, "delta": delta, "finish_reason": nil}},
-	})
+	}))
 }
 
 func writeOpenAIFinish(w io.Writer, id string, created int64, model string, choice int, result generationResult, bridge ToolBridge) error {
 	finishReason := "stop"
+	if result.Truncated {
+		finishReason = "length"
+	}
 	primary := result.Accumulator.Primary()
-	_, calls, _ := bridge.Parse(primary.Text)
+	_, calls, _ := bridge.truncated(result.Truncated).Parse(primary.Text)
 	if len(calls) > 0 {
 		finishReason = "tool_calls"
 		if bridge.LegacyFunctions {
@@ -554,17 +599,20 @@ func writeOpenAIFinish(w io.Writer, id string, created int64, model string, choi
 	}
 	chunk := gin.H{
 		"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
-		"provider_model": result.ProviderModel, "conversation_id": result.ConversationID, "response_id": result.ResponseID,
+		"provider_model": result.ProviderModel, "response_id": result.ResponseID,
 		"choices": []gin.H{{"index": choice, "delta": gin.H{}, "finish_reason": finishReason}},
 	}
-	return writeSSEJSON(w, chunk)
+	if result.ConversationID != "" {
+		chunk["conversation_id"] = result.ConversationID
+	}
+	return writeSSEJSON(w, fieldorder.Official("chat", chunk))
 }
 
 func writeOpenAIUsageChunk(w io.Writer, id string, created int64, model string, usage *gemini.Usage) error {
-	return writeSSEJSON(w, gin.H{
+	return writeSSEJSON(w, fieldorder.Official("chat", gin.H{
 		"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
 		"choices": []interface{}{}, "usage": openAIUsage(usage),
-	})
+	}))
 }
 
 // writeOpenAIStreamError 在已开始的流中写入 OpenAI 错误对象
@@ -642,8 +690,17 @@ func openAIToolBridge(request ChatRequest) (ToolBridge, error) {
 		return ToolBridge{}, err
 	}
 	bridge := ToolBridge{Choice: openAIToolChoice(request.ToolChoice), LegacyFunctions: request.legacyFunctions, Stop: stop, SingleCall: request.ParallelToolCalls != nil && !*request.ParallelToolCalls}
+	for _, limit := range []*int{request.MaxTokens, request.MaxCompletionTokens} {
+		if limit != nil {
+			bridge.MaxTokens = *limit
+		}
+	}
 	if len(request.WebSearchOptions) > 0 && string(request.WebSearchOptions) != "null" {
-		bridge.WebSearch = true
+		var options struct {
+			UserLocation json.RawMessage `json:"user_location"`
+		}
+		_ = json.Unmarshal(request.WebSearchOptions, &options)
+		bridge.WebSearch, bridge.SearchLocation = true, searchLocation(options.UserLocation)
 	}
 	for _, tool := range request.Tools {
 		if tool.Type == "custom" && tool.Custom.Name != "" {
@@ -738,12 +795,6 @@ func continuationMessages(messages []ChatMessage) []ChatMessage {
 
 func unsupportedChatParameters(request ChatRequest) []string {
 	var fields []string
-	if request.MaxTokens != nil {
-		fields = append(fields, "max_tokens")
-	}
-	if request.MaxCompletionTokens != nil {
-		fields = append(fields, "max_completion_tokens")
-	}
 	if request.Temperature != nil {
 		fields = append(fields, "temperature")
 	}

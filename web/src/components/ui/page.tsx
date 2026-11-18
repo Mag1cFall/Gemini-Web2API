@@ -1,19 +1,22 @@
 import type { ReactNode } from 'react'
 import { twMerge } from 'tailwind-merge'
 
-// PageHeader 是页面顶部的 24px 标题、说明与本页主操作
+// PageHeader 是页面顶部的返回链接、24px 标题、说明与本页主操作
 export function PageHeader({
   title,
   description,
   actions,
+  back,
 }: {
   title: ReactNode
   description?: ReactNode
   actions?: ReactNode
+  back?: ReactNode
 }) {
   return (
     <header className="flex flex-wrap items-center justify-between gap-4">
       <div className="min-w-0">
+        {back}
         <h1 className="text-2xl font-semibold break-words">{title}</h1>
         {description && <p className="mt-1 text-sm text-foreground-muted">{description}</p>}
       </div>

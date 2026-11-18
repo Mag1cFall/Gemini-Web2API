@@ -29,6 +29,8 @@ type Model struct {
 	Gem string
 	// Variant 为模型策略中与其他模型共用 mode 的模型的变体键，这类模型的 Hash 也是该键
 	Variant string
+	// Position 是条目在官网目录中的位置键（界面与 mode、变体键或工具编号），官网改名时不变
+	Position string
 }
 
 // ImageModelID 是官网 Create image 工具的公开模型 ID
@@ -63,6 +65,8 @@ type ModelCatalog struct {
 	options map[Feature][]toolOption
 	// personalIntelligence 表示 payload[21] 给出了 Personal Intelligence 开关，访客与未开放该功能的账号没有
 	personalIntelligence bool
+	// locked 为模型策略中上锁、需要更高层级的模型公开 ID
+	locked []string
 }
 
 // toolOption 是官网工具选项组中的一项，id 写入生成请求 55 槽；source 表示属于 Sources 多选组（组槽 2 为 2）
@@ -181,19 +185,32 @@ func (c ModelCatalog) List() []Model {
 	return models
 }
 
-// Resolve 根据公开 ID、官方名称或 hash 查找模型，公开 ID 可带 Gemini API 的 models/ 前缀
+// Resolve 依次按当前目录（公开 ID、官方名称或 hash）、改名记录与 gemini-default 查找模型，ID 可带 models/ 或 google/ 前缀
 func (c ModelCatalog) Resolve(value string) (Model, error) {
-	index, ok := c.lookup[strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "models/"))]
-	if !ok {
-		return Model{}, fmt.Errorf("model %q is unavailable for this account", value)
+	id := NormalizeModelID(value)
+	if index, ok := c.lookup[id]; ok {
+		return c.models[index], nil
 	}
-	return c.models[index], nil
+	if current, ok := renamedModel(id); ok {
+		if index, ok := c.lookup[current]; ok {
+			return c.models[index], nil
+		}
+	}
+	if id == DefaultModelID {
+		return c.Default()
+	}
+	return Model{}, fmt.Errorf("该账号的模型目录中没有 %q", value)
+}
+
+// Locked 返回模型策略中上锁、需要更高层级的模型公开 ID
+func (c ModelCatalog) Locked() []string {
+	return slices.Clone(c.locked)
 }
 
 // Default 返回官方标记的默认模型
 func (c ModelCatalog) Default() (Model, error) {
 	if c.defaultIndex < 0 || c.defaultIndex >= len(c.models) {
-		return Model{}, fmt.Errorf("model catalog has no official default")
+		return Model{}, fmt.Errorf("官网模型目录没有默认模型")
 	}
 	return c.models[c.defaultIndex], nil
 }
@@ -224,7 +241,7 @@ func modelName(short, title, subtitle string) (name, description string) {
 func parseModelCatalog(payload []any) (ModelCatalog, error) {
 	rows, ok := arrayAt(payload, 15)
 	if !ok || len(rows) == 0 {
-		return ModelCatalog{}, fmt.Errorf("model catalog payload has no models")
+		return ModelCatalog{}, fmt.Errorf("官网模型目录为空")
 	}
 
 	defaultMode, _ := intAt(payload, 0)
@@ -257,19 +274,25 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 			Mode:           mode,
 			Default:        mode == defaultMode,
 			ThinkingLevels: levels,
+			Position:       fmt.Sprintf("chat/%d", mode),
 		})
 	}
 	if len(models) == 0 {
-		return ModelCatalog{}, fmt.Errorf("model catalog rows are invalid")
+		return ModelCatalog{}, fmt.Errorf("官网模型目录格式无法识别")
 	}
 	if !slices.ContainsFunc(models, func(model Model) bool { return model.Default }) {
 		models[0].Default = true
 	}
+	var locked []string
 	for _, entry := range chatPolicy {
-		if entry.variant == "" || entry.upgrade {
+		displayName, description := modelName(entry.short, entry.title, entry.subtitle)
+		if entry.upgrade {
+			locked = append(locked, strings.ToLower(modelID(displayName)))
 			continue
 		}
-		displayName, description := modelName(entry.short, entry.title, entry.subtitle)
+		if entry.variant == "" {
+			continue
+		}
 		models = append(models, Model{
 			ID:             modelID(displayName),
 			DisplayName:    displayName,
@@ -279,6 +302,7 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 			Mode:           entry.mode,
 			ThinkingLevels: entry.levels,
 			Variant:        entry.variant,
+			Position:       fmt.Sprintf("chat/%d/%s", entry.mode, entry.variant),
 		})
 	}
 
@@ -286,20 +310,20 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 		return models[left].ID < models[right].ID
 	})
 	_, personalIntelligence := arrayAt(payload, 21)
-	catalog := ModelCatalog{models: models, lookup: make(map[string]int), defaultIndex: -1, options: parseToolOptions(payload), personalIntelligence: personalIntelligence}
+	catalog := ModelCatalog{models: models, lookup: make(map[string]int), defaultIndex: -1, options: parseToolOptions(payload), personalIntelligence: personalIntelligence, locked: locked}
 	for index, model := range models {
 		catalog.lookup[strings.ToLower(model.ID)] = index
 		catalog.lookup[strings.ToLower(model.DisplayName)] = index
 		catalog.lookup[strings.ToLower(model.Hash)] = index
 		if model.Default {
 			if catalog.defaultIndex >= 0 {
-				return ModelCatalog{}, fmt.Errorf("model catalog has multiple official defaults")
+				return ModelCatalog{}, fmt.Errorf("官网模型目录有多个默认模型")
 			}
 			catalog.defaultIndex = index
 		}
 	}
 	if catalog.defaultIndex < 0 {
-		return ModelCatalog{}, fmt.Errorf("model catalog has no official default")
+		return ModelCatalog{}, fmt.Errorf("官网模型目录没有默认模型")
 	}
 	defaultModel := models[catalog.defaultIndex]
 	accountCapabilities, _ := arrayAt(payload, 17)
@@ -308,7 +332,7 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 			continue
 		}
 		entry := defaultModel
-		entry.ID, entry.DisplayName, entry.Description, entry.Default, entry.Feature = tool.id, tool.displayName, tool.description, false, tool.feature
+		entry.ID, entry.DisplayName, entry.Description, entry.Default, entry.Feature, entry.Position = tool.id, tool.displayName, tool.description, false, tool.feature, fmt.Sprintf("tool/%d", tool.feature)
 		if tool.feature == FeatureVideo {
 			entry.Capabilities = append(slices.Clone(entry.Capabilities), "predictLongRunning")
 		}
@@ -320,7 +344,7 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 		if !ok {
 			continue
 		}
-		entry.ID, entry.DisplayName, entry.Default, entry.Feature, entry.ThinkingLevels = entry.ID+"-task", entry.DisplayName+" Task", false, FeatureTask, levels
+		entry.ID, entry.DisplayName, entry.Default, entry.Feature, entry.ThinkingLevels, entry.Position = entry.ID+"-task", entry.DisplayName+" Task", false, FeatureTask, levels, "task/"+strings.TrimPrefix(entry.Position, "chat/")
 		catalog.add(entry)
 	}
 	return catalog, nil
@@ -422,10 +446,10 @@ func (m Model) thinkingLevel(requested ThinkingLevel) ThinkingLevel {
 }
 
 // clientFeatures 是登录页面在客户端扩展头第 8 槽声明的功能编号
-var clientFeatures = []int{4, 33, 22, 5, 6, 8, 16, 19, 20}
+var clientFeatures = []int{4, 33, 22, 5, 6, 8, 16, 19, 20, 38}
 
 // guestClientFeatures 是访客页面在客户端扩展头第 8 槽声明的功能编号
-var guestClientFeatures = []int{4, 33, 22, 6, 16, 19, 20}
+var guestClientFeatures = []int{4, 33, 22, 6, 16, 19, 20, 38}
 
 // fallbackTimezone 是读不到本机时区名时写入客户端扩展头的时区
 const fallbackTimezone = "UTC"
@@ -433,21 +457,17 @@ const fallbackTimezone = "UTC"
 // hostTimezone 是客户端扩展头计时槽末尾的本机 IANA 时区名
 var hostTimezone = localTimezone()
 
-// buildModelHeader 构造包含模型、界面语言、会话类型、功能编号、账号层级编码、思考强度、构建标签与请求计时的生成请求头，功能编号与官网一样写两遍，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
-func buildModelHeader(features []int, model Model, language string, chatMode any, tier int, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) (string, error) {
+// buildModelHeader 构造生成会话的模型扩展头 protobuf：模型、界面语言、会话类型、功能编号、账号层级编码、思考强度、客户端标识、构建标签与请求计时，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
+func buildModelHeader(features []int, model Model, language string, chatMode any, tier int, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) []byte {
 	var levelSlot any
 	if thinkingLevel != 0 {
 		levelSlot = int(thinkingLevel)
 	}
-	header, err := json.Marshal(withVariant([]any{
+	return encodeJSPB(withVariant([]any{
 		1, nil, nil, nil, model.Hash, nil, language, chatMode,
-		slices.Concat(features, features), nil, nil, tier, nil, nil, model.Mode, levelSlot, clientID,
+		features, nil, nil, tier, nil, nil, model.Mode, levelSlot, clientID,
 		[]string{buildLabel}, nil, timing,
 	}, model.Variant))
-	if err != nil {
-		return "", err
-	}
-	return string(header), nil
 }
 
 // withVariant 返回在第 24 槽写了变体键的客户端头，variant 为空时原样返回
@@ -455,11 +475,14 @@ func withVariant(header []any, variant string) []any {
 	if variant == "" {
 		return header
 	}
-	return append(header, nil, nil, nil, nil, variant)
+	for len(header) < 24 {
+		header = append(header, nil)
+	}
+	return append(header, variant)
 }
 
-// buildGenericHeader 构造 batchexecute 请求使用的客户端头，mode 与 level 为零时对应槽为空，variant 非空时写在第 24 槽
-func buildGenericHeader(features []int, language string, clientID string, buildLabel string, mode int, variant string, level ThinkingLevel, timing []any) string {
+// buildGenericHeader 构造 batchexecute 请求使用的客户端头，止于第 17 槽构建标签，mode 与 level 为零时对应槽为空，variant 非空时写在第 24 槽
+func buildGenericHeader(features []int, language string, clientID string, buildLabel string, mode int, variant string, level ThinkingLevel) string {
 	var modeSlot, levelSlot any
 	if mode != 0 {
 		modeSlot = mode
@@ -467,19 +490,19 @@ func buildGenericHeader(features []int, language string, clientID string, buildL
 	if level != 0 {
 		levelSlot = int(level)
 	}
-	header, _ := json.Marshal(withVariant([]any{1, nil, nil, nil, nil, nil, language, nil, features, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}, nil, timing}, variant))
+	header, _ := json.Marshal(withVariant([]any{1, nil, nil, nil, nil, nil, language, nil, features, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}}, variant))
 	return string(header)
 }
 
-// buildConversationHeader 构造会话内 batchexecute 请求的客户端头，第 7 槽为 Temporary Chat 状态，不写模型 hash 与层级
-func buildConversationHeader(features []int, language string, clientID string, buildLabel string, temporaryChat bool, mode int, variant string, level ThinkingLevel, timing []any) string {
+// buildConversationHeader 构造会话内 batchexecute 请求的客户端头，第 7 槽为 Temporary Chat 状态，不写模型 hash 与层级，止于第 17 槽构建标签
+func buildConversationHeader(features []int, language string, clientID string, buildLabel string, temporaryChat bool, mode int, variant string, level ThinkingLevel) string {
 	chatMode := 0
 	if temporaryChat {
 		chatMode = 1
 	}
 	header, _ := json.Marshal(withVariant([]any{
 		1, nil, nil, nil, nil, nil, language, chatMode, slices.Concat(features, features),
-		nil, nil, nil, nil, nil, mode, int(level), clientID, []string{buildLabel}, nil, timing,
+		nil, nil, nil, nil, nil, mode, int(level), clientID, []string{buildLabel},
 	}, variant))
 	return string(header)
 }

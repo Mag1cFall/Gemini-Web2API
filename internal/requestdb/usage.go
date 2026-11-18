@@ -368,26 +368,31 @@ type costs struct {
 	buckets []spend
 }
 
-// scanCost 从原始记录逐条按实际处理模型的单价累加 [from, to) 内符合筛选的费用，starts 非空时同时累加到各分桶
+// scanCost 从原始记录逐条按单价累加 [from, to) 内符合筛选的费用，starts 非空时同时累加到各分桶
 func (store *Store) scanCost(ctx context.Context, from, to int64, starts []int64, filters UsageFilters) (costs, error) {
 	clause, filterArgs := filterSQL(filters)
-	rows, err := store.reads.QueryContext(ctx, `SELECT time, CASE WHEN provider_model != '' THEN provider_model ELSE model END,
- input_tokens, reasoning_tokens + reply_tokens FROM requests WHERE time >= ? AND time < ?`+clause,
-		append([]any{from, to}, filterArgs...)...)
+	rows, err := store.reads.QueryContext(ctx, `SELECT time, model, provider_model, input_tokens, reasoning_tokens, reply_tokens, status
+ FROM requests WHERE time >= ? AND time < ?`+clause, append([]any{from, to}, filterArgs...)...)
 	if err != nil {
 		return costs{}, err
 	}
 	result := costs{buckets: make([]spend, len(starts))}
-	var at, input, output int64
-	var model string
+	var at, input, reasoning, reply int64
+	var status int
+	var model, provider string
 	for rows.Next() {
-		if err := rows.Scan(&at, &model, &input, &output); err != nil {
+		if err := rows.Scan(&at, &model, &provider, &input, &reasoning, &reply, &status); err != nil {
 			return costs{}, errors.Join(err, rows.Close())
 		}
-		value, priced := pricing.Cost(model, input, output)
+		price, priced := pricing.Served(model, provider, time.UnixMilli(at))
 		if !priced {
 			continue
 		}
+		var succeeded int64
+		if status < 400 {
+			succeeded = 1
+		}
+		value := price.Cost(input > pricing.LongContext, input, reasoning, reply, succeeded)
 		result.total.cost += value
 		result.total.priced++
 		if starts != nil {

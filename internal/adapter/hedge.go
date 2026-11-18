@@ -46,7 +46,7 @@ type FirstEventHedge struct {
 var hedgeSettings atomic.Pointer[FirstEventHedge]
 
 func init() {
-	hedgeSettings.Store(&FirstEventHedge{Auto: true, Models: []string{config.Defaults["FIRST_EVENT_HEDGE_MODELS"]}})
+	hedgeSettings.Store(&FirstEventHedge{Auto: true, Models: config.SplitList(config.Defaults["FIRST_EVENT_HEDGE_MODELS"])})
 }
 
 // SetFirstEventHedge 替换首事件备用请求设置，下一个请求生效
@@ -74,16 +74,18 @@ type firstEventStats struct {
 // firstEvents 是全部请求共用的首事件样本
 var firstEvents = &firstEventStats{samples: make(map[string][]firstEventSample)}
 
-// observe 记录一个原请求样本，每个模型只保留最近 firstEventSampleLimit 个
+// observe 按模型的当前 ID 记录一个原请求样本，每个模型只保留最近 firstEventSampleLimit 个
 func (stats *firstEventStats) observe(model string, at time.Time, wait time.Duration) {
+	model = gemini.CanonicalModelID(model)
 	stats.mu.Lock()
 	defer stats.mu.Unlock()
 	samples := append(stats.samples[model], firstEventSample{at: at, wait: wait})
 	stats.samples[model] = samples[max(0, len(samples)-firstEventSampleLimit):]
 }
 
-// p95 返回模型 firstEventSampleAge 内样本按最近秩法的 p95 与样本数
+// p95 按模型的当前 ID 返回 firstEventSampleAge 内样本按最近秩法的 p95 与样本数
 func (stats *firstEventStats) p95(model string, now time.Time) (time.Duration, int) {
+	model = gemini.CanonicalModelID(model)
 	stats.mu.Lock()
 	var waits []time.Duration
 	for _, sample := range stats.samples[model] {
@@ -122,10 +124,17 @@ func (stats *firstEventStats) seed(store *requestdb.Store) {
 	})
 }
 
+// FirstEventP95 返回模型近 24 小时原请求首事件等待的 p95 与样本数，ready 表示样本数已够自动模式按它发起备用请求
+func FirstEventP95(model string) (p95 time.Duration, samples int, ready bool) {
+	p95, samples = firstEvents.p95(model, time.Now())
+	return p95, samples, samples >= firstEventMinSamples
+}
+
 // hedgeDelay 返回模型的原请求等待首事件多久后发起备用请求，不发起时第二个返回值为 false
 func hedgeDelay(model string) (time.Duration, bool) {
 	settings := hedgeSettings.Load()
-	if !slices.Contains(settings.Models, model) {
+	model = gemini.CanonicalModelID(model)
+	if !slices.ContainsFunc(settings.Models, func(id string) bool { return gemini.CanonicalModelID(id) == model }) {
 		return 0, false
 	}
 	if !settings.Auto {

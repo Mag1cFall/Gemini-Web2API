@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -54,19 +55,21 @@ func (h *handler) createPairing(c *gin.Context) {
 	c.JSON(http.StatusCreated, h.pairing.issue(time.Now()))
 }
 
-// pairingAccount 凭配对令牌导入 setup --remote 上传的认证状态，不经过管理会话
+// pairingAccount 凭配对令牌或账号的续签凭据导入 setup --remote 上传的认证状态，不经过管理会话；凭配对令牌导入时为账号签发续签凭据
 func (h *handler) pairingAccount(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	token, _ := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
-	if !h.pairing.valid(strings.TrimSpace(token), time.Now()) {
-		writeError(c, http.StatusUnauthorized, "pairing_token_invalid", "配对令牌无效或已过期")
-		return
-	}
+	token = strings.TrimSpace(token)
+	paired := h.pairing.valid(token, time.Now())
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, pairingBodyLimit)
 	var input struct {
 		StorageState json.RawMessage `json:"storage_state"`
 	}
 	if !bindJSON(c, &input) {
+		return
+	}
+	if !paired && !h.renewalValid(token, input.StorageState) {
+		writeError(c, http.StatusUnauthorized, "pairing_token_invalid", "配对令牌无效或已过期")
 		return
 	}
 	id, err := h.Accounts.ImportState(input.StorageState)
@@ -75,5 +78,29 @@ func (h *handler) pairingAccount(c *gin.Context) {
 		return
 	}
 	account, _ := h.account(id)
-	c.JSON(http.StatusCreated, gin.H{"account": account})
+	response := gin.H{"account": account}
+	if paired {
+		renewal := rand.Text()
+		digest := sha256.Sum256([]byte(renewal))
+		if err := h.Accounts.SetPairingRenewal(id, hex.EncodeToString(digest[:])); err != nil {
+			writeError(c, http.StatusInternalServerError, "pairing_renewal_failed", err.Error())
+			return
+		}
+		response["renewal_token"] = renewal
+	}
+	c.JSON(http.StatusCreated, response)
+}
+
+// renewalValid 判断 token 是否为上传的认证状态所属账号的续签凭据
+func (h *handler) renewalValid(token string, state json.RawMessage) bool {
+	var parsed struct {
+		Metadata struct {
+			ID string `json:"id"`
+		} `json:"geminiWeb2api"`
+	}
+	if json.Unmarshal(state, &parsed) != nil {
+		return false
+	}
+	digest := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare([]byte(h.Accounts.PairingRenewal(parsed.Metadata.ID)), []byte(hex.EncodeToString(digest[:]))) == 1
 }

@@ -27,36 +27,16 @@ import { lastLocation, useRememberLocation } from '@/app/remember'
 import { SessionError } from '@/app/SessionError'
 import { Collapse } from '@/components/ui/collapse'
 import { Loading } from '@/components/ui/states'
-import { useAccounts } from '@/features/accounts/queries'
-import type { Account } from '@/features/accounts/types'
+import { Tooltip } from '@/components/ui/tooltip'
 import { useSession } from '@/features/service/queries'
 import { fill, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
-
-// accountTone 是账号状态圆点的颜色类
-function accountTone(state: Account['state']) {
-  switch (state) {
-    case 'ready':
-      return 'bg-success'
-    case 'cooldown':
-      return 'bg-warning'
-    case 'auth_required':
-    case 'unavailable':
-      return 'bg-error'
-    case 'initializing':
-      return 'bg-info'
-    default:
-      return 'bg-foreground-subtle'
-  }
-}
 
 // NavItem 是一个导航目的地
 interface NavItem {
   to: string
   label: string
-  icon?: LucideIcon
-  dot?: string
-  badge?: string
+  icon: LucideIcon
   end?: boolean
 }
 
@@ -73,20 +53,10 @@ function NavRow({ item, className = navClass }: { item: NavItem; className?: str
       end={item.end ?? false}
       className={className}
     >
-      {item.icon && <item.icon size={20} aria-hidden className="shrink-0" />}
-      {item.dot && (
-        <span aria-hidden className="flex size-icon shrink-0 items-center justify-center">
-          <span className={'size-2 rounded-full ' + item.dot} />
-        </span>
-      )}
-      <span className="min-w-0 flex-1 truncate" title={item.label}>
-        {item.label}
-      </span>
-      {item.badge && (
-        <span className="shrink-0 rounded-sm bg-info-soft px-[6px] text-xs leading-[20px] text-primary">
-          {item.badge}
-        </span>
-      )}
+      <item.icon size={20} aria-hidden className="shrink-0" />
+      <Tooltip overflow label={item.label} side="right">
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      </Tooltip>
     </NavLink>
   )
 }
@@ -198,7 +168,6 @@ export function Layout() {
   const session = useSession()
   const authenticated = session.data?.authenticated === true
   const connection = useAdminEvents(authenticated)
-  const accounts = useAccounts()
   const [collapsed, setCollapsed] = useState(readCollapsed)
   useRememberLocation()
   if (session.isPending) return <Loading label={m.loading} />
@@ -242,12 +211,6 @@ export function Layout() {
       title: m.groupAccounts,
       icon: Users,
       items: [
-        ...(accounts.data?.accounts ?? []).map((account) => ({
-          to: '/accounts/' + encodeURIComponent(account.account_id),
-          label: account.email ?? account.account_id,
-          dot: accountTone(account.state),
-          ...(account.tier ? { badge: account.tier } : {}),
-        })),
         { to: '/accounts', label: m.accounts, icon: Users, end: true },
         { to: '/accounts/import', label: m.importAccount, icon: UserPlus },
       ],
@@ -335,10 +298,7 @@ export function Layout() {
               {m.offlineReason}
             </p>
           )}
-          <div
-            key={location.pathname}
-            className="flex min-h-full max-w-page animate-page-in flex-col gap-3 px-10 pt-8 pb-8 max-lg:px-4 max-lg:pt-4 [&>header]:mb-3"
-          >
+          <div className="flex min-h-full max-w-page flex-col gap-3 px-10 pt-8 pb-8 max-lg:px-4 max-lg:pt-4 [&>header]:mb-3">
             <Outlet />
           </div>
         </main>

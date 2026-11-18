@@ -1,11 +1,7 @@
 package gemini
 
-import (
-	"fmt"
-)
-
-// buildGeneratePayload 按当前官网 99 槽协议清单构造请求，modelSwitched 表示本轮模型与上一轮或账号默认模型不同
-func buildGeneratePayload(request GenerateRequest, language string, preferences Preferences, requestID, contextID string, temporaryChat, modelSwitched bool) (string, error) {
+// buildGeneratePayload 按当前官网 99 槽协议清单构造会话配置消息中的生成请求，正文槽为空，提示词由输入消息发送；modelSwitched 表示本轮模型与上一轮或账号默认模型不同
+func buildGeneratePayload(request GenerateRequest, language string, preferences Preferences, requestID, contextID string, temporaryChat, modelSwitched bool) []any {
 	inner := make([]any, 99)
 
 	attachments := any(nil)
@@ -16,7 +12,7 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 		}
 		attachments = values
 	}
-	message := []any{request.Prompt, 0, nil, attachments, nil, nil, 0}
+	message := []any{"", 0, nil, attachments, nil, nil, 0}
 	switch {
 	case request.Feature == FeatureVideo:
 		orientation, duration := 1, any(nil)
@@ -60,12 +56,15 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 		inner[19] = request.Gem
 	}
 	inner[27] = 1
-	inner[30] = []any{4, 16, 19}
+	inner[30] = []any{4, 27, 28, 16, 19, 12}
 	inner[41] = []any{2}
 	if preferences.Bool(preferenceSlot41) {
 		inner[41] = []any{1}
 	}
 	inner[49] = int(request.Feature)
+	if request.Feature == FeatureTask {
+		inner[83] = 1
+	}
 	if request.tools != nil {
 		inner[54] = []any{}
 		if len(request.tools.sources) > 0 {
@@ -84,7 +83,10 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 	inner[59] = requestID
 	inner[61] = []any{}
 	if request.personalIntelligence {
-		inner[67] = 0
+		inner[67] = 1
+		if temporaryChat {
+			inner[67] = 0
+		}
 	}
 	inner[68] = 1
 	inner[79] = request.ModelMode
@@ -107,14 +109,5 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 		inner[67] = nil
 		inner[97] = []any{0, 0}
 	}
-
-	encodedInner, err := pageJSON(inner)
-	if err != nil {
-		return "", fmt.Errorf("encode protocol envelope: %w", err)
-	}
-	outer, err := pageJSON([]any{nil, encodedInner})
-	if err != nil {
-		return "", fmt.Errorf("encode f.req: %w", err)
-	}
-	return outer, nil
+	return inner
 }

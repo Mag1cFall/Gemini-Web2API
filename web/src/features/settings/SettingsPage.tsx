@@ -1,30 +1,40 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { createContext, type ReactNode, use, useState } from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { FolderOpen, KeyRound } from 'lucide-react'
+import { createContext, type ReactNode, use, useEffect, useState } from 'react'
+import { useBlocker, useNavigate, useParams } from 'react-router'
 
 import { Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { DurationInput } from '@/components/ui/duration-input'
-import { Input, Textarea } from '@/components/ui/input'
+import { HelpTip } from '@/components/ui/help-tip'
+import { Input } from '@/components/ui/input'
 import { NumberInput } from '@/components/ui/number-input'
 import { Card, CardHeader, PageHeader } from '@/components/ui/page'
 import { Select } from '@/components/ui/select'
-import { ErrorState, Loading } from '@/components/ui/states'
+import { ErrorState, PagePlaceholder } from '@/components/ui/states'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useAccountLabel, useAccounts } from '@/features/accounts/queries'
+import { useModels } from '@/features/models/queries'
 import { maskKey, parseAccountBindings } from '@/features/settings/apiKeys'
+import { DirectoryDialog } from '@/features/settings/DirectoryDialog'
 import { ListInput } from '@/features/settings/ListInput'
 import { settingsMessages } from '@/features/settings/messages'
+import { OrderList } from '@/features/settings/OrderList'
+import { PairInput } from '@/features/settings/PairInput'
 import { ProxyPoolCard } from '@/features/settings/ProxyPoolCard'
 import { configKey, proxiesKey, useConfig } from '@/features/settings/queries'
 import type { ConfigPatch, ServiceConfig } from '@/features/settings/types'
+import { type SettingErrors, validateSettings } from '@/features/settings/validate'
 import { FilterMenu } from '@/features/usage/FilterMenu'
 import { api } from '@/lib/api'
-import { fill, useMessages } from '@/lib/i18n'
+import { useKeepPage } from '@/lib/desktop'
+import { formatDuration } from '@/lib/format'
+import { fill, useI18n, useMessages } from '@/lib/i18n'
 
 // tabs 是设置页的标签页，与 /settings/:section 对应
 const tabs = ['service', 'upstream', 'security', 'logging'] as const
@@ -35,6 +45,7 @@ const editableKeys = [
   'proxy_api_key',
   'proxy',
   'save_history',
+  'continue_session',
   'nonstream_keepalive',
   'fake_stream',
   'model_mapping',
@@ -67,6 +78,7 @@ const envNames: Record<string, string> = {
   proxy_api_key: 'PROXY_API_KEY',
   proxy: 'PROXY',
   save_history: 'GEMINI_SAVE_HISTORY',
+  continue_session: 'GEMINI_CONTINUE_SESSION',
   nonstream_keepalive: 'NONSTREAM_KEEPALIVE',
   fake_stream: 'FAKE_STREAM',
   model_mapping: 'MODEL_MAPPING',
@@ -95,20 +107,24 @@ const envNames: Record<string, string> = {
 // LockedContext 提供由环境变量或启动参数决定的配置项，键为 .env 名
 const LockedContext = createContext<ServiceConfig['locked']>({})
 
-// SettingRow 是行卡片中的一行：左侧名称、说明与生效方式，右侧控件
+// SettingRow 是行卡片中的一行：左侧名称、说明提示与重启后生效标记，右侧控件，格式错误显示在控件下方
 function SettingRow({
   id,
   label,
   hint,
   restart = false,
   align = 'center',
+  wide = false,
+  error,
   children,
 }: {
   id: string
   label: string
-  hint: string
+  hint: ReactNode
   restart?: boolean
   align?: 'center' | 'start'
+  wide?: boolean
+  error?: string | undefined
   children: ReactNode
 }) {
   const m = useMessages(settingsMessages)
@@ -121,31 +137,40 @@ function SettingRow({
         (align === 'start' ? 'md:items-start' : 'md:items-center')
       }
     >
-      <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <label htmlFor={id} className="text-base">
           {label}
         </label>
-        <p id={id + '-hint'} className="text-xs text-foreground-muted">
-          {hint}
-          {locked ? (
-            <Tooltip label={locked === 'env' ? fill(m.lockedEnvHint, { key }) : m.lockedFlagHint}>
-              <button type="button" className="ml-2 inline-flex cursor-default align-middle">
-                <Tag>{locked === 'env' ? m.lockedEnv : m.lockedFlag}</Tag>
-              </button>
-            </Tooltip>
-          ) : (
-            <span className="ml-2 rounded-sm bg-muted px-[6px] whitespace-nowrap text-foreground-muted">
-              {restart ? m.restart : m.immediate}
+        <HelpTip label={fill(m.helpFor, { name: label })}>{hint}</HelpTip>
+        {locked ? (
+          <Tooltip label={locked === 'env' ? fill(m.lockedEnvHint, { key }) : m.lockedFlagHint}>
+            <button type="button" className="inline-flex cursor-default align-middle">
+              <Tag>{locked === 'env' ? m.lockedEnv : m.lockedFlag}</Tag>
+            </button>
+          </Tooltip>
+        ) : (
+          restart && (
+            <span className="rounded-sm bg-muted px-[6px] text-xs whitespace-nowrap text-foreground-muted">
+              {m.restart}
             </span>
-          )}
-        </p>
+          )
+        )}
       </div>
-      <fieldset
-        disabled={Boolean(locked)}
-        className="flex w-full min-w-0 shrink-0 justify-end md:w-[260px]"
+      <div
+        className={
+          'flex w-full min-w-0 shrink-0 flex-col items-end gap-1 ' +
+          (wide ? 'md:w-[520px]' : 'md:w-[260px]')
+        }
       >
-        {children}
-      </fieldset>
+        <fieldset disabled={Boolean(locked)} className="flex w-full min-w-0 justify-end">
+          {children}
+        </fieldset>
+        {error && (
+          <p id={id + '-error'} role="alert" className="self-start text-xs text-error-text">
+            {error}
+          </p>
+        )}
+      </div>
     </div>
   )
 }
@@ -186,7 +211,7 @@ function SwitchControl({
         id={id}
         checked={checked}
         onCheckedChange={onCheckedChange}
-        aria-describedby={id + '-hint'}
+        aria-describedby={id + '-error'}
       />
     </span>
   )
@@ -215,9 +240,9 @@ function KeyAccounts({
         const selected = bindings.get(key) ?? []
         return (
           <li key={key} className="flex min-w-0 items-center justify-between gap-2">
-            <code className="min-w-0 truncate font-mono text-sm" title={key}>
-              {maskKey(key)}
-            </code>
+            <Tooltip label={key}>
+              <code className="min-w-0 truncate font-mono text-sm">{maskKey(key)}</code>
+            </Tooltip>
             <FilterMenu
               label={selected.length === 0 ? m.keyAccountsAll : selected.map(label).join(', ')}
               options={accounts.map((item) => item.account_id)}
@@ -243,7 +268,101 @@ function KeyAccounts({
   )
 }
 
-// SettingsPage 按标签页编辑 .env 中的服务配置，有改动时底部浮出保存栏
+// randomKey 返回以 sk- 开头、带 192 位随机数的 API key
+function randomKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24))
+  return 'sk-' + [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+// HedgeStat 对应 GET /api/hedge 的一项
+interface HedgeStat {
+  model: string
+  p95_ms: number
+  samples: number
+  ready: boolean
+}
+
+// HedgeStats 列出各备用请求模型近 24 小时原请求首事件等待的当前 p95
+function HedgeStats() {
+  const m = useMessages(settingsMessages)
+  const { locale } = useI18n()
+  const stats = useQuery({
+    queryKey: ['hedge'],
+    queryFn: async () => (await api<{ models: HedgeStat[] }>('/api/hedge')).models,
+    refetchInterval: 30_000,
+  })
+  if (!stats.data || stats.data.length === 0) return null
+  return (
+    <ul className="flex w-full flex-col gap-[2px] text-xs text-foreground-muted">
+      {stats.data.map((item) => (
+        <li key={item.model} className="wrap-anywhere">
+          {item.ready
+            ? fill(m.hedgeP95, {
+                model: item.model,
+                p95: formatDuration(item.p95_ms, locale),
+                samples: item.samples,
+              })
+            : fill(m.hedgeCollecting, { model: item.model, samples: item.samples })}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+// LeaveGuard 在有未保存改动时拦截站内跳转并询问是否离开，关闭或刷新标签页时由浏览器询问
+function LeaveGuard({ dirty }: { dirty: boolean }) {
+  const m = useMessages(settingsMessages)
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      dirty && currentLocation.pathname !== nextLocation.pathname,
+  )
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => {
+      window.removeEventListener('beforeunload', warn)
+    }
+  }, [dirty])
+  return (
+    <Dialog
+      open={blocker.state === 'blocked'}
+      onOpenChange={(open) => {
+        if (!open) blocker.reset?.()
+      }}
+    >
+      <DialogContent
+        title={m.leaveTitle}
+        description={m.leaveHint}
+        closeLabel={m.stay}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                blocker.reset?.()
+              }}
+            >
+              {m.stay}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                blocker.proceed?.()
+              }}
+            >
+              {m.leave}
+            </Button>
+          </>
+        }
+      />
+    </Dialog>
+  )
+}
+
+// SettingsPage 按标签页编辑 .env 中的服务配置，格式错误在该行即时显示，有改动时底部浮出保存栏，离开前确认
 export function SettingsPage() {
   const m = useMessages(settingsMessages)
   const client = useQueryClient()
@@ -253,8 +372,11 @@ export function SettingsPage() {
   const config = useConfig()
   const accounts = useAccounts().data?.accounts ?? []
   const accountLabel = useAccountLabel()
+  const catalog = (useModels().data?.models ?? []).map((model) => model.id)
   const [edited, setEdited] = useState<ServiceConfig | null>(null)
   const [password, setPassword] = useState('')
+  const [browsing, setBrowsing] = useState<{ start: string; replace: (path: string) => void }>()
+  useKeepPage(edited !== null || password !== '')
   const save = useMutation({
     mutationFn: (patch: ConfigPatch) =>
       api<ServiceConfig>('/api/config', { method: 'PUT', json: patch }),
@@ -269,7 +391,9 @@ export function SettingsPage() {
       toast({ tone: 'error', title: fill(m.saveFailed, { message: error.message }) })
     },
   })
-  if (config.isPending) return <Loading label={m.title} />
+  if (config.isPending) {
+    return <PagePlaceholder title={m.title} description={m.description} label={m.title} />
+  }
   if (config.isError) {
     return (
       <ErrorState
@@ -291,11 +415,26 @@ export function SettingsPage() {
   }
   if (password) patch.admin_password = password
   const dirty = Object.keys(patch).length > 0
+  const problems: SettingErrors = validateSettings(value, password, original.admin_password_set)
+  const errorText = {
+    listen: m.errorListen,
+    proxy: m.errorProxy,
+    authStates: m.errorAuthStates,
+    password: m.errorPassword,
+    incomplete: m.errorPairIncomplete,
+    duplicate: m.errorPairDuplicate,
+  }
+  const errorOf = (key: keyof SettingErrors) => {
+    const problem = problems[key]
+    return problem && errorText[problem]
+  }
+  const invalid = Object.keys(problems).length > 0
   const labels: Record<string, string> = {
     listen_addr: m.listenAddr,
     proxy: m.proxy,
     auth_states: m.authStates,
     save_history: m.saveHistory,
+    continue_session: m.continueSession,
     nonstream_keepalive: m.nonstreamKeepalive,
     fake_stream: m.fakeStream,
     model_mapping: m.modelMapping,
@@ -318,28 +457,51 @@ export function SettingsPage() {
     first_event_hedge: m.firstEventHedge,
     first_event_hedge_models: m.hedgeModels,
   }
-  const accountOrder = value.account_order.split(',').filter(Boolean)
+  const ordered = value.account_order.split(',').filter(Boolean)
+  const accountOrder = [
+    ...ordered.filter((id) => accounts.some((item) => item.account_id === id)),
+    ...accounts.map((item) => item.account_id).filter((id) => !ordered.includes(id)),
+  ]
   const hedgeMode = ['off', 'auto'].includes(value.first_event_hedge)
     ? value.first_event_hedge
     : 'fixed'
   const envLabel = (key: string) =>
     labels[Object.keys(envNames).find((field) => envNames[field] === key) ?? ''] ?? key
-  const text = (key: 'listen_addr' | 'auth_states' | 'admin_username', placeholder = '') => (
+  const text = (key: 'listen_addr' | 'admin_username', placeholder = '') => (
     <Input
       id={key}
       value={value[key]}
       placeholder={placeholder}
-      aria-describedby={key + '-hint'}
+      aria-invalid={problems[key] ? true : undefined}
+      aria-describedby={key + '-error'}
       onChange={(event) => {
         set(key, event.target.value)
       }}
+    />
+  )
+  const modelSelect = (current: string, onChange: (next: string) => void) => (
+    <Select
+      label={m.chooseModel}
+      size="sm"
+      value={current || '__none'}
+      className="w-full font-mono"
+      onValueChange={(next) => {
+        onChange(next === '__none' ? '' : next)
+      }}
+      options={[
+        ...(current ? [] : [{ value: '__none', label: m.chooseModel }]),
+        ...[...new Set([...(current ? [current] : []), ...catalog])].map((id) => ({
+          value: id,
+          label: id,
+        })),
+      ]}
     />
   )
   const duration = (key: 'account_cooldown' | 'session_ttl' | 'init_timeout', label: string) => (
     <DurationInput
       id={key}
       value={value[key]}
-      aria-describedby={key + '-hint'}
+      aria-describedby={key + '-error'}
       units={{ s: m.unitSeconds, m: m.unitMinutes, h: m.unitHours }}
       unitLabel={fill(m.unitOf, { name: label })}
       onChange={(next) => {
@@ -389,10 +551,22 @@ export function SettingsPage() {
 
       {tab === 'service' && (
         <SettingCard title={m.tabService}>
-          <SettingRow id="listen_addr" label={m.listenAddr} hint={m.listenAddrHint} restart>
+          <SettingRow
+            id="listen_addr"
+            label={m.listenAddr}
+            hint={m.listenAddrHint}
+            restart
+            error={errorOf('listen_addr')}
+          >
             {text('listen_addr', '127.0.0.1:8007')}
           </SettingRow>
-          <SettingRow id="proxy" label={m.proxy} hint={m.proxyHint} align="start">
+          <SettingRow
+            id="proxy"
+            label={m.proxy}
+            hint={m.proxyHint}
+            align="start"
+            error={errorOf('proxy')}
+          >
             <ListInput
               id="proxy"
               value={value.proxy}
@@ -400,13 +574,49 @@ export function SettingsPage() {
               addLabel={m.proxyAdd}
               removeLabel={m.proxyRemove}
               placeholder="http://127.0.0.1:7890"
+              invalid={Boolean(problems.proxy)}
               onChange={(next) => {
                 set('proxy', next)
               }}
             />
           </SettingRow>
-          <SettingRow id="auth_states" label={m.authStates} hint={m.authStatesHint} restart>
-            {text('auth_states', 'auth')}
+          <SettingRow
+            id="auth_states"
+            label={m.authStates}
+            hint={m.authStatesHint}
+            restart
+            align="start"
+            error={errorOf('auth_states')}
+          >
+            <ListInput
+              id="auth_states"
+              value={value.auth_states}
+              itemLabel={m.authStates}
+              addLabel={m.addRow}
+              removeLabel={m.removeRow}
+              placeholder="auth"
+              invalid={Boolean(problems.auth_states)}
+              rowAction={(index, replace) => (
+                <Tooltip label={m.browse}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={m.browse}
+                    onClick={() => {
+                      setBrowsing({
+                        start: value.auth_states.split(',')[index]?.trim() ?? '',
+                        replace,
+                      })
+                    }}
+                  >
+                    <FolderOpen size={16} aria-hidden />
+                  </Button>
+                </Tooltip>
+              )}
+              onChange={(next) => {
+                set('auth_states', next)
+              }}
+            />
           </SettingRow>
         </SettingCard>
       )}
@@ -420,6 +630,15 @@ export function SettingsPage() {
               checked={value.save_history}
               onCheckedChange={(next) => {
                 set('save_history', next)
+              }}
+            />
+          </SettingRow>
+          <SettingRow id="continue_session" label={m.continueSession} hint={m.continueSessionHint}>
+            <SwitchControl
+              id="continue_session"
+              checked={value.continue_session}
+              onCheckedChange={(next) => {
+                set('continue_session', next)
               }}
             />
           </SettingRow>
@@ -450,15 +669,29 @@ export function SettingsPage() {
             label={m.modelMapping}
             hint={m.modelMappingHint}
             align="start"
+            wide
+            error={errorOf('model_mapping')}
           >
-            <Textarea
+            <PairInput
               id="model_mapping"
-              rows={3}
-              placeholder="gpt-4o:gemini-3.8-flash"
-              aria-describedby="model_mapping-hint"
-              value={value.model_mapping.split(',').join('\n')}
-              onChange={(event) => {
-                set('model_mapping', event.target.value.split('\n').join(','))
+              value={value.model_mapping}
+              invalid={Boolean(problems.model_mapping)}
+              addLabel={m.addRow}
+              removeLabel={m.removeRow}
+              left={(current, onChange) => (
+                <Input
+                  value={current}
+                  placeholder="gpt-4o"
+                  aria-label={m.mappingAlias}
+                  className="font-mono"
+                  onChange={(event) => {
+                    onChange(event.target.value)
+                  }}
+                />
+              )}
+              right={(current, onChange) => modelSelect(current, onChange)}
+              onChange={(next) => {
+                set('model_mapping', next)
               }}
             />
           </SettingRow>
@@ -469,7 +702,7 @@ export function SettingsPage() {
           >
             <NumberInput
               id="per_account_concurrency"
-              aria-describedby="per_account_concurrency-hint"
+              aria-describedby="per_account_concurrency-error"
               value={value.per_account_concurrency}
               min={1}
               max={64}
@@ -485,7 +718,7 @@ export function SettingsPage() {
               id="routing_strategy"
               label={m.routingStrategy}
               value={value.routing_strategy}
-              className="w-[160px]"
+              className="min-w-[160px]"
               onValueChange={(next) => {
                 set('routing_strategy', next)
               }}
@@ -495,35 +728,63 @@ export function SettingsPage() {
               ]}
             />
           </SettingRow>
-          <SettingRow id="account_order" label={m.accountOrder} hint={m.accountOrderHint}>
-            <FilterMenu
-              label={
-                accountOrder.length === 0
-                  ? m.accountOrderImport
-                  : accountOrder.map(accountLabel).join(', ')
-              }
-              options={accounts.map((item) => item.account_id)}
-              selected={accountOrder}
-              format={accountLabel}
-              onChange={(next) => {
-                set('account_order', next.join(','))
-              }}
-            />
+          <SettingRow
+            id="account_order"
+            label={m.accountOrder}
+            hint={m.accountOrderHint}
+            align="start"
+          >
+            {accountOrder.length === 0 ? (
+              <p className="text-sm text-foreground-muted">{m.noAccounts}</p>
+            ) : (
+              <OrderList
+                id="account_order"
+                items={accountOrder}
+                format={accountLabel}
+                dragLabel={m.dragToReorder}
+                moveUpLabel={m.moveUp}
+                moveDownLabel={m.moveDown}
+                onChange={(next) => {
+                  set('account_order', next.join(','))
+                }}
+              />
+            )}
           </SettingRow>
           <SettingRow
             id="model_accounts"
             label={m.modelAccounts}
             hint={m.modelAccountsHint}
             align="start"
+            wide
+            error={errorOf('model_accounts')}
           >
-            <Textarea
+            <PairInput
               id="model_accounts"
-              rows={3}
-              placeholder="gemini-4-carbon:account-a|account-b"
-              aria-describedby="model_accounts-hint"
-              value={value.model_accounts.split(',').join('\n')}
-              onChange={(event) => {
-                set('model_accounts', event.target.value.split('\n').join(','))
+              value={value.model_accounts}
+              invalid={Boolean(problems.model_accounts)}
+              addLabel={m.addRow}
+              removeLabel={m.removeRow}
+              left={(current, onChange) => modelSelect(current, onChange)}
+              right={(current, onChange) => {
+                const selected = current.split('|').filter(Boolean)
+                return (
+                  <FilterMenu
+                    label={
+                      selected.length === 0
+                        ? m.chooseAccounts
+                        : selected.map(accountLabel).join(', ')
+                    }
+                    options={accounts.map((item) => item.account_id)}
+                    selected={selected}
+                    format={accountLabel}
+                    onChange={(next) => {
+                      onChange(next.join('|'))
+                    }}
+                  />
+                )
+              }}
+              onChange={(next) => {
+                set('model_accounts', next)
               }}
             />
           </SettingRow>
@@ -536,45 +797,53 @@ export function SettingsPage() {
           <SettingRow id="init_timeout" label={m.initTimeout} hint={m.initTimeoutHint}>
             {duration('init_timeout', m.initTimeout)}
           </SettingRow>
-          <SettingRow id="first_event_hedge" label={m.firstEventHedge} hint={m.firstEventHedgeHint}>
-            <span className="flex items-center gap-2">
-              <Select
-                id="first_event_hedge"
-                label={m.firstEventHedge}
-                value={hedgeMode}
-                className="w-[128px]"
-                onValueChange={(next) => {
-                  set('first_event_hedge', next === 'fixed' ? '30' : next)
-                }}
-                options={[
-                  { value: 'off', label: m.hedgeOff },
-                  { value: 'auto', label: m.hedgeAuto },
-                  { value: 'fixed', label: m.hedgeFixed },
-                ]}
-              />
-              {hedgeMode === 'fixed' && (
-                <>
-                  <NumberInput
-                    aria-label={m.hedgeFixed}
-                    value={Number(value.first_event_hedge)}
-                    min={1}
-                    max={600}
-                    decreaseLabel={m.decrease}
-                    increaseLabel={m.increase}
-                    onChange={(next) => {
-                      set('first_event_hedge', String(next))
-                    }}
-                  />
-                  <span className="text-sm text-foreground-muted">{m.unitSeconds}</span>
-                </>
-              )}
+          <SettingRow
+            id="first_event_hedge"
+            label={m.firstEventHedge}
+            hint={m.firstEventHedgeHint}
+            align="start"
+          >
+            <span className="flex flex-col items-end gap-2">
+              <span className="flex items-center gap-2">
+                <Select
+                  id="first_event_hedge"
+                  label={m.firstEventHedge}
+                  value={hedgeMode}
+                  className="min-w-[128px]"
+                  onValueChange={(next) => {
+                    set('first_event_hedge', next === 'fixed' ? '30' : next)
+                  }}
+                  options={[
+                    { value: 'off', label: m.hedgeOff },
+                    { value: 'auto', label: m.hedgeAuto },
+                    { value: 'fixed', label: m.hedgeFixed },
+                  ]}
+                />
+                {hedgeMode === 'fixed' && (
+                  <>
+                    <NumberInput
+                      aria-label={m.hedgeFixed}
+                      value={Number(value.first_event_hedge)}
+                      min={1}
+                      max={600}
+                      decreaseLabel={m.decrease}
+                      increaseLabel={m.increase}
+                      onChange={(next) => {
+                        set('first_event_hedge', String(next))
+                      }}
+                    />
+                    <span className="text-sm text-foreground-muted">{m.unitSeconds}</span>
+                  </>
+                )}
+              </span>
+              {hedgeMode === 'auto' && <HedgeStats />}
             </span>
           </SettingRow>
           <SettingRow id="first_event_hedge_models" label={m.hedgeModels} hint={m.hedgeModelsHint}>
             <Input
               id="first_event_hedge_models"
               value={value.first_event_hedge_models}
-              aria-describedby="first_event_hedge_models-hint"
+              aria-describedby="first_event_hedge_models-error"
               className="font-mono"
               onChange={(event) => {
                 set('first_event_hedge_models', event.target.value)
@@ -593,6 +862,18 @@ export function SettingsPage() {
               itemLabel={m.apiKey}
               addLabel={m.apiKeyAdd}
               removeLabel={m.apiKeyRemove}
+              actions={(append) => (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    append(randomKey())
+                  }}
+                >
+                  <KeyRound size={16} aria-hidden />
+                  {m.generateKey}
+                </Button>
+              )}
               onChange={(next) => {
                 set('proxy_api_key', next)
               }}
@@ -632,12 +913,14 @@ export function SettingsPage() {
             id="admin_password"
             label={m.adminPassword}
             hint={original.admin_password_set ? m.adminPasswordKeep : m.adminPasswordHint}
+            error={errorOf('admin_password')}
           >
             <Input
               id="admin_password"
               type="password"
               autoComplete="new-password"
-              aria-describedby="admin_password-hint"
+              aria-invalid={problems.admin_password ? true : undefined}
+              aria-describedby="admin_password-error"
               placeholder={original.admin_password_set ? '••••••••' : ''}
               value={password}
               onChange={(event) => {
@@ -655,7 +938,7 @@ export function SettingsPage() {
               id="log_level"
               label={m.logLevel}
               value={value.log_level}
-              className="w-[120px]"
+              className="min-w-[120px]"
               onValueChange={(next) => {
                 set('log_level', next)
               }}
@@ -670,7 +953,7 @@ export function SettingsPage() {
               id="log_format"
               label={m.logFormat}
               value={value.log_format}
-              className="w-[120px]"
+              className="min-w-[120px]"
               onValueChange={(next) => {
                 set('log_format', next)
               }}
@@ -693,7 +976,7 @@ export function SettingsPage() {
             <span className="flex items-center gap-2">
               <NumberInput
                 id="log_max_total_mb"
-                aria-describedby="log_max_total_mb-hint"
+                aria-describedby="log_max_total_mb-error"
                 value={value.log_max_total_mb}
                 min={20}
                 max={100000}
@@ -739,17 +1022,35 @@ export function SettingsPage() {
             >
               {m.discard}
             </Button>
-            <Button
-              variant="primary"
-              loading={save.isPending}
-              onClick={() => {
-                save.mutate(patch)
-              }}
-            >
-              {m.save}
-            </Button>
+            <Tooltip label={invalid ? m.invalidSave : m.save}>
+              <span>
+                <Button
+                  variant="primary"
+                  loading={save.isPending}
+                  disabled={invalid}
+                  onClick={() => {
+                    save.mutate(patch)
+                  }}
+                >
+                  {m.save}
+                </Button>
+              </span>
+            </Tooltip>
           </div>
         </div>
+      )}
+      <LeaveGuard dirty={dirty} />
+      {browsing && (
+        <DirectoryDialog
+          start={browsing.start}
+          onChoose={(path) => {
+            browsing.replace(path)
+            setBrowsing(undefined)
+          }}
+          onClose={() => {
+            setBrowsing(undefined)
+          }}
+        />
       )}
     </LockedContext>
   )

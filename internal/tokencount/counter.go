@@ -2,28 +2,30 @@ package tokencount
 
 import (
 	"bytes"
-	"compress/gzip"
 	_ "embed"
 	"fmt"
 	"hash/maphash"
 	"strings"
 	"sync"
 
-	sentencepiece "github.com/eliben/go-sentencepiece"
+	sentencepiece "github.com/Mag1cFall/go-sentencepiece"
+	"github.com/klauspost/compress/zstd"
 )
 
-//go:embed gemma3.model.gz
+//go:embed gemma3.model.zst
 var modelData []byte
 
 // processor 在首次计数或解码时解析内嵌的 Gemini 分词器模型
 var processor = sync.OnceValue(loadProcessor)
 
 func loadProcessor() *sentencepiece.Processor {
-	model, err := gzip.NewReader(bytes.NewReader(modelData))
+	decoder, _ := zstd.NewReader(nil)
+	model, err := decoder.DecodeAll(modelData, nil)
+	decoder.Close()
 	if err != nil {
 		panic(err)
 	}
-	processor, err := sentencepiece.NewProcessor(model)
+	processor, err := sentencepiece.NewProcessor(bytes.NewReader(model))
 	if err != nil {
 		panic(err)
 	}

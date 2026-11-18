@@ -1,3 +1,5 @@
+import { useEffect, useId } from 'react'
+
 // shellKey 是会话存储中记录宿主的键，刷新页面后仍保持桌面模式
 const shellKey = 'gemini-web2api.shell'
 
@@ -34,3 +36,27 @@ export function windowControl(action: WindowAction) {
 
 // maximisedEvent 是桌面壳通知窗口最大化状态变化的页面事件
 export const maximisedEvent = 'desktop:maximised'
+
+// keepers 是关闭窗口时需要保留页面的原因：进行中的生成与未保存的修改
+const keepers = new Set<string>()
+
+// reportBusy 把是否需要保留页面报告给桌面壳，页面空闲时关闭窗口即释放窗口与 WebView
+function reportBusy() {
+  if (isDesktop) window._wails?.invoke('desktop:busy:' + (keepers.size > 0 ? '1' : '0'))
+}
+
+reportBusy()
+
+// useKeepPage 在 keep 为真期间让桌面窗口关闭时只隐藏，页面与进行中的请求保留到空闲
+export function useKeepPage(keep: boolean) {
+  const id = useId()
+  useEffect(() => {
+    if (!keep) return
+    keepers.add(id)
+    reportBusy()
+    return () => {
+      keepers.delete(id)
+      reportBusy()
+    }
+  }, [id, keep])
+}

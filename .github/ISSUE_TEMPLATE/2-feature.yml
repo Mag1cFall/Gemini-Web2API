@@ -1,0 +1,15 @@
+name: 功能建议 / Feature request
+description: 想要什么功能 / Something you'd like to have
+body:
+  - type: textarea
+    id: request
+    attributes:
+      label: 想要什么，用来做什么 / What you want and what for
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: 管理端“关于”页显示的版本号 / Shown on the About page of the admin console
+      placeholder: v0.2.0

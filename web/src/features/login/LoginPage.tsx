@@ -107,7 +107,7 @@ const loginMessages = defineMessages({
     invalid: 'Benutzername oder Passwort ist falsch.',
     limited: 'Zu viele fehlgeschlagene Versuche. Bitte in einer Minute erneut versuchen.',
     disabled:
-      'Die Fernanmeldung ist aus. Öffnen Sie die Konsole auf dem Computer, auf dem der Dienst läuft, und aktivieren Sie sie unter Einstellungen › Admin-Anmeldung.',
+      'Die Fernanmeldung ist aus. Öffne die Konsole auf dem Computer, auf dem der Dienst läuft, und aktiviere sie unter Einstellungen › Admin-Anmeldung.',
     failed: 'Anmeldung fehlgeschlagen: {message}',
   },
 })

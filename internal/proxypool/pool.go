@@ -28,6 +28,13 @@ type proxyState struct {
 	checked time.Time
 	latency time.Duration
 	err     string
+	// blockedUntil 是出口被人机验证页拦截后停用到的时间
+	blockedUntil time.Time
+}
+
+// usable 报告代理检测可用且没有因人机验证拦截停用
+func (s *proxyState) usable() bool {
+	return s.healthy && !time.Now().Before(s.blockedUntil)
 }
 
 // Status 是代理池中一个代理的当前状态与绑定的账号
@@ -37,7 +44,9 @@ type Status struct {
 	CheckedAt time.Time `json:"checked_at,omitzero"`
 	LatencyMS int64     `json:"latency_ms"`
 	Error     string    `json:"error,omitempty"`
-	Accounts  []string  `json:"accounts"`
+	// BlockedUntil 是出口被人机验证页拦截后停用到的时间，没有停用时省略
+	BlockedUntil time.Time `json:"blocked_until,omitzero"`
+	Accounts     []string  `json:"accounts"`
 }
 
 // New 创建代理池，代理在首次检测前视为可用
@@ -87,7 +96,7 @@ func (p *Pool) rebalance() {
 	anyHealthy := p.anyHealthy()
 	accounts := make(map[*proxyState][]string, len(p.proxies))
 	for _, state := range p.proxies {
-		if !anyHealthy || state.healthy {
+		if !anyHealthy || state.usable() {
 			accounts[state] = []string{}
 		}
 	}
@@ -139,7 +148,7 @@ func (p *Pool) Assign(accountID string) string {
 		delete(p.bindings, accountID)
 		return System()
 	}
-	if current := p.bindings[accountID]; current != nil && (current.healthy || !p.anyHealthy()) {
+	if current := p.bindings[accountID]; current != nil && (current.usable() || !p.anyHealthy()) {
 		return current.url
 	}
 	best := p.leastBound(accountID)
@@ -160,7 +169,7 @@ func (p *Pool) Pick() string {
 // anyHealthy 报告是否有可用代理
 func (p *Pool) anyHealthy() bool {
 	for _, state := range p.proxies {
-		if state.healthy {
+		if state.usable() {
 			return true
 		}
 	}
@@ -178,7 +187,7 @@ func (p *Pool) leastBound(accountID string) *proxyState {
 	anyHealthy := p.anyHealthy()
 	var best *proxyState
 	for _, state := range p.proxies {
-		if anyHealthy && !state.healthy {
+		if anyHealthy && !state.usable() {
 			continue
 		}
 		if best == nil || counts[state] < counts[best] {
@@ -235,15 +244,38 @@ func (p *Pool) Check(ctx context.Context, probe func(context.Context, string) (t
 		if !state.healthy {
 			state.latency, state.err = 0, results[index].err.Error()
 		}
-		anyHealthy = anyHealthy || state.healthy
+		anyHealthy = anyHealthy || state.usable()
 	}
 	if !anyHealthy {
 		return nil
 	}
 	moved := []string{}
 	for id, state := range p.bindings {
-		if !state.healthy {
+		if !state.usable() {
 			moved = append(moved, id)
+		}
+	}
+	sort.Strings(moved)
+	return moved
+}
+
+// Block 在 until 之前不使用该代理，返回绑定在它上面且有其他可用代理可改绑的账号
+func (p *Pool) Block(url string, until time.Time) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	moved := []string{}
+	for _, state := range p.proxies {
+		if state.url != url {
+			continue
+		}
+		state.blockedUntil = until
+		if !p.anyHealthy() {
+			return nil
+		}
+		for id, bound := range p.bindings {
+			if bound == state {
+				moved = append(moved, id)
+			}
 		}
 	}
 	sort.Strings(moved)
@@ -266,6 +298,9 @@ func (p *Pool) Status() []Status {
 			URL: Redact(state.url), Healthy: state.healthy, CheckedAt: state.checked,
 			LatencyMS: state.latency.Milliseconds(), Error: state.err, Accounts: ids,
 		})
+		if time.Now().Before(state.blockedUntil) {
+			result[len(result)-1].BlockedUntil = state.blockedUntil
+		}
 	}
 	return result
 }

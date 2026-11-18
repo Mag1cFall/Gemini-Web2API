@@ -19,19 +19,20 @@ function emit() {
   for (const listener of listeners) listener()
 }
 
-// successDuration 是成功提示自动消失前的显示时长
-const successDuration = 2500
+// toastDuration 是提示自动消失前的显示时长
+export const toastDuration = 5000
 
-// toast 显示一条提示：成功提示 2.5 秒后自动消失，失败提示保留到用户关闭
+// toastLimit 是同时显示的提示条数，超出时移除最早的一条
+const toastLimit = 3
+
+// toast 显示一条提示，5 秒后自动消失，最多同时显示 3 条
 export function toast(item: Omit<ToastItem, 'id'>) {
   const id = nextId++
-  items = [...items, { ...item, id }]
+  items = [...items, { ...item, id }].slice(-toastLimit)
   emit()
-  if (item.tone === 'success') {
-    setTimeout(() => {
-      dismiss(id)
-    }, successDuration)
-  }
+  setTimeout(() => {
+    dismiss(id)
+  }, toastDuration)
 }
 
 // dismiss 移除指定提示

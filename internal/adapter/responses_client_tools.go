@@ -31,6 +31,37 @@ var responsesClientTools = map[string]ToolDefinition{
 	},
 }
 
+// computerAction 是 computer 工具单个动作的参数结构
+const computerAction = `{"type":"object","properties":{"type":{"type":"string","enum":["click","double_click","drag","keypress","move","screenshot","scroll","type","wait"]},"button":{"type":"string","enum":["left","right","wheel","back","forward"]},"x":{"type":"integer"},"y":{"type":"integer"},"path":{"type":"array","items":{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]}},"keys":{"type":"array","items":{"type":"string"}},"scroll_x":{"type":"integer"},"scroll_y":{"type":"integer"},"text":{"type":"string"}},"required":["type"]}`
+
+// computerToolDefinition 把 computer_use_preview 与 computer 工具声明为名为 computer 的函数：前者参数为单个动作并在说明中写屏幕尺寸与环境，后者参数为按顺序执行的动作列表
+func computerToolDefinition(tool ResponsesTool) ToolDefinition {
+	description := "Controls the user's computer with the mouse and keyboard. screenshot captures the screen, click presses button at x and y, double_click double-clicks at x and y, drag holds the left button along path, keypress presses keys together, move moves the mouse to x and y, scroll scrolls by scroll_x and scroll_y at x and y, type types text, wait pauses briefly."
+	if tool.Type == "computer_use_preview" {
+		var environment string
+		_ = json.Unmarshal(tool.Environment, &environment)
+		description = fmt.Sprintf("The %s screen is %dx%d pixels; x and y are pixel positions from the top-left corner. ", environment, tool.DisplayWidth, tool.DisplayHeight) + description
+		return ToolDefinition{Name: "computer", Kind: tool.Type, Description: description, Parameters: json.RawMessage(computerAction)}
+	}
+	return ToolDefinition{Name: "computer", Kind: tool.Type, Description: description + " The actions run in order.", Parameters: json.RawMessage(`{"type":"object","properties":{"actions":{"type":"array","items":` + computerAction + `}},"required":["actions"]}`)}
+}
+
+// additionalTools 返回输入中 additional_tools 项提供的工具
+func additionalTools(input json.RawMessage) []ResponsesTool {
+	var items []struct {
+		Type  string          `json:"type"`
+		Tools []ResponsesTool `json:"tools"`
+	}
+	_ = json.Unmarshal(input, &items)
+	var tools []ResponsesTool
+	for _, item := range items {
+		if item.Type == "additional_tools" {
+			tools = append(tools, item.Tools...)
+		}
+	}
+	return tools
+}
+
 // customToolDefinition 把 custom 工具声明为只接收字符串 input 的函数，语法格式写入描述
 func customToolDefinition(tool ResponsesTool, namespace string) ToolDefinition {
 	var format struct {
@@ -92,6 +123,14 @@ func responsesCallItem(call ToolCall, bridge ToolBridge) gin.H {
 		item["type"], item["action"], item["environment"] = "shell_call", action, nil
 	case "apply_patch":
 		item["type"], item["operation"] = "apply_patch_call", json.RawMessage(call.Arguments)
+	case "computer_use_preview":
+		item["type"], item["action"], item["pending_safety_checks"] = "computer_call", json.RawMessage(call.Arguments), []any{}
+	case "computer":
+		var arguments struct {
+			Actions json.RawMessage `json:"actions"`
+		}
+		_ = json.Unmarshal(call.Arguments, &arguments)
+		item["type"], item["actions"], item["pending_safety_checks"] = "computer_call", arguments.Actions, []any{}
 	default:
 		item["type"], item["name"], item["arguments"] = "function_call", name, string(call.Arguments)
 	}
@@ -184,6 +223,9 @@ func restrictAllowedTools(bridge *ToolBridge, raw json.RawMessage) error {
 		if _, ok := responsesClientTools[tool.Type]; ok {
 			names[tool.Type] = true
 		}
+		if tool.Type == "computer" || tool.Type == "computer_use_preview" {
+			names["computer"] = true
+		}
 	}
 	bridge.Definitions = slices.DeleteFunc(bridge.Definitions, func(definition ToolDefinition) bool {
 		name := definition.Name
@@ -193,7 +235,7 @@ func restrictAllowedTools(bridge *ToolBridge, raw json.RawMessage) error {
 		return !names[definition.Name] && !names[name]
 	})
 	bridge.CodeExecution = bridge.CodeExecution && types["code_interpreter"]
-	bridge.WebSearch = bridge.WebSearch && (types["web_search"] || types["web_search_preview"])
+	bridge.WebSearch = bridge.WebSearch && (types["web_search"] || types["web_search_preview"] || types["web_search_2025_08_26"] || types["web_search_preview_2025_03_11"])
 	bridge.ImageGeneration = bridge.ImageGeneration && types["image_generation"]
 	bridge.Choice = choice.Mode
 	return nil

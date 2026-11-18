@@ -30,6 +30,13 @@ export interface ModelCooldown {
 }
 
 // Account 对应 GET /api/accounts 的 account，可选字段为空时后端省略
+// AccountAbuse 对应 internal/gemini 的 AbuseStatus：Google 官网给出的账号异常标记与状态码
+export interface AccountAbuse {
+  restricted: boolean
+  code?: number
+  signal?: string
+}
+
 export interface Account {
   account_id: string
   email?: string
@@ -54,6 +61,7 @@ export interface Account {
   last_error?: string
   last_error_at?: string
   usage?: AccountUsage
+  abuse?: AccountAbuse
 }
 
 // AccountUsageStatus 对应 GET /api/accounts/usage 的 accounts 项，error 为本次读取用量失败的原因

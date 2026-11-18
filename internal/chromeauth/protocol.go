@@ -19,30 +19,35 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/url"
 	"strings"
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 )
 
 // ErrCredentialsRejected 表示 OAuthMultilogin 以 INVALID_TOKENS 拒绝了保存的续签材料
-var ErrCredentialsRejected = errors.New("Chrome OAuth 续签材料被拒绝")
+var ErrCredentialsRejected = errors.New("Google 拒绝了保存的 Chrome 登录材料，在 Chrome 中重新登录该账号后重新导入")
 
 // multiloginStatusError 返回 OAuthMultilogin 某一阶段的失败，INVALID_TOKENS 时包含 ErrCredentialsRejected
 func multiloginStatusError(phase string, statusCode int, status string) error {
 	if status == "INVALID_TOKENS" {
-		return fmt.Errorf("%w: OAuthMultilogin %s 阶段失败 HTTP %d status %s", ErrCredentialsRejected, phase, statusCode, status)
+		return fmt.Errorf("%w（续签 %s 步骤 HTTP %d %s）", ErrCredentialsRejected, phase, statusCode, status)
 	}
 	if statusCode >= http.StatusInternalServerError {
-		return fmt.Errorf("%w: OAuthMultilogin %s 阶段失败 HTTP %d status %s", gemini.ErrTransport, phase, statusCode, status)
+		return fmt.Errorf("%w：Google 续签在 %s 步骤返回 HTTP %d %s", gemini.ErrTransport, phase, statusCode, status)
 	}
-	return fmt.Errorf("OAuthMultilogin %s 阶段失败 HTTP %d status %s", phase, statusCode, status)
+	return fmt.Errorf("Google 续签在 %s 步骤失败（HTTP %d %s）", phase, statusCode, status)
 }
 
 // multiloginURL 是 OAuthMultilogin 的地址
 var multiloginURL = "https://accounts.google.com/oauth/multilogin?source=ChromiumAccountReconcilorDice&reuseCookies=0"
+
+// gaiaURL 是解析 DBSC 相对刷新地址的 Gaia 根地址
+var gaiaURL = &url.URL{Scheme: "https", Host: "accounts.google.com", Path: "/"}
 
 const (
 	oauthClientID     = "77185425430.apps.googleusercontent.com"
@@ -71,6 +76,45 @@ type multiloginResponse struct {
 			Challenge string `json:"challenge"`
 		} `json:"token_binding_retry_response"`
 	} `json:"failed_accounts"`
+	BoundSessions []struct {
+		IsDeviceBound bool   `json:"is_device_bound"`
+		Domain        string `json:"domain"`
+		Payload       *struct {
+			SessionID   string `json:"session_identifier"`
+			RefreshURL  string `json:"refresh_url"`
+			Credentials []struct {
+				Name string `json:"name"`
+			} `json:"credentials"`
+		} `json:"register_session_payload"`
+	} `json:"device_bound_session_info"`
+}
+
+// googleBoundSession 返回响应为 google.com 登记的 DBSC 会话，相对刷新地址按 Gaia 地址解析
+func (response multiloginResponse) googleBoundSession() *auth.BoundSession {
+	for _, session := range response.BoundSessions {
+		if !session.IsDeviceBound || session.Domain != "GOOGLE_COM" || session.Payload == nil {
+			continue
+		}
+		refreshURL, err := url.Parse(session.Payload.RefreshURL)
+		if err != nil {
+			return nil
+		}
+		bound := &auth.BoundSession{ID: session.Payload.SessionID, RefreshURL: gaiaURL.ResolveReference(refreshURL).String()}
+		for _, credential := range session.Payload.Credentials {
+			bound.Credentials = append(bound.Credentials, credential.Name)
+		}
+		return bound
+	}
+	return nil
+}
+
+// multiloginHeaderOrder 是 Chrome GaiaAuthFetcher 发出 OAuthMultilogin 的请求头顺序
+var multiloginHeaderOrder = []string{"content-length", "authorization", "content-type", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "user-agent", "accept-encoding", "accept-language", "priority"}
+
+// browserIdentity 是账号绑定的 Chrome 主版本与 Accept-Language，OAuthMultilogin 以该版本 Chrome 的 TLS、HTTP/2 与请求头发出
+type browserIdentity struct {
+	chrome   int
+	language string
 }
 
 type deviceBindingKey interface {
@@ -79,22 +123,23 @@ type deviceBindingKey interface {
 	Close()
 }
 
-// fetchGoogleCookies 用 refresh token 经 OAuthMultilogin 取得 Google Cookie，有设备绑定密钥时走 DBSC 挑战与 HPKE 解密，没有时一次 MultiBearer 请求取得明文 Cookie
-func fetchGoogleCookies(ctx context.Context, gaiaID string, token string, wrappedKey []byte, proxyURL string) ([]multiloginCookie, error) {
-	client, err := newOAuthClient(proxyURL)
+// fetchGoogleCookies 用 refresh token 经 OAuthMultilogin 取得 Google Cookie 与 DBSC 会话登记，有设备绑定密钥时走 DBSC 挑战与 HPKE 解密，没有时一次 MultiBearer 请求取得明文 Cookie
+func fetchGoogleCookies(ctx context.Context, identity browserIdentity, gaiaID string, token string, wrappedKey []byte, proxyURL string) ([]multiloginCookie, *auth.BoundSession, error) {
+	client, err := newOAuthClient(proxyURL, identity.chrome)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer client.CloseIdleConnections()
 	if len(wrappedKey) == 0 {
-		return fetchBearerCookies(ctx, client, gaiaID, token)
+		cookies, err := fetchBearerCookies(ctx, client, identity, gaiaID, token)
+		return cookies, nil, err
 	}
-	return fetchBoundCookies(ctx, client, gaiaID, token, wrappedKey)
+	return fetchBoundCookies(ctx, client, identity, gaiaID, token, wrappedKey)
 }
 
 // fetchBearerCookies 为没有设备绑定的 token 请求一次 OAuthMultilogin，返回明文 Cookie
-func fetchBearerCookies(ctx context.Context, client tls_client.HttpClient, gaiaID string, token string) ([]multiloginCookie, error) {
-	status, response, err := requestMultilogin(ctx, client, gaiaID, token, "")
+func fetchBearerCookies(ctx context.Context, client tls_client.HttpClient, identity browserIdentity, gaiaID string, token string) ([]multiloginCookie, error) {
+	status, response, err := requestMultilogin(ctx, client, identity, gaiaID, token, "")
 	if err != nil {
 		return nil, err
 	}
@@ -107,108 +152,116 @@ func fetchBearerCookies(ctx context.Context, client tls_client.HttpClient, gaiaI
 	return response.Cookies, nil
 }
 
-// fetchBoundCookies 为设备绑定的 token 取得 DBSC challenge、以设备密钥签发 assertion，再解密服务端返回的 Cookie
-func fetchBoundCookies(ctx context.Context, client tls_client.HttpClient, gaiaID string, token string, wrappedKey []byte) ([]multiloginCookie, error) {
+// fetchBoundCookies 为设备绑定的 token 取得 DBSC challenge、以设备密钥签发 assertion，再解密服务端返回的 Cookie 并提取 DBSC 会话登记
+func fetchBoundCookies(ctx context.Context, client tls_client.HttpClient, identity browserIdentity, gaiaID string, token string, wrappedKey []byte) ([]multiloginCookie, *auth.BoundSession, error) {
 	bindingKey, err := openDeviceBindingKey(wrappedKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer bindingKey.Close()
 	publicKey, spki, err := bindingKey.PublicKey()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	firstStatus, first, err := requestMultilogin(ctx, client, gaiaID, token, assertionSentinel)
+	firstStatus, first, err := requestMultilogin(ctx, client, identity, gaiaID, token, assertionSentinel)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	challenge := findChallenge(first)
 	if first.Status != "RETRY" || challenge == "" {
-		return nil, multiloginStatusError("challenge", firstStatus, first.Status)
+		return nil, nil, multiloginStatusError("challenge", firstStatus, first.Status)
 	}
 
 	ephemeralPrivateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("生成 HPKE 临时密钥: %w", err)
+		return nil, nil, fmt.Errorf("生成 HPKE 临时密钥: %w", err)
 	}
 	assertion, err := createAssertion(bindingKey, publicKey, spki, challenge, ephemeralPrivateKey.PublicKey().Bytes())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	secondStatus, second, err := requestMultilogin(ctx, client, gaiaID, token, assertion)
+	secondStatus, second, err := requestMultilogin(ctx, client, identity, gaiaID, token, assertion)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if secondStatus != http.StatusOK || second.Status != "OK" {
-		return nil, multiloginStatusError("assertion", secondStatus, second.Status)
+		return nil, nil, multiloginStatusError("assertion", secondStatus, second.Status)
 	}
 	if len(second.Directed) == 0 || bytes.Equal(second.Directed, []byte("null")) {
-		return nil, fmt.Errorf("OAuthMultilogin 响应缺少 token_binding_directed_response")
+		return nil, nil, fmt.Errorf("Google 续签响应缺少设备绑定挑战")
 	}
 	if err := checkMultiloginCookies(second.Cookies); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for index := range second.Cookies {
 		if second.Cookies[index].Value, err = hpkeOpen(ephemeralPrivateKey, second.Cookies[index].Value); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return second.Cookies, nil
+	return second.Cookies, second.googleBoundSession(), nil
 }
 
 // checkMultiloginCookies 核对 OAuthMultilogin 返回的 Cookie 带有名称、值、域，并包含 SAPISID 与 __Secure-1PSID
 func checkMultiloginCookies(cookies []multiloginCookie) error {
 	if len(cookies) == 0 {
-		return fmt.Errorf("OAuthMultilogin 响应缺少 Cookie")
+		return fmt.Errorf("Google 续签响应缺少 Cookie")
 	}
 	names := make(map[string]struct{}, len(cookies))
 	for _, cookie := range cookies {
 		if cookie.Name == "" || cookie.Value == "" {
-			return fmt.Errorf("OAuthMultilogin Cookie 格式异常")
+			return fmt.Errorf("Google 续签返回的 Cookie 格式异常")
 		}
 		if cookie.Domain == "" && (cookie.Host == "" || strings.HasPrefix(cookie.Host, ".")) {
-			return fmt.Errorf("OAuthMultilogin Cookie 域格式异常")
+			return fmt.Errorf("Google 续签返回的 Cookie 域格式异常")
 		}
 		names[cookie.Name] = struct{}{}
 	}
 	for _, required := range []string{"SAPISID", "__Secure-1PSID"} {
 		if _, ok := names[required]; !ok {
-			return fmt.Errorf("OAuthMultilogin 缺少核心 Cookie: %s", required)
+			return fmt.Errorf("Google 续签返回的 Cookie 缺少 %s", required)
 		}
 	}
 	return nil
 }
 
-func newOAuthClient(proxyURL string) (tls_client.HttpClient, error) {
-	client, err := gemini.NewHTTPClient(30, proxyURL)
+// newOAuthClient 返回以主版本 chrome 的 Chrome 身份访问 accounts.google.com 的客户端
+func newOAuthClient(proxyURL string, chrome int) (tls_client.HttpClient, error) {
+	client, err := gemini.NewHTTPClient(30, proxyURL, chrome)
 	if err != nil {
 		return nil, fmt.Errorf("创建 OAuth HTTP 客户端: %w", err)
 	}
 	return client, nil
 }
 
-// requestMultilogin 发送一次 OAuthMultilogin：带 assertion 时用 MultiOAuth 头，没有设备绑定的 token 用 MultiBearer 头
-func requestMultilogin(ctx context.Context, client tls_client.HttpClient, gaiaID string, token string, assertion string) (int, multiloginResponse, error) {
+// requestMultilogin 按 Chrome 的请求头发送一次 OAuthMultilogin：带 assertion 时用 MultiOAuth 头，没有设备绑定的 token 用 MultiBearer 头
+func requestMultilogin(ctx context.Context, client tls_client.HttpClient, identity browserIdentity, gaiaID string, token string, assertion string) (int, multiloginResponse, error) {
 	authorization := "MultiBearer " + token + ":" + gaiaID
 	if assertion != "" {
 		authorization = "MultiOAuth " + encodeMultiOAuthHeader(gaiaID, token, assertion)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, multiloginURL, strings.NewReader(" "))
 	if err != nil {
-		return 0, multiloginResponse{}, fmt.Errorf("创建 OAuthMultilogin 请求: %w", err)
+		return 0, multiloginResponse{}, fmt.Errorf("创建续签请求: %w", err)
 	}
 	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("User-Agent", gemini.ChromeUserAgent)
+	request.Header.Set("Sec-Fetch-Site", "none")
+	request.Header.Set("Sec-Fetch-Mode", "no-cors")
+	request.Header.Set("Sec-Fetch-Dest", "empty")
+	request.Header.Set("User-Agent", gemini.ChromeUserAgent(identity.chrome))
+	request.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	request.Header.Set("Accept-Language", identity.language)
+	request.Header.Set("Priority", "u=4, i")
+	request.Header[http.HeaderOrderKey] = multiloginHeaderOrder
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, multiloginResponse{}, fmt.Errorf("OAuthMultilogin 请求失败: %w", errors.Join(gemini.ErrTransport, err))
+		return 0, multiloginResponse{}, fmt.Errorf("Google 续签请求失败: %w", errors.Join(gemini.ErrTransport, err))
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if err != nil {
-		return response.StatusCode, multiloginResponse{}, fmt.Errorf("读取 OAuthMultilogin 响应: %w", errors.Join(gemini.ErrTransport, err))
+		return response.StatusCode, multiloginResponse{}, fmt.Errorf("读取 Google 续签响应: %w", errors.Join(gemini.ErrTransport, err))
 	}
 	body = bytes.TrimSpace(body)
 	if bytes.HasPrefix(body, []byte(")]}'")) {
@@ -217,9 +270,9 @@ func requestMultilogin(ctx context.Context, client tls_client.HttpClient, gaiaID
 	var result multiloginResponse
 	if err := json.Unmarshal(body, &result); err != nil {
 		if response.StatusCode >= http.StatusInternalServerError {
-			return response.StatusCode, multiloginResponse{}, fmt.Errorf("%w: OAuthMultilogin 返回无法解析的响应 HTTP %d", gemini.ErrTransport, response.StatusCode)
+			return response.StatusCode, multiloginResponse{}, fmt.Errorf("%w：Google 续签返回无法解析的响应（HTTP %d）", gemini.ErrTransport, response.StatusCode)
 		}
-		return response.StatusCode, multiloginResponse{}, fmt.Errorf("OAuthMultilogin 返回无法解析的响应 HTTP %d", response.StatusCode)
+		return response.StatusCode, multiloginResponse{}, fmt.Errorf("Google 续签返回无法解析的响应（HTTP %d）", response.StatusCode)
 	}
 	return response.StatusCode, result, nil
 }
@@ -307,7 +360,7 @@ func createAssertion(bindingKey deviceBindingKey, publicKey *ecdsa.PublicKey, sp
 func hpkeOpen(privateKey *ecdh.PrivateKey, encodedValue string) (string, error) {
 	encrypted, err := base64.RawURLEncoding.DecodeString(encodedValue)
 	if err != nil || len(encrypted) <= 48 {
-		return "", fmt.Errorf("OAuthMultilogin Cookie 密文格式异常")
+		return "", fmt.Errorf("Google 续签返回的 Cookie 密文格式异常")
 	}
 	encapsulatedKey := encrypted[:32]
 	senderPublicKey, err := ecdh.X25519().NewPublicKey(encapsulatedKey)
@@ -339,7 +392,7 @@ func hpkeOpen(privateKey *ecdh.PrivateKey, encodedValue string) (string, error) 
 	}
 	plaintext, err := gcm.Open(nil, nonce, encrypted[32:], []byte{})
 	if err != nil {
-		return "", fmt.Errorf("OAuthMultilogin Cookie 解密失败")
+		return "", fmt.Errorf("Google 续签返回的 Cookie 解密失败")
 	}
 	return string(plaintext), nil
 }

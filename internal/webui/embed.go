@@ -16,7 +16,7 @@ import (
 //go:embed all:dist
 var embedded embed.FS
 
-// Handler 返回管理端静态资源处理器：gzip 构建产物直接返回给接受 gzip 的客户端，assets 下带哈希的文件长期缓存，未知页面路径回落到入口页，入口页的 <base> 指向管理端根目录
+// Handler 返回管理端静态资源处理器：gzip 构建产物直接返回给接受 gzip 的客户端，assets 下带哈希的文件长期缓存，入口页与其余文件不进入缓存，条件请求都返回全文，未知页面路径回落到入口页，入口页的 <base> 指向管理端根目录
 func Handler() http.Handler {
 	index, err := fs.ReadFile(embedded, "dist/index.html")
 	if err != nil {
@@ -35,8 +35,9 @@ func Handler() http.Handler {
 			if asset {
 				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 			} else {
-				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Cache-Control", "no-store")
 			}
+			r.Header.Del("If-None-Match")
 			static.ServeHTTP(w, r)
 			return
 		}
@@ -44,7 +45,7 @@ func Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-store")
 		page := bytes.Replace(index, []byte(`<base href="/" />`), []byte(`<base href="`+relativeRoot(r.URL.Path)+`" />`), 1)
 		http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(page))
 	})

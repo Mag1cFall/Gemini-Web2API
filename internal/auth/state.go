@@ -37,15 +37,26 @@ type OAuthMaterial struct {
 	WrappedBindingKey []byte `json:"wrappedBindingKey,omitempty"`
 }
 
+// BoundSession 保存 OAuthMultilogin 登记的 Google DBSC 会话参数
+type BoundSession struct {
+	ID          string   `json:"id"`
+	RefreshURL  string   `json:"refreshUrl"`
+	Credentials []string `json:"credentials"`
+}
+
 // Metadata 保存账号固定身份
 type Metadata struct {
-	ID       string         `json:"id"`
-	Proxy    string         `json:"proxy,omitempty"`
-	Source   ImportSource   `json:"source,omitempty"`
-	Language string         `json:"language,omitempty"`
-	AuthUser int            `json:"authUser,omitempty"`
-	OAuth    *OAuthMaterial `json:"oauth,omitempty"`
-	Disabled bool           `json:"disabled,omitempty"`
+	ID       string       `json:"id"`
+	Proxy    string       `json:"proxy,omitempty"`
+	Source   ImportSource `json:"source,omitempty"`
+	Language string       `json:"language,omitempty"`
+	AuthUser int          `json:"authUser,omitempty"`
+	// Chrome 是账号绑定的 Chrome 主版本，生成、轮换与续签请求都以该版本的身份发出
+	Chrome         int            `json:"chrome,omitempty"`
+	OAuth          *OAuthMaterial `json:"oauth,omitempty"`
+	BoundSession   *BoundSession  `json:"boundSession,omitempty"`
+	PairingRenewal string         `json:"pairingRenewal,omitempty"`
+	Disabled       bool           `json:"disabled,omitempty"`
 }
 
 // StorageState 是兼容 Playwright 的认证状态文件
@@ -57,10 +68,11 @@ type StorageState struct {
 
 // LoadedAccount 是服务启动使用的账号配置
 type LoadedAccount struct {
-	ID       string
-	ProxyURL string
-	Source   gemini.AccountSource
-	OAuth    *OAuthMaterial
+	ID           string
+	ProxyURL     string
+	Source       gemini.AccountSource
+	OAuth        *OAuthMaterial
+	BoundSession *BoundSession
 	// Profile 为 Chrome 导入的 Profile 目录名，Cookie Header 导入时为空
 	Profile  string
 	Disabled bool
@@ -131,7 +143,7 @@ func expandPaths(paths []string) ([]string, error) {
 	return result, nil
 }
 
-// Load 读取一个认证状态文件
+// Load 读取一个认证状态文件，账号没有版本池中的 Chrome 版本时按各版本占比分配一个并写回
 func Load(path string) (*File, error) {
 	absPath, err := filepath.Abs(strings.TrimSpace(path))
 	if err != nil {
@@ -158,7 +170,14 @@ func Load(path string) (*File, error) {
 	if err := validateOAuthMaterial(state.Metadata.OAuth); err != nil {
 		return nil, fmt.Errorf("认证状态 %s: %w", absPath, err)
 	}
-	return &File{path: absPath, state: state}, nil
+	file := &File{path: absPath, state: state}
+	if !gemini.IsChromeVersion(state.Metadata.Chrome) {
+		file.state.Metadata.Chrome = gemini.PickChromeVersion()
+		if err := file.Write(); err != nil {
+			return nil, err
+		}
+	}
+	return file, nil
 }
 
 func accountIDFromPath(path string) string {
@@ -169,10 +188,12 @@ func accountIDFromPath(path string) string {
 	return name
 }
 
-// Inherit 让本次导入的 metadata 沿用 path 处已导入账号的停用标记与未重新填写的固定代理
+// Inherit 让本次导入的 metadata 沿用 path 处已导入账号的停用标记、Chrome 版本、配对续签摘要与未重新填写的固定代理
 func Inherit(path string, metadata Metadata) Metadata {
 	if previous, err := Load(path); err == nil {
 		metadata.Disabled = previous.state.Metadata.Disabled
+		metadata.Chrome = previous.state.Metadata.Chrome
+		metadata.PairingRenewal = previous.state.Metadata.PairingRenewal
 		metadata.Proxy = cmp.Or(metadata.Proxy, previous.state.Metadata.Proxy)
 	}
 	return metadata
@@ -217,12 +238,13 @@ func (f *File) Account() LoadedAccount {
 		Cookies:  GeminiCookies(f.state.Cookies),
 		Language: f.state.Metadata.Language,
 		AuthUser: f.state.Metadata.AuthUser,
+		Chrome:   f.state.Metadata.Chrome,
 	}
 	source.Save = f.SaveCookies
 	return LoadedAccount{
 		ID: source.ID, ProxyURL: proxyURL, Source: source,
-		OAuth: f.state.Metadata.OAuth, Profile: f.state.Metadata.Source.Profile,
-		Disabled: f.state.Metadata.Disabled, File: f,
+		OAuth: f.state.Metadata.OAuth, BoundSession: f.state.Metadata.BoundSession,
+		Profile: f.state.Metadata.Source.Profile, Disabled: f.state.Metadata.Disabled, File: f,
 	}
 }
 
@@ -254,12 +276,29 @@ func (f *File) SetProxy(proxy string) error {
 	return f.writeLocked()
 }
 
-// SetOAuth 更新续签材料与来源 Profile 并写回
-func (f *File) SetOAuth(material OAuthMaterial, profile string) error {
+// SetOAuthAndBound 更新续签材料、DBSC 会话登记与来源 Profile 并写回
+func (f *File) SetOAuthAndBound(material OAuthMaterial, bound *BoundSession, profile string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.state.Metadata.OAuth = &material
+	f.state.Metadata.BoundSession = bound
 	f.state.Metadata.Source.Profile = profile
+	return f.writeLocked()
+}
+
+// SetBoundSession 更新 DBSC 会话登记并写回
+func (f *File) SetBoundSession(bound *BoundSession) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state.Metadata.BoundSession = bound
+	return f.writeLocked()
+}
+
+// SetPairingRenewal 更新远程配对续签凭据摘要并写回
+func (f *File) SetPairingRenewal(digest string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state.Metadata.PairingRenewal = digest
 	return f.writeLocked()
 }
 

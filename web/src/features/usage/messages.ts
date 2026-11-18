@@ -926,6 +926,6 @@ export const usageMessages = defineMessages({
     empty: 'Keine Anfragen in diesem Zeitraum',
     emptyHelp: 'Anfragen an die öffentliche API werden bei ihrem Ende gezählt.',
     emptyFiltered: 'Keine Anfragen passen zu den Filtern',
-    emptyFilteredHelp: 'Passen Sie Filter oder Zeitraum an und versuchen Sie es erneut.',
+    emptyFilteredHelp: 'Passe Filter oder Zeitraum an und versuche es erneut.',
   },
 })

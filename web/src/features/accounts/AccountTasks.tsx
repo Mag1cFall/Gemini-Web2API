@@ -15,7 +15,7 @@ import {
 } from '@/features/accounts/queries'
 import type { AccountTask, AccountTaskItem } from '@/features/accounts/types'
 import { api } from '@/lib/api'
-import { useMessages } from '@/lib/i18n'
+import { serverText, useMessages } from '@/lib/i18n'
 
 // itemTones 是任务中账号各状态的标签颜色
 const itemTones: Record<AccountTaskItem['state'], BadgeTone> = {
@@ -105,12 +105,14 @@ export function AccountTasks() {
             <ul className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
               {task.items.map((item) => (
                 <li key={item.label} className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className="min-w-0 truncate text-sm" title={item.label}>
-                    {item.label}
-                  </span>
+                  <Tooltip overflow label={item.label}>
+                    <span className="min-w-0 truncate text-sm">{item.label}</span>
+                  </Tooltip>
                   <Badge tone={itemTones[item.state]}>{m[item.state]}</Badge>
                   {item.error && (
-                    <p className="w-full text-xs break-words text-error-text">{item.error}</p>
+                    <p className="w-full text-xs break-words text-error-text">
+                      {serverText(item.error)}
+                    </p>
                   )}
                 </li>
               ))}

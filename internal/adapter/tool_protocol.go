@@ -26,6 +26,16 @@ var argEndPattern = regexp.MustCompile(`^\\?\[\s*\\?/\s*Arg\s*\\?\]`)
 // callEndPattern 匹配位于开头的调用块结尾
 var callEndPattern = regexp.MustCompile(`^\\?\[\s*\\?/\s*Call\s*\\?\]`)
 
+// callEndAnywherePattern 匹配任意位置的调用块结尾
+var callEndAnywherePattern = regexp.MustCompile(`\\?\[\s*\\?/\s*Call\s*\\?\]`)
+
+// callsComplete 判断正文以完整的调用块结尾：最后一个调用块结尾标记之后只有空白
+func callsComplete(text string) bool {
+	text = strings.TrimRightFunc(text, unicode.IsSpace)
+	locations := callEndAnywherePattern.FindAllStringIndex(text, -1)
+	return len(locations) > 0 && locations[len(locations)-1][1] == len(text)
+}
+
 // structureAnywherePattern 在任意位置匹配参数段开头、参数段结尾或调用块结尾
 var structureAnywherePattern = regexp.MustCompile(`\\?\[\s*(?:Arg\s*\\?:|\\?/\s*(?:Arg|Call)\s*\\?\])`)
 
@@ -95,6 +105,18 @@ func codeSpanAt(text string, position int) (inside, unclosed bool) {
 	return false, unclosed
 }
 
+// dropUnfinishedCalls 从最后一个调用块开头起逐个去掉没有写完的调用块，返回只含已写完调用块的回答
+func dropUnfinishedCalls(text string) string {
+	for {
+		location := firstCallStart(text)
+		if _, _, found, err := splitCallBlocks(text); !found || err == nil {
+			return text
+		}
+		starts := callStartPattern.FindAllStringIndex(text[location[0]:], -1)
+		text = strings.TrimRightFunc(text[:location[0]+starts[len(starts)-1][0]], unicode.IsSpace)
+	}
+}
+
 // splitCallBlocks 把回答分为调用块之前的文字与连续的调用块，之后的内容丢弃；找到调用块开头时 found 为真，调用块没有写完时返回错误
 func splitCallBlocks(text string) (before string, blocks []callBlock, found bool, err error) {
 	location := firstCallStart(text)
@@ -136,7 +158,7 @@ func splitCallBlocks(text string) (before string, blocks []callBlock, found bool
 	}
 }
 
-// argValue 返回参数段的值与其后的内容：值写在代码块中时取代码块原文，结束标记取其后紧跟结构标记或回答结尾的第一行；不在代码块中的值取到下一个结构标记为止
+// argValue 返回参数段的值与其后的内容：值写在代码块中时取代码块原文，结束标记取其后紧跟结构标记或回答结尾的第一行；不在代码块中的值取到下一个结构标记为止，漏写开头围栏时去掉末尾单独成行的结束围栏
 func argValue(text string) (string, string) {
 	body := strings.TrimLeft(text, " \t")
 	if newline := strings.IndexByte(body, '\n'); newline >= 0 && strings.TrimSpace(body[:newline]) == "" {
@@ -148,7 +170,13 @@ func argValue(text string) (string, string) {
 		if location := structureAnywherePattern.FindStringIndex(body); location != nil {
 			end = location[0]
 		}
-		return strings.TrimSpace(body[:end]), body[end:]
+		value := strings.TrimSpace(body[:end])
+		if newline := strings.LastIndexByte(value, '\n'); newline >= 0 {
+			if last := strings.TrimSpace(value[newline+1:]); len(last) >= 3 && strings.Trim(last, "`") == "" {
+				value = strings.TrimRight(value[:newline], " \t\r")
+			}
+		}
+		return value, body[end:]
 	}
 	newline := strings.IndexByte(body, '\n')
 	if newline < 0 {

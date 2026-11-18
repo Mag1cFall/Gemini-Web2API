@@ -2,6 +2,7 @@ import { CircleAlert, LoaderCircle } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { PageHeader } from '@/components/ui/page'
 
 // useDelayedFlag 让加载指示延迟 200ms 出现，出现后至少保持 300ms
 export function useDelayedFlag(active: boolean) {
@@ -48,6 +49,53 @@ export function Loading({ label }: { label: string }) {
         </>
       )}
     </div>
+  )
+}
+
+// placeholderRows 是页面占位骨架的行数，与一张表格卡片的常见高度相近
+const placeholderRows = 6
+
+// PagePlaceholder 是页面数据到达前的占位：标题立即显示，内容位置 200 ms 内保持空白，之后显示同高的骨架卡片
+export function PagePlaceholder({
+  title,
+  description,
+  label,
+}: {
+  title: ReactNode
+  description?: ReactNode
+  label: string
+}) {
+  const visible = useDelayedFlag(true)
+  return (
+    <>
+      <PageHeader title={title} description={description} />
+      <section
+        role="status"
+        aria-label={label}
+        className={
+          'flex min-h-[316px] flex-col rounded-md border ' +
+          (visible ? 'border-border bg-surface' : 'border-transparent')
+        }
+      >
+        {visible && (
+          <>
+            <div className="h-[57px] border-b border-border px-5 py-5">
+              <div className="h-4 w-[160px] animate-pulse rounded-sm bg-muted" />
+            </div>
+            {Array.from({ length: placeholderRows }, (_, index) => (
+              <div
+                key={index}
+                className="flex h-row items-center gap-6 border-b border-border px-5 last:border-b-0"
+              >
+                <div className="h-3 w-1/4 animate-pulse rounded-sm bg-muted" />
+                <div className="h-3 w-1/3 animate-pulse rounded-sm bg-muted" />
+                <div className="h-3 w-1/6 animate-pulse rounded-sm bg-muted" />
+              </div>
+            ))}
+          </>
+        )}
+      </section>
+    </>
   )
 }
 

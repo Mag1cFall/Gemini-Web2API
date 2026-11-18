@@ -22,6 +22,8 @@ type StoredResponse struct {
 	Response json.RawMessage
 	// Input 为带 ID 的输入项 JSON 数组
 	Input json.RawMessage
+	// Conversation 为生成该响应的请求的 conversation
+	Conversation string
 }
 
 // SaveResponse 写入或替换一个保存的响应
@@ -29,9 +31,9 @@ func (store *Store) SaveResponse(ctx context.Context, response StoredResponse) e
 	if len(response.Input) == 0 {
 		response.Input = json.RawMessage("[]")
 	}
-	_, err := store.db.ExecContext(ctx, `INSERT INTO stored_responses(id,created_at,previous_id,background,status,response,input) VALUES(?,?,?,?,?,?,?)
+	_, err := store.db.ExecContext(ctx, `INSERT INTO stored_responses(id,created_at,previous_id,background,status,response,input,conversation) VALUES(?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET status=excluded.status, response=excluded.response, input=excluded.input`,
-		response.ID, response.CreatedAt.UnixMilli(), response.PreviousID, response.Background, response.Status, compress(response.Response), compress(response.Input))
+		response.ID, response.CreatedAt.UnixMilli(), response.PreviousID, response.Background, response.Status, compress(response.Response), compress(response.Input), response.Conversation)
 	return err
 }
 
@@ -50,6 +52,30 @@ func (store *Store) Response(ctx context.Context, id string) (StoredResponse, er
 	}
 	response.CreatedAt = time.UnixMilli(created)
 	return response, response.decompress(body, input)
+}
+
+// ConversationResponses 按创建时间返回 conversation 中保存的全部响应
+func (store *Store) ConversationResponses(ctx context.Context, conversation string) ([]StoredResponse, error) {
+	rows, err := store.reads.QueryContext(ctx, `SELECT id,created_at,previous_id,background,status,response,input FROM stored_responses WHERE conversation=? ORDER BY created_at, rowid`, conversation)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var responses []StoredResponse
+	for rows.Next() {
+		response := StoredResponse{Conversation: conversation}
+		var created int64
+		var body, input []byte
+		if err := rows.Scan(&response.ID, &created, &response.PreviousID, &response.Background, &response.Status, &body, &input); err != nil {
+			return nil, err
+		}
+		response.CreatedAt = time.UnixMilli(created)
+		if err := response.decompress(body, input); err != nil {
+			return nil, err
+		}
+		responses = append(responses, response)
+	}
+	return responses, rows.Err()
 }
 
 // DeleteResponse 删除保存的响应，返回是否存在

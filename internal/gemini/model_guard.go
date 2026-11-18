@@ -7,7 +7,7 @@ import (
 )
 
 // ErrModelMismatch 表示上游实际回答的模型与请求的模型不同，常见于该模型额度用尽后的降级
-var ErrModelMismatch = errors.New("gemini web served a different model")
+var ErrModelMismatch = errors.New("官网改用了其他模型回答")
 
 // modelGuard 在公开任何上游事件前确认实际回答的模型
 type modelGuard struct {
@@ -53,7 +53,7 @@ func (g *modelGuard) Complete() error {
 	return &ProtocolError{
 		HTTPStatus: 502,
 		Code:       502,
-		Message:    fmt.Sprintf("gemini response did not identify the actual model for requested model %q", g.expected.ID),
+		Message:    fmt.Sprintf("官网回答没有标明实际回答的模型，请求的模型是 %s", g.expected.ID),
 		Retryable:  true,
 	}
 }
@@ -82,12 +82,9 @@ func modelMismatchError(expected Model, actual EventMetadataData) *ProtocolError
 	err := &ProtocolError{
 		HTTPStatus: 502,
 		Code:       502,
-		Message: fmt.Sprintf(
-			"gemini returned model %q (%s) instead of requested model %q (%s)",
-			actualName, actual.ModelHash, expected.ID, expected.Hash,
-		),
-		Retryable: true,
-		Cause:     ErrModelMismatch,
+		Message:    fmt.Sprintf("官网改用 %s 回答，请求的模型是 %s", actualName, expected.ID),
+		Retryable:  true,
+		Cause:      ErrModelMismatch,
 	}
 	if actual.LimitNotice != "" {
 		err.HTTPStatus, err.Code = 429, 429

@@ -20,7 +20,7 @@ import (
 const maxProtocolFrameSize = 64 * 1024 * 1024
 
 // errStreamEnded 表示生成流在结束帧前被服务端关闭
-var errStreamEnded = errors.New("gemini protocol stream ended without terminal frame")
+var errStreamEnded = errors.New("官网的回答在结束前中断")
 
 // ErrConversationLost 表示续接的网页会话在上游已不存在：上游在新会话中作答或返回 1097
 var ErrConversationLost = errors.New("Gemini Web 网页会话已失效")
@@ -41,9 +41,7 @@ type FrameDecoder struct {
 	metadata        EventMetadataData
 	sawComplete     bool
 	sawError        bool
-	// rpcStatus 是生成流中没有载荷的记录携带的 RPC 状态
-	rpcStatus []any
-	sawEnd    bool
+	sawEnd          bool
 	// background 表示生成流以后台生成记录或运行中的 Task 状态结束，成品由 hNvQHb 读取
 	background bool
 	// awaitIncomplete 表示生成流没有完成的候选时按后台生成处理，用于 Deep Research 计划轮
@@ -85,8 +83,8 @@ func (d *FrameDecoder) begin(state *ConversationState) {
 	d.continuedCID = d.lastSession.CID
 }
 
-// Decode 增量解析 StreamGenerate 协议帧并原子更新会话状态
-func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit func(Event) error) error {
+// Decode 依次解析 records 给出的生成流记录并原子更新会话状态
+func (d *FrameDecoder) Decode(records func(yield func(streamRecord) error) error, state *ConversationState, emit func(Event) error) error {
 	activeState := state
 	if activeState == nil {
 		activeState = NewConversationState()
@@ -94,61 +92,49 @@ func (d *FrameDecoder) Decode(reader io.Reader, state *ConversationState, emit f
 	d.begin(activeState)
 
 	var protocolErr *ProtocolError
-	err := scanProtocolRecords(reader, func(record []any) error {
-		tag, _ := stringAt(record, 0)
-		switch tag {
-		case "wrb.fr":
-			if code, ok := bardErrorCode(record); ok {
-				protocolErr = bardProtocolError(code)
-				if code == 1097 && d.continuedCID != "" {
-					protocolErr = conversationLostError(fmt.Sprintf("续接的网页会话 %s 已在 Gemini Web 中失效 (1097)", d.continuedCID))
-				}
-				d.sawError = true
-				return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
-			}
-			encoded, _ := stringAt(record, 2)
-			if encoded == "" {
-				d.rpcStatus, _ = arrayAt(record, 5)
-				return nil
-			}
-			var payload []any
-			if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-				return fmt.Errorf("decode wrb.fr payload: %w", err)
-			}
-			if isHeartbeat(payload) {
-				if d.heartbeat != nil {
-					d.heartbeat()
-				}
-				return nil
-			}
-			return d.decodePayload(payload, activeState, emit)
-		case "er":
-			code, _ := intAt(record, 5)
-			protocolErr = &ProtocolError{
-				Code:      code,
-				Message:   fmt.Sprintf("gemini protocol returned code %d", code),
-				Retryable: code == 401 || code == 403 || code == 429 || code >= 500,
+	err := records(func(record streamRecord) error {
+		switch {
+		case record.bardCode != 0:
+			protocolErr = bardProtocolError(record.bardCode)
+			if record.bardCode == 1097 && d.continuedCID != "" {
+				protocolErr = conversationLostError(fmt.Sprintf("续接的网页会话 %s 已在 Gemini Web 中失效 (1097)", d.continuedCID))
 			}
 			d.sawError = true
 			return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
-		case "e":
+		case record.err != nil:
+			protocolErr = record.err
+			d.sawError = true
+			return emit(Event{Kind: EventError, Err: protocolErr, FinishReason: FinishError})
+		case record.end:
 			d.sawEnd = true
 			if (d.background || d.awaitIncomplete) && !d.sawComplete && !d.sawError {
 				d.background = true
 				return nil
 			}
 			return d.finish(activeState, emit)
+		case isHeartbeat(record.payload):
+			if d.heartbeat != nil {
+				d.heartbeat()
+			}
+			return nil
 		}
-		return nil
+		return d.decodePayload(record.payload, activeState, emit)
 	})
+	if err == nil && protocolErr == nil && !d.sawEnd {
+		err = retryableProtocolError(errStreamEnded.Error(), errStreamEnded)
+	}
+	if streamInterrupted(err) {
+		for candidateIndex := range d.texts {
+			if flushErr := d.flushText(candidateIndex, emit); flushErr != nil {
+				return flushErr
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
 	if protocolErr != nil {
 		return protocolErr
-	}
-	if !d.sawEnd {
-		return retryableProtocolError(errStreamEnded.Error(), errStreamEnded)
 	}
 	return nil
 }
@@ -177,11 +163,7 @@ func (d *FrameDecoder) decodeTurn(payload []any, state *ConversationState, emit 
 // finish 在回答结束时发布剩余正文与结束原因
 func (d *FrameDecoder) finish(state *ConversationState, emit func(Event) error) error {
 	if !d.sawComplete && !d.sawError {
-		message := "gemini protocol ended without a completed candidate"
-		if d.rpcStatus != nil {
-			message = fmt.Sprintf("%s, rpc status %v", message, d.rpcStatus)
-		}
-		return retryableProtocolError(message, nil)
+		return retryableProtocolError("官网的回答没有完成就结束了", nil)
 	}
 	for candidateIndex := range d.texts {
 		if err := d.flushText(candidateIndex, emit); err != nil {
@@ -193,15 +175,6 @@ func (d *FrameDecoder) finish(state *ConversationState, emit func(Event) error) 
 		finish = FinishError
 	}
 	return emit(Event{Kind: EventDone, FinishReason: finish, Session: state.Snapshot()})
-}
-
-// bardErrorCode 读取 wrb.fr[5] 中 BardErrorInfo 携带的错误码
-func bardErrorCode(record []any) (int, bool) {
-	status, _ := arrayAt(record, 5)
-	details, _ := arrayAt(status, 2)
-	detail, _ := arrayAt(details, 0)
-	codes, _ := arrayAt(detail, 1)
-	return intAt(codes, 0)
 }
 
 // bardProtocolError 把 BardErrorInfo 错误码映射为公开状态与重试策略
@@ -248,7 +221,6 @@ func (d *FrameDecoder) reset() {
 	d.metadata = EventMetadataData{}
 	d.sawComplete = false
 	d.sawError = false
-	d.rpcStatus = nil
 	d.sawEnd = false
 	d.background = false
 }
@@ -381,7 +353,7 @@ func (d *FrameDecoder) sessionFromPayload(payload []any, current ConversationSna
 	if rid, ok := stringAt(values, 1); ok && rid != "" {
 		current.RID = rid
 	}
-	if token, ok := jspbString(payload, 25); ok && token != "" {
+	if token, ok := jspbString(payload, 25); ok && token != "" && token != channelCommitted {
 		current.Token = token
 	}
 	return current
@@ -420,6 +392,9 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit func(Event) error) error {
 	raw, _ := stringPath(candidate, 1, 0)
 	text, codes, citations := visibleContent(candidate, raw)
+	if documentChipPattern.MatchString(text) {
+		return retryableProtocolError("官网的回答已完成，但缺少其中的文档内容（Deep Research 报告或 Canvas 文档）", nil)
+	}
 	d.markerCitations[candidateIndex] = citations
 	seen := make(map[codeEventKey]struct{}, len(codes))
 	for _, code := range codes {
@@ -605,8 +580,10 @@ func isGeneratedImagePlaceholder(value string) bool {
 
 var (
 	structuredCodePattern = regexp.MustCompile("(?m)^```([^?`\\r\\n]*)\\?(code_reference|code_stdout|code_stderr)&code_event_index=(\\d+)\\r?\\n")
-	artifactPattern       = regexp.MustCompile("(?m)^https?://googleusercontent\\.com/(image_generation_content|generated_video_content|generated_music_content)/\\S+\\s*")
-	generatedVideoPattern = regexp.MustCompile(`https?://googleusercontent\.com/generated_video_content/\S+`)
+	// generatedImageTagPattern 匹配正文中标出生成图片位置的图片标记，第 1 组为占位地址去掉 http://googleusercontent.com/ 的部分
+	generatedImageTagPattern = regexp.MustCompile(`<Image alt="[^"]*" src="(image_generation_content/\d+)"/>`)
+	artifactPattern          = regexp.MustCompile("(?m)^(?:https?://googleusercontent\\.com/(?:image_generation_content|generated_video_content|generated_music_content)/\\S+|" + generatedImageTagPattern.String() + ")\\s*")
+	generatedVideoPattern    = regexp.MustCompile(`https?://googleusercontent\.com/generated_video_content/\S+`)
 )
 
 func parseStructuredContent(raw string) (string, []codeSnapshot) {
@@ -655,9 +632,9 @@ func parseStructuredContent(raw string) (string, []codeSnapshot) {
 	return normalizeSnapshot(stripArtifacts(text.String())), codes
 }
 
-// stripArtifacts 去掉正文中的生成内容占位行
+// stripArtifacts 去掉正文中的生成内容占位行与生成图片标记
 func stripArtifacts(text string) string {
-	if !strings.Contains(text, "googleusercontent.com/") {
+	if !strings.Contains(text, "googleusercontent.com/") && !strings.Contains(text, "<Image alt=") {
 		return text
 	}
 	return artifactPattern.ReplaceAllString(text, "")
@@ -947,7 +924,7 @@ func takeCitations(text string, tables []citationTable) (string, []Citation) {
 	return string(runes), citations
 }
 
-// expandDocuments 把 Deep Research 计划占位链接换成计划标题与步骤；回答完成后把文档占位链接换成 candidate[30] 的文档内容，完成前正文截止到第一个文档占位链接
+// expandDocuments 把 Deep Research 计划占位链接换成计划标题与步骤；回答完成后把文档占位链接换成 candidate[30] 的文档内容，没有文档内容的占位链接保留原样，完成前正文截止到第一个文档占位链接
 func expandDocuments(candidate []any, raw string) string {
 	if plan, ok := richContentField(candidate, 55); ok {
 		raw = researchPlanPattern.ReplaceAllStringFunc(raw, func(string) string {
@@ -987,7 +964,10 @@ func expandDocuments(candidate []any, raw string) string {
 		contents[documentID] = content
 	}
 	return documentChipPattern.ReplaceAllStringFunc(raw, func(chip string) string {
-		return contents[documentIDs[chip]]
+		if content := contents[documentIDs[chip]]; content != "" {
+			return content
+		}
+		return chip
 	})
 }
 
@@ -1149,13 +1129,22 @@ func InFencedCode(text string, position int) bool {
 	return fence != ""
 }
 
-// mediaPlaceholderOffset 返回媒体占位链接在输出正文中的 rune 位置，没有占位链接时返回 -1
+// mediaPlaceholderOffset 返回媒体占位链接或指向它的生成图片标记在输出正文中的 rune 位置，两者都没有时返回 -1
 func mediaPlaceholderOffset(candidate []any, placeholder string) int {
 	if placeholder == "" {
 		return -1
 	}
 	raw, _ := stringPath(candidate, 1, 0)
 	index := strings.Index(raw, placeholder)
+	if index < 0 {
+		source := strings.TrimPrefix(placeholder, "http://googleusercontent.com/")
+		for _, match := range generatedImageTagPattern.FindAllStringSubmatchIndex(raw, -1) {
+			if raw[match[2]:match[3]] == source {
+				index = match[0]
+				break
+			}
+		}
+	}
 	if index < 0 {
 		return -1
 	}
@@ -1226,7 +1215,7 @@ func scanProtocolRecords(reader io.Reader, handle func([]any) error) error {
 				}
 				continue
 			}
-			return fmt.Errorf("decode protocol frame: %w", err)
+			return fmt.Errorf("解析官网回答失败: %w", err)
 		}
 		pending = nil
 		for _, rawRecord := range frame {
@@ -1239,7 +1228,7 @@ func scanProtocolRecords(reader io.Reader, handle func([]any) error) error {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return transportProtocolError("read protocol stream", err)
+		return transportProtocolError("接收回答", err)
 	}
 	return nil
 }

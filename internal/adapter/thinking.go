@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -131,6 +132,7 @@ func responsesThinkingSettings(request ResponsesRequest) (gemini.ThinkingLevel, 
 	if err != nil {
 		return gemini.ThinkingLow, false, err
 	}
+	options.Effort = cmp.Or(configuredEffort(request.Input), options.Effort)
 	mode, err := reasoningEffortLevel(options.Effort)
 	if err != nil {
 		return gemini.ThinkingLow, false, err
@@ -146,6 +148,24 @@ func responsesThinkingSettings(request ResponsesRequest) (gemini.ThinkingLevel, 
 	default:
 		return gemini.ThinkingLow, false, fmt.Errorf("不支持的 reasoning.summary %q", options.Summary)
 	}
+}
+
+// configuredEffort 返回输入项中最后一个 configuration_update 设置的思考强度
+func configuredEffort(input json.RawMessage) string {
+	var items []struct {
+		Type      string `json:"type"`
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	_ = json.Unmarshal(input, &items)
+	effort := ""
+	for _, item := range items {
+		if item.Type == "configuration_update" && item.Reasoning.Effort != "" {
+			effort = item.Reasoning.Effort
+		}
+	}
+	return effort
 }
 
 // claudeThinkingSettings 读取 Claude Messages 思考强度和摘要策略
@@ -210,26 +230,31 @@ func unspecifiedThinkingLevel(includeThoughts bool) gemini.ThinkingLevel {
 	return gemini.ThinkingLow
 }
 
-// modelSuffix 是模型名末尾 (值) 给出的思考设置，level 为 0 表示没有后缀
+// modelSuffix 是模型名末尾 (值) 或 @think=值 给出的思考设置，level 为 0 表示没有后缀
 type modelSuffix struct {
 	level      gemini.ThinkingLevel
 	noThoughts bool
 }
 
-// takeModelSuffix 从模型名中去掉末尾的思考后缀并返回其思考设置
+// takeModelSuffix 从模型名中去掉末尾的 (值) 或 @think=值 思考后缀并返回其思考设置
 func takeModelSuffix(model *string) (modelSuffix, error) {
-	open := strings.LastIndex(*model, "(")
-	if open < 0 || !strings.HasSuffix(*model, ")") {
-		return modelSuffix{}, nil
+	var value string
+	if base, think, ok := strings.Cut(*model, "@think="); ok {
+		*model, value = strings.TrimSpace(base), think
+	} else {
+		open := strings.LastIndex(*model, "(")
+		if open < 0 || !strings.HasSuffix(*model, ")") {
+			return modelSuffix{}, nil
+		}
+		*model, value = strings.TrimSpace((*model)[:open]), (*model)[open+1:len(*model)-1]
 	}
-	value := strings.ToLower(strings.TrimSpace((*model)[open+1 : len(*model)-1]))
-	*model = strings.TrimSpace((*model)[:open])
+	value = strings.ToLower(strings.TrimSpace(value))
 	if budget, err := strconv.Atoi(value); err == nil && budget >= -1 {
 		return modelSuffix{level: thinkingBudgetLevel(budget), noThoughts: budget == 0}, nil
 	}
 	level, err := reasoningEffortLevel(value)
 	if err != nil || value == "" || value == "thinking_level_unspecified" {
-		return modelSuffix{}, fmt.Errorf("模型名后缀 (%s) 必须是 none、auto、minimal、low、medium、high、xhigh、max、-1 或非负整数思考预算", value)
+		return modelSuffix{}, fmt.Errorf("模型名思考后缀 %q 必须是 none、auto、minimal、low、medium、high、xhigh、max、-1 或非负整数思考预算", value)
 	}
 	return modelSuffix{level: level, noThoughts: value == "none"}, nil
 }

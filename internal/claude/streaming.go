@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 )
@@ -20,10 +21,16 @@ type StreamingState struct {
 	CurrentBlockType string
 	Usage            *gemini.Usage
 	ConversationID   string
-	// WebSearchRequests 为 message_delta usage.server_tool_use 的搜索次数
+	// ProviderModel 是上游实际回答的模型 ID，写在 message_delta 中
+	ProviderModel string
+	// WebSearchRequests 与 WebFetchRequests 为 message_delta usage.server_tool_use 的搜索与读取网页次数
 	WebSearchRequests int
+	WebFetchRequests  int
 	// StopSequence 为 message_delta 中命中的停止序列
 	StopSequence *string
+	// ContextManagement 与 Iterations 为 message_delta 中生效的上下文编辑与各次采样的用量
+	ContextManagement map[string]any
+	Iterations        []map[string]any
 }
 
 // NewStreamingState 创建 Claude SSE 状态
@@ -53,6 +60,11 @@ func NewStreamProcessor(model string, writer io.Writer, messageIDs ...string) *S
 // SetConversationID 设置最终消息携带的显式会话标识
 func (p *StreamProcessor) SetConversationID(conversationID string) {
 	p.state.ConversationID = conversationID
+}
+
+// SetProviderModel 设置 message_delta 携带的上游实际模型
+func (p *StreamProcessor) SetProviderModel(model string) {
+	p.state.ProviderModel = model
 }
 
 // SetModel 设置校验后的实际模型
@@ -151,6 +163,35 @@ func (p *StreamProcessor) FinishThinking(signature string) error {
 	return p.closeBlock()
 }
 
+// SetContextManagement 设置 message_delta 携带的上下文编辑结果与各次采样的用量
+func (p *StreamProcessor) SetContextManagement(management map[string]any, iterations []map[string]any) {
+	p.state.ContextManagement, p.state.Iterations = management, iterations
+}
+
+// EmitCompaction 输出本次请求压缩上下文得到的 compaction 块，摘要以 compaction_delta 发送
+func (p *StreamProcessor) EmitCompaction(summary string) error {
+	if err := p.ensureStarted(); err != nil {
+		return err
+	}
+	if err := p.closeBlock(); err != nil {
+		return err
+	}
+	if err := p.emit("content_block_start", map[string]interface{}{
+		"type": "content_block_start", "index": p.state.BlockIndex,
+		"content_block": map[string]interface{}{"type": "compaction", "content": nil, "encrypted_content": nil},
+	}); err != nil {
+		return err
+	}
+	p.state.CurrentBlockType = "compaction"
+	if err := p.emit("content_block_delta", map[string]interface{}{
+		"type": "content_block_delta", "index": p.state.BlockIndex,
+		"delta": map[string]interface{}{"type": "compaction_delta", "content": summary, "encrypted_content": nil},
+	}); err != nil {
+		return err
+	}
+	return p.closeBlock()
+}
+
 // FinishStopSequence 以命中的停止序列完成 Claude SSE 消息
 func (p *StreamProcessor) FinishStopSequence(sequence string) error {
 	p.state.StopSequence = &sequence
@@ -176,11 +217,20 @@ func (p *StreamProcessor) Finish(stopReason string) error {
 	if p.state.ConversationID != "" {
 		messageDelta["conversation_id"] = p.state.ConversationID
 	}
+	if p.state.ProviderModel != "" {
+		messageDelta["provider_model"] = p.state.ProviderModel
+	}
 	usage := map[string]any{"output_tokens": p.state.Usage.OutputTokens()}
-	if p.state.WebSearchRequests > 0 {
-		usage["server_tool_use"] = map[string]int{"web_search_requests": p.state.WebSearchRequests}
+	if p.state.WebSearchRequests > 0 || p.state.WebFetchRequests > 0 {
+		usage["server_tool_use"] = map[string]int{"web_search_requests": p.state.WebSearchRequests, "web_fetch_requests": p.state.WebFetchRequests}
+	}
+	if p.state.Iterations != nil {
+		usage["iterations"] = p.state.Iterations
 	}
 	messageDelta["usage"] = usage
+	if p.state.ContextManagement != nil {
+		messageDelta["context_management"] = p.state.ContextManagement
+	}
 	if err := p.emit("message_delta", messageDelta); err != nil {
 		return err
 	}
@@ -229,8 +279,11 @@ func (p *StreamProcessor) EmitServerToolUse(id string, name string, input any) e
 	}); err != nil {
 		return err
 	}
-	if name == "web_search" {
+	switch name {
+	case "web_search":
 		p.state.WebSearchRequests++
+	case "web_fetch":
+		p.state.WebFetchRequests++
 	}
 	return p.closeBlock()
 }
@@ -348,7 +401,7 @@ func (p *StreamProcessor) closeBlock() error {
 }
 
 func (p *StreamProcessor) emit(eventType string, payload interface{}) error {
-	data, err := json.Marshal(payload)
+	data, err := json.Marshal(fieldorder.Official("anthropic", payload))
 	if err != nil {
 		return err
 	}

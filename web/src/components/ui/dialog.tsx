@@ -7,39 +7,29 @@ export const Dialog = Primitive.Root
 export const DialogTrigger = Primitive.Trigger
 export const DialogClose = Primitive.Close
 
-// contentVariants 区分居中对话框与右侧详情面板
+// contentVariants 是视口居中的对话框，区分普通与加宽两种宽度
 const contentVariants = cva(
-  'fixed z-modal flex flex-col bg-surface text-foreground shadow-modal focus:outline-none',
-  {
-    variants: {
-      layout: {
-        center:
-          'inset-x-4 top-1/2 mx-auto max-h-dialog -translate-y-1/2 rounded-md data-[state=closed]:animate-pop-out data-[state=open]:animate-pop-in',
-        sheet:
-          'inset-y-0 right-0 w-full max-w-sheet data-[state=closed]:animate-sheet-out data-[state=open]:animate-sheet-in',
-      },
-      width: { normal: 'max-w-dialog', wide: 'max-w-dialog-wide' },
-    },
-  },
+  'fixed inset-x-4 top-1/2 z-modal mx-auto flex max-h-dialog -translate-y-1/2 flex-col rounded-md bg-surface text-foreground shadow-modal focus:outline-none data-[state=closed]:animate-pop-out data-[state=open]:animate-pop-in',
+  { variants: { width: { normal: 'max-w-dialog', wide: 'max-w-dialog-wide' } } },
 )
 
-// DialogContent 是带遮罩、标题栏与关闭按钮的弹层，焦点锁定在弹层内；详情面板打开时焦点落在面板本身
+// DialogContent 是视口居中、带遮罩、标题栏与关闭按钮的对话框，焦点锁定在对话框内，内容超出时在对话框内滚动，没有 children 时只有标题、说明与按钮；focusContent 为真时打开后焦点落在对话框本身
 export function DialogContent({
   title,
   description,
-  layout = 'center',
   wide = false,
+  focusContent = false,
   closeLabel,
   footer,
   children,
 }: {
   title: ReactNode
   description?: ReactNode
-  layout?: 'center' | 'sheet'
   wide?: boolean
+  focusContent?: boolean
   closeLabel: string
   footer?: ReactNode
-  children: ReactNode
+  children?: ReactNode
 }) {
   const content = useRef<HTMLDivElement>(null)
   return (
@@ -47,7 +37,7 @@ export function DialogContent({
       <Primitive.Overlay className="fixed inset-0 z-overlay bg-overlay data-[state=closed]:animate-fade-out data-[state=open]:animate-fade-in" />
       <Primitive.Content
         ref={content}
-        {...(layout === 'sheet'
+        {...(focusContent
           ? {
               onOpenAutoFocus: (event: Event) => {
                 event.preventDefault()
@@ -55,10 +45,7 @@ export function DialogContent({
               },
             }
           : {})}
-        className={contentVariants({
-          layout,
-          width: layout === 'center' ? (wide ? 'wide' : 'normal') : undefined,
-        })}
+        className={contentVariants({ width: wide ? 'wide' : 'normal' })}
       >
         <header className="flex min-h-12 shrink-0 items-start gap-4 px-6 pt-4">
           <div className="min-w-0 flex-1 py-1">
@@ -78,9 +65,11 @@ export function DialogContent({
             <X size={20} aria-hidden />
           </Primitive.Close>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">{children}</div>
+        {children && <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">{children}</div>}
         {footer && (
-          <footer className="flex shrink-0 flex-wrap justify-end gap-3 px-6 pt-2 pb-6">
+          <footer
+            className={`flex shrink-0 flex-wrap justify-end gap-3 px-6 pb-6 ${children ? 'pt-2' : 'pt-6'}`}
+          >
             {footer}
           </footer>
         )}

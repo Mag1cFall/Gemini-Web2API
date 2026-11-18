@@ -2,15 +2,17 @@ import { ChevronRight } from 'lucide-react'
 import { type ReactNode, useId, useState } from 'react'
 
 import { Collapse } from '@/components/ui/collapse'
-import type { LogRow } from '@/features/logs/filter'
+import { ClampText } from '@/features/logs/ClampText'
+import { type LogRow, logText } from '@/features/logs/filter'
 import { LogField } from '@/features/logs/LogField'
 import { logsMessages } from '@/features/logs/messages'
 import { bodyMessages, finishMessages } from '@/features/requests/messages'
 import { RequestBodyView } from '@/features/requests/RequestParts'
-import type { RequestState } from '@/features/requests/types'
+import type { Attempt, RequestInfo, RequestState } from '@/features/requests/types'
 import { protocolLabels } from '@/features/usage/model'
 import { formatDuration, formatNumber } from '@/lib/format'
-import { useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
+import { useNow } from '@/lib/time'
 
 // stateClass 是请求状态标记的颜色
 const stateClass: Record<RequestState, string> = {
@@ -71,8 +73,47 @@ function Disclosure({
   )
 }
 
-// RequestLogCard 把一个请求的生命周期日志显示为一组行：来源、状态、模型、耗时与用量，展开后为详情、时间线、原始 JSON 与正文
-export function RequestLogCard({ row }: { row: LogRow }) {
+// RunningElapsed 是进行中请求从开始到现在的耗时，每秒更新
+function RunningElapsed({ request }: { request: RequestInfo }) {
+  const { locale } = useI18n()
+  const now = useNow(1000)
+  const elapsed = Math.max(request.duration_ms, now.getTime() - Date.parse(request.started_at))
+  return <LogField value={formatDuration(Math.floor(elapsed / 1000) * 1000, locale)} />
+}
+
+// AttemptList 按顺序列出被换下的账号与原因，备用请求带标记
+function AttemptList({ title, attempts }: { title: string; attempts: Attempt[] }) {
+  const m = useMessages(logsMessages)
+  return (
+    <div className="flex flex-col gap-[2px] font-sans text-sm">
+      <span className="text-xs text-foreground-muted">{title}</span>
+      <ol className="flex flex-col gap-[2px]">
+        {attempts.map((attempt, index) => (
+          <li key={index} className="wrap-anywhere text-foreground">
+            {fill(m.attemptLine, {
+              account: attempt.account,
+              reason: attempt.superseded
+                ? m.attemptSuperseded
+                : attempt.error
+                  ? serverText(attempt.error)
+                  : attempt.status
+                    ? 'HTTP ' + String(attempt.status)
+                    : m.attemptNoResponse,
+            })}
+            {attempt.hedge && (
+              <span className="ml-2 rounded-sm bg-muted px-1 text-xs text-foreground-muted">
+                {m.hedge}
+              </span>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
+// RequestLogCard 把一个请求的生命周期日志显示为一组行：来源、状态、模型、耗时与用量，换号时按顺序列出账号与原因，展开后为详情、时间线、原始 JSON 与正文；account 为日志页筛选的账号，卡片显示该账号参与的尝试
+export function RequestLogCard({ row, account }: { row: LogRow; account: string }) {
   const m = useMessages(logsMessages)
   const body = useMessages(bodyMessages)
   const finish: Record<string, string> = useMessages(finishMessages)
@@ -82,7 +123,13 @@ export function RequestLogCard({ row }: { row: LogRow }) {
   const number = (value: number, digits = 0) =>
     formatNumber(Math.round(value * 10 ** digits) / 10 ** digits, locale)
   const usage = request.usage
-  const seconds = request.duration_ms / 1000
+  const seconds =
+    request.first_event_ms === undefined ? 0 : (request.duration_ms - request.first_event_ms) / 1000
+  const attempts = request.attempts ?? []
+  const filtered =
+    account && request.account !== account
+      ? attempts.filter((attempt) => attempt.account === account)
+      : undefined
   const finishLabel = request.finish_reason
     ? (finish[request.finish_reason] ?? request.finish_reason)
     : ''
@@ -108,7 +155,7 @@ export function RequestLogCard({ row }: { row: LogRow }) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1">
-        <span className="text-foreground-muted">{row.entry.source}</span>
+        <span className="text-foreground-muted">{account || row.entry.source}</span>
         <span
           className={
             'rounded-sm border px-1 text-xs leading-[16px] tabular-nums ' +
@@ -120,7 +167,14 @@ export function RequestLogCard({ row }: { row: LogRow }) {
         <span className="min-w-0 font-medium wrap-anywhere text-foreground">
           {request.model ?? `${request.method} ${request.path}`}
         </span>
-        <LogField value={formatDuration(request.duration_ms, locale)} />
+        {request.state === 'running' ? (
+          <RunningElapsed request={request} />
+        ) : (
+          <LogField value={formatDuration(request.duration_ms, locale)} />
+        )}
+        {request.state === 'running' && request.stage && (
+          <LogField label={m.stage} value={serverText(request.stage)} />
+        )}
         {request.tool_calls ? (
           <LogField label={m.tools} value={number(request.tool_calls)} />
         ) : null}
@@ -141,10 +195,15 @@ export function RequestLogCard({ row }: { row: LogRow }) {
           )}
         </div>
       )}
+      {filtered ? (
+        <AttemptList title={fill(m.accountAttempts, { account })} attempts={filtered} />
+      ) : (
+        attempts.length > 0 && <AttemptList title={m.switches} attempts={attempts} />
+      )}
       {request.error && (
-        <p className="font-sans text-sm break-words whitespace-pre-wrap text-error-text">
-          {request.error}
-        </p>
+        <ClampText className="font-sans text-sm break-words whitespace-pre-wrap text-error-text">
+          {serverText(request.error)}
+        </ClampText>
       )}
       <Disclosure
         summary={
@@ -173,7 +232,9 @@ export function RequestLogCard({ row }: { row: LogRow }) {
                   <time dateTime={event.time} className="shrink-0 text-foreground-subtle">
                     {timeFormat.format(new Date(event.time))}
                   </time>
-                  <span className="min-w-0 break-words whitespace-pre-wrap">{event.message}</span>
+                  <span className="min-w-0 break-words whitespace-pre-wrap">
+                    {logText(event.message, event.fields)}
+                  </span>
                 </li>
               ))}
             </ol>

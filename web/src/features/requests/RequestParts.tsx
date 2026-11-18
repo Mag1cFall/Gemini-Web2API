@@ -2,13 +2,14 @@ import type { ReactNode } from 'react'
 
 import { Tag } from '@/components/ui/badge'
 import { CopyButton } from '@/components/ui/copy-button'
+import { Tooltip } from '@/components/ui/tooltip'
 import { useAccountLabel } from '@/features/accounts/queries'
 import { bodyMessages, requestsMessages } from '@/features/requests/messages'
 import { useRequestBody } from '@/features/requests/queries'
 import type { Attempt } from '@/features/requests/types'
 import { ApiError } from '@/lib/api'
 import { formatBytes, formatDuration } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 
 // DetailItem 是详情列表的一项
 export interface DetailItem {
@@ -23,12 +24,9 @@ export function DetailList({ items }: { items: DetailItem[] }) {
       {items.map((item) => (
         <div key={item.label} className="flex min-w-0 justify-between gap-3">
           <dt className="shrink-0 text-foreground-muted">{item.label}</dt>
-          <dd
-            title={typeof item.value === 'string' ? item.value : undefined}
-            className="min-w-0 truncate text-right tabular-nums"
-          >
-            {item.value}
-          </dd>
+          <Tooltip overflow label={item.value}>
+            <dd className="min-w-0 truncate text-right tabular-nums">{item.value}</dd>
+          </Tooltip>
         </div>
       ))}
     </dl>
@@ -70,7 +68,9 @@ export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: s
             {attempt.hedge && <Tag>{m.attemptHedge}</Tag>}
             {attempt.superseded && <Tag>{m.attemptSuperseded}</Tag>}
           </div>
-          <p className="font-mono text-xs break-words text-error-text">{attempt.error}</p>
+          <p className="font-mono text-xs break-words text-error-text">
+            {serverText(attempt.error)}
+          </p>
         </li>
       ))}
     </ol>

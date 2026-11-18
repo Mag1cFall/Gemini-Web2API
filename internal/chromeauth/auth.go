@@ -112,13 +112,13 @@ func (c *Chrome) Accounts() []Account {
 	return c.accounts
 }
 
-// Refresh 使用已保存的 OAuth 续签材料重新签发 Google Cookie
-func Refresh(ctx context.Context, material auth.OAuthMaterial, proxy string) ([]gemini.Cookie, error) {
-	cookies, err := fetchGoogleCookies(ctx, material.GaiaID, material.RefreshToken, material.WrappedBindingKey, proxy)
+// Refresh 使用已保存的 OAuth 续签材料，以账号绑定的 Chrome 主版本 chrome 与 Accept-Language language 重新签发 Google Cookie，并返回响应登记的 DBSC 会话
+func Refresh(ctx context.Context, material auth.OAuthMaterial, chrome int, language string, proxy string) ([]gemini.Cookie, *auth.BoundSession, error) {
+	cookies, bound, err := fetchGoogleCookies(ctx, browserIdentity{chrome: chrome, language: language}, material.GaiaID, material.RefreshToken, material.WrappedBindingKey, proxy)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return auth.GeminiCookies(toStorageCookies(cookies)), nil
+	return auth.GeminiCookies(toStorageCookies(cookies)), bound, nil
 }
 
 // ImportCookies 从 Cookie 文本生成账号状态，返回状态文件路径与模型数
@@ -228,10 +228,13 @@ func missingValues(requested map[string]struct{}, found map[string]struct{}) []s
 	return missing
 }
 
-// importIdentity 返回写入 path 的账号身份与导入请求使用的代理：账号已导入过时沿用它的停用标记与未重新填写的固定代理
+// importIdentity 返回写入 path 的账号身份与导入请求使用的代理：账号已导入过时沿用它的停用标记、Chrome 版本与未重新填写的固定代理，新账号按版本池占比分配 Chrome 版本
 func importIdentity(path string, metadata auth.Metadata, fallback string) (auth.Metadata, string, error) {
 	metadata.Proxy = strings.TrimSpace(metadata.Proxy)
 	metadata = auth.Inherit(path, metadata)
+	if !gemini.IsChromeVersion(metadata.Chrome) {
+		metadata.Chrome = gemini.PickChromeVersion()
+	}
 	fixed, requestProxy, err := importProxies(metadata.Proxy, fallback)
 	metadata.Proxy = fixed
 	return metadata, requestProxy, err
@@ -305,14 +308,15 @@ func (c *Chrome) importAccount(ctx context.Context, account Account, options Imp
 	if err != nil {
 		return pendingImport{}, err
 	}
-	cookies, err := fetchGoogleCookies(ctx, account.GaiaID, token, account.token.bindingKey, requestProxy)
-	if err != nil {
-		return pendingImport{}, err
-	}
 	if metadata.Language, err = readProfileLanguage(c.root, account.Profile); err != nil {
 		return pendingImport{}, err
 	}
+	cookies, bound, err := fetchGoogleCookies(ctx, browserIdentity{chrome: metadata.Chrome, language: metadata.Language}, account.GaiaID, token, account.token.bindingKey, requestProxy)
+	if err != nil {
+		return pendingImport{}, err
+	}
 	metadata.OAuth = &auth.OAuthMaterial{GaiaID: account.GaiaID, RefreshToken: token, WrappedBindingKey: account.token.bindingKey}
+	metadata.BoundSession = bound
 	state := auth.StorageState{Cookies: toStorageCookies(cookies), Metadata: metadata}
 	return pendingImport{state: state, path: path, requestProxy: requestProxy}, nil
 }
@@ -324,7 +328,7 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 		item := &pending[index]
 		source := gemini.AccountSource{
 			ID: item.state.Metadata.ID, Cookies: auth.GeminiCookies(item.state.Cookies),
-			Language: item.state.Metadata.Language, AuthUser: item.state.Metadata.AuthUser,
+			Language: item.state.Metadata.Language, AuthUser: item.state.Metadata.AuthUser, Chrome: item.state.Metadata.Chrome,
 			Save: func(cookies []gemini.Cookie) error {
 				item.state.Cookies = auth.StateCookies(cookies)
 				return nil

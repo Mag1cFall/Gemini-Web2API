@@ -1,11 +1,13 @@
+import antigravityIcon from '@lobehub/icons-static-svg/icons/antigravity-color.svg'
 import cherryStudioIcon from '@lobehub/icons-static-svg/icons/cherrystudio-color.svg'
 import claudeCodeIcon from '@lobehub/icons-static-svg/icons/claudecode-color.svg'
 import codexIcon from '@lobehub/icons-static-svg/icons/codex-color.svg'
+import deepSeekIcon from '@lobehub/icons-static-svg/icons/deepseek-color.svg'
 import magpieIcon from '@lobehub/icons-static-svg/icons/magpie.svg'
 import openClawIcon from '@lobehub/icons-static-svg/icons/openclaw-color.svg'
 import opencodeIcon from '@lobehub/icons-static-svg/icons/opencode.svg'
 import sillyTavernIcon from '@lobehub/icons-static-svg/icons/sillytavern.svg'
-import { CircleAlert, CircleCheck, Terminal } from 'lucide-react'
+import { ChevronDown, CircleAlert, CircleCheck, Terminal } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
@@ -17,23 +19,44 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Card, CardHeader, PageHeader } from '@/components/ui/page'
 import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
-import { ErrorState, Loading } from '@/components/ui/states'
+import { ErrorState, PagePlaceholder } from '@/components/ui/states'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip } from '@/components/ui/tooltip'
 import { connectMessages } from '@/features/connect/messages'
 import ompIcon from '@/features/connect/omp.svg'
+import piIcon from '@/features/connect/pi.svg'
 import {
+  type ApiProtocol,
+  apiProtocols,
+  displayPath,
+  routeLabel,
+  routeProtocols,
+  useRoutes,
+} from '@/features/connect/routes'
+import {
+  agyConfig,
+  agyEnv,
+  cherryHost,
+  cherryTypes,
   claudeEnv,
   claudeSettings,
+  type ClientProtocol,
+  clientProtocolNames,
   codexConfig,
   codexEnv,
   curlAnthropic,
   curlGemini,
   curlOpenai,
+  dshEnv,
+  dshPatch,
+  dshProtocols,
   magpieImport,
   ompEnv,
   ompModels,
   openclawConfig,
   opencodeConfig,
+  piConfig,
+  piEnv,
   type Shell,
   type SnippetInput,
 } from '@/features/connect/snippets'
@@ -46,6 +69,7 @@ import { appURL, serviceURL } from '@/lib/api'
 import { localizeError } from '@/lib/errorMessages'
 import { formatDuration } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { markEndpointCopied } from '@/lib/onboarding'
 
 // clients 是提供配置的客户端
 const clients = [
@@ -54,6 +78,9 @@ const clients = [
   'opencode',
   'openclaw',
   'omp',
+  'pi',
+  'dsh',
+  'agy',
   'magpie',
   'cherry-studio',
   'sillytavern',
@@ -68,10 +95,26 @@ const clientNames: Record<Client, string> = {
   opencode: 'OpenCode',
   openclaw: 'OpenClaw',
   omp: 'omp',
+  pi: 'pi',
+  dsh: 'dsh',
+  agy: 'Antigravity CLI',
   magpie: 'Magpie',
   'cherry-studio': 'Cherry Studio',
   sillytavern: 'SillyTavern',
   curl: 'curl',
+}
+
+// everyProtocol 是四种接入协议，Chat Completions 为默认
+const everyProtocol: ClientProtocol[] = ['chat', 'responses', 'anthropic', 'gemini']
+
+// clientProtocols 是可选接入协议的客户端与可选的协议，第一个为默认
+const clientProtocols: Partial<Record<Client, ClientProtocol[]>> = {
+  opencode: everyProtocol,
+  openclaw: everyProtocol,
+  omp: ['gemini', 'chat', 'responses', 'anthropic'],
+  pi: everyProtocol,
+  dsh: dshProtocols,
+  'cherry-studio': ['chat', 'responses', 'gemini', 'anthropic'],
 }
 
 // ClientIcon 是客户端标签前的图标，单色图标以遮罩跟随文字颜色
@@ -102,54 +145,136 @@ function ClientIcon({ client }: { client: Client }) {
     codex: codexIcon,
     openclaw: openClawIcon,
     'cherry-studio': cherryStudioIcon,
+    pi: piIcon,
+    dsh: deepSeekIcon,
+    agy: antigravityIcon,
   }[client]
   return <img src={src} alt="" className="size-4" />
 }
 
-// endpoints 返回各协议 SDK 填写的 base URL 与主要接口路径
-function endpoints(origin: string) {
-  return [
-    {
-      protocol: 'openai',
-      base: origin + '/v1',
-      paths: ['/v1/chat/completions', '/v1/responses'],
-    },
-    { protocol: 'anthropic', base: origin, paths: ['/v1/messages'] },
-    { protocol: 'gemini', base: origin, paths: ['/v1beta/models/{model}:generateContent'] },
-  ] as const
+// endpointBases 是各协议 SDK 填写的 base URL
+function endpointBases(origin: string): Record<ApiProtocol, string> {
+  return { openai: origin + '/v1', anthropic: origin, gemini: origin, mcp: origin + '/mcp' }
 }
 
-// EndpointList 列出 OpenAI、Anthropic 与 Gemini 三种协议的 base URL 与主要接口
+// methodTones 是接口方法标签的颜色
+const methodTones: Record<string, string> = {
+  GET: 'text-success-text',
+  POST: 'text-primary',
+  PUT: 'text-warning-text',
+  DELETE: 'text-error-text',
+}
+
+// EndpointList 列出 OpenAI、Anthropic、Gemini 与 MCP 的 base URL，每种协议可展开服务注册的全部接口、方法与用途；复制地址即完成概览引导的第二步
 function EndpointList() {
   const m = useMessages(connectMessages)
-  const hints = { openai: m.openaiHint, anthropic: m.anthropicHint, gemini: m.geminiHint }
+  const routes = useRoutes()
+  const [open, setOpen] = useState<ReadonlySet<ApiProtocol>>(new Set())
+  const hints = {
+    openai: m.openaiHint,
+    anthropic: m.anthropicHint,
+    gemini: m.geminiHint,
+    mcp: m.mcpHint,
+  }
+  const bases = endpointBases(serviceURL)
   return (
-    <ul className="flex flex-col divide-y divide-border">
-      {endpoints(serviceURL).map((item) => (
-        <li
-          key={item.protocol}
-          className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-5 py-3 sm:grid-cols-[160px_minmax(0,1fr)_auto]"
-        >
-          <div className="min-w-0 max-sm:col-span-2">
-            <span className="block text-sm font-medium">{m[item.protocol]}</span>
-            <span className="block text-xs text-foreground-muted">{hints[item.protocol]}</span>
-          </div>
-          <div className="min-w-0">
-            <code className="block truncate font-mono text-sm select-all" title={item.base}>
-              {item.base}
-            </code>
-            <span className="block truncate font-mono text-xs text-foreground-subtle">
-              {item.paths.join('  ·  ')}
-            </span>
-          </div>
-          <CopyButton
-            value={item.base}
-            label={fill(m.copyUrl, { name: m[item.protocol] })}
-            copiedLabel={m.copied}
-          />
-        </li>
-      ))}
-    </ul>
+    <>
+      {routes.isError && (
+        <div className="px-5 pt-3">
+          <Callout tone="error" role="alert">
+            {fill(m.routesFailed, { message: routes.error.message })}
+          </Callout>
+        </div>
+      )}
+      <ul className="flex flex-col divide-y divide-border">
+        {apiProtocols.map((protocol) => {
+          const items = (routes.data ?? []).filter((route) =>
+            routeProtocols(route).includes(protocol),
+          )
+          const expanded = open.has(protocol)
+          return (
+            <li
+              key={protocol}
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-5 py-3 sm:grid-cols-[160px_minmax(0,1fr)_auto]"
+            >
+              <div className="min-w-0 max-sm:col-span-2">
+                <span className="block text-sm font-medium">{m[protocol]}</span>
+                <span className="block text-xs text-foreground-muted">{hints[protocol]}</span>
+              </div>
+              <Tooltip overflow label={bases[protocol]}>
+                <code className="block min-w-0 truncate font-mono text-sm select-all">
+                  {bases[protocol]}
+                </code>
+              </Tooltip>
+              <div className="flex items-center gap-1">
+                <CopyButton
+                  value={bases[protocol]}
+                  label={fill(m.copyUrl, { name: m[protocol] })}
+                  copiedLabel={m.copied}
+                  onCopied={markEndpointCopied}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded={expanded}
+                  aria-controls={'endpoint-' + protocol}
+                  disabled={items.length === 0}
+                  onClick={() => {
+                    setOpen((current) => {
+                      const next = new Set(current)
+                      if (expanded) next.delete(protocol)
+                      else next.add(protocol)
+                      return next
+                    })
+                  }}
+                >
+                  {fill(m.routeCount, { count: items.length })}
+                  <ChevronDown
+                    size={14}
+                    aria-hidden
+                    className={'transition-transform ' + (expanded ? 'rotate-180' : '')}
+                  />
+                </Button>
+              </div>
+              {expanded && (
+                <ul
+                  id={'endpoint-' + protocol}
+                  aria-label={m.routes}
+                  className="col-span-full flex flex-col pt-2"
+                >
+                  {items.map((route) => {
+                    const label = routeLabel(route)
+                    return (
+                      <li
+                        key={route.method + ' ' + route.path}
+                        className="grid grid-cols-[4rem_minmax(0,1fr)] items-baseline gap-x-2 gap-y-[2px] py-1 sm:grid-cols-[4rem_minmax(0,1fr)_minmax(0,1fr)]"
+                      >
+                        <span
+                          className={
+                            'font-mono text-xs font-semibold ' +
+                            (methodTones[route.method] ?? 'text-foreground-muted')
+                          }
+                        >
+                          {route.method}
+                        </span>
+                        <code className="font-mono text-xs wrap-anywhere">
+                          {displayPath(route.path)}
+                        </code>
+                        {label && (
+                          <span className="text-xs text-foreground-muted max-sm:col-start-2">
+                            {m[label]}
+                          </span>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+    </>
   )
 }
 
@@ -346,6 +471,9 @@ function ClientConfigs() {
     (catalog.data?.models ?? []).filter((model) => !model.tool),
     parseAccountBindings(config.data?.api_key_accounts ?? '').get(key),
   )
+  const choices = clientProtocols[client]
+  const protocol =
+    choices?.find((item) => item === params.get('protocol')) ?? choices?.[0] ?? 'chat'
   const [shell, setShell] = useState<Shell>(
     navigator.userAgent.includes('Windows') ? 'windows' : 'unix',
   )
@@ -364,7 +492,37 @@ function ClientConfigs() {
     models: models.map((item) => ({ id: item.id, name: item.display_name || item.id })),
   }
   const block = (title: string, code: string) => (
-    <CodeBlock title={title} code={code} copyLabel={m.copy + ' ' + title} copiedLabel={m.copied} />
+    <CodeBlock
+      title={title}
+      code={code}
+      copyLabel={m.copy + ' ' + title}
+      copiedLabel={m.copied}
+      onCopied={markEndpointCopied}
+    />
+  )
+  const protocolSelect = choices && (
+    <div className="flex min-w-0 flex-col gap-1">
+      <label htmlFor={'client-protocol-' + client} className="text-xs text-foreground-muted">
+        {m.protocol}
+      </label>
+      <Select<ClientProtocol>
+        id={'client-protocol-' + client}
+        label={m.protocol}
+        value={protocol}
+        onValueChange={(next) => {
+          setParams(
+            (current) => {
+              const updated = new URLSearchParams(current)
+              updated.set('protocol', next)
+              return updated
+            },
+            { replace: true },
+          )
+        }}
+        options={choices.map((item) => ({ value: item, label: clientProtocolNames[item] }))}
+        className="w-full sm:w-[224px]"
+      />
+    </div>
   )
   const step = (text: string) => <p className="text-sm text-foreground-muted">{text}</p>
   const modelSelect = models.length > 0 && (
@@ -437,12 +595,19 @@ function ClientConfigs() {
         >
           <dt className="text-sm text-foreground-muted max-sm:col-span-2">{label}</dt>
           <dd className="min-w-0 font-mono text-sm break-all">{value}</dd>
-          <CopyButton value={value} label={m.copy + ' ' + label} copiedLabel={m.copied} />
+          <CopyButton
+            value={value}
+            label={m.copy + ' ' + label}
+            copiedLabel={m.copied}
+            onCopied={markEndpointCopied}
+          />
         </div>
       ))}
     </dl>
   )
-  if (config.isPending || catalog.isPending) return <Loading label={app.loading} />
+  if (config.isPending || catalog.isPending) {
+    return <PagePlaceholder title={m.title} description={m.description} label={app.loading} />
+  }
   if (config.isError) {
     return (
       <ErrorState
@@ -463,6 +628,7 @@ function ClientConfigs() {
             (current) => {
               const next = new URLSearchParams(current)
               next.set('client', value)
+              next.delete('protocol')
               return next
             },
             { replace: true },
@@ -518,33 +684,73 @@ function ClientConfigs() {
         </TabsContent>
         <TabsContent value="opencode" className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start gap-4">
+            {protocolSelect}
             {modelSelect}
             {keySelect}
           </div>
           {notes}
           {step(m.opencodeConfig)}
-          {block('~/.config/opencode/opencode.json', opencodeConfig(input))}
+          {block('~/.config/opencode/opencode.json', opencodeConfig(input, protocol))}
         </TabsContent>
         <TabsContent value="openclaw" className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start gap-4">
+            {protocolSelect}
             {modelSelect}
             {keySelect}
           </div>
           {notes}
           {step(m.openclawConfig)}
-          {block('~/.openclaw/openclaw.json', openclawConfig(input))}
+          {block('~/.openclaw/openclaw.json', openclawConfig(input, protocol))}
         </TabsContent>
         <TabsContent value="omp" className="flex flex-col gap-4">
           <div className="flex flex-wrap items-start gap-4">
+            {protocolSelect}
             {modelSelect}
             {keySelect}
             {shellSelect}
           </div>
           {notes}
           {step(m.ompModels)}
-          {block('~/.omp/agent/models.yml', ompModels(input))}
+          {block('~/.omp/agent/models.yml', ompModels(input, protocol))}
           {step(m.ompRun)}
           {block(terminal, ompEnv(input, shell))}
+        </TabsContent>
+        <TabsContent value="pi" className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-start gap-4">
+            {protocolSelect}
+            {modelSelect}
+            {keySelect}
+            {shellSelect}
+          </div>
+          {notes}
+          {step(m.piConfig)}
+          {block('~/.pi/agent/models.json', piConfig(input, protocol))}
+          {step(m.piRun)}
+          {block(terminal, piEnv(input, shell))}
+        </TabsContent>
+        <TabsContent value="dsh" className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-start gap-4">
+            {protocolSelect}
+            {modelSelect}
+            {keySelect}
+            {shellSelect}
+          </div>
+          {notes}
+          {step(m.dshPatch)}
+          {block('gemini-web2api.patch.yml', dshPatch(input, protocol))}
+          {step(m.dshRun)}
+          {block(terminal, dshEnv(input, shell))}
+        </TabsContent>
+        <TabsContent value="agy" className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-start gap-4">
+            {keySelect}
+            {shellSelect}
+          </div>
+          {notes}
+          {step(m.agyConfig)}
+          {block('~/.gemini/antigravity-cli/settings.json', agyConfig())}
+          {step(m.agyRun)}
+          {block(terminal, agyEnv(input, shell))}
         </TabsContent>
         <TabsContent value="magpie" className="flex flex-col gap-4">
           {keySelect && <div className="flex flex-wrap items-start gap-4">{keySelect}</div>}
@@ -560,12 +766,15 @@ function ClientConfigs() {
           ])}
         </TabsContent>
         <TabsContent value="cherry-studio" className="flex flex-col gap-4">
-          {keySelect && <div className="flex flex-wrap items-start gap-4">{keySelect}</div>}
+          <div className="flex flex-wrap items-start gap-4">
+            {protocolSelect}
+            {keySelect}
+          </div>
           {notes}
           {step(m.cherrySteps)}
           {fields([
-            [m.cherryType, m.cherryTypeValue],
-            [m.cherryHost, origin],
+            [m.cherryType, cherryTypes[protocol]],
+            [m.cherryHost, cherryHost(origin, protocol)],
             [m.cherryKey, key],
             [m.cherryModels, models.map((item) => item.id).join(', ') || fallback],
           ])}
@@ -602,7 +811,7 @@ function ClientConfigs() {
   )
 }
 
-// ConnectPage 是接入页：三种协议的接口地址与各客户端的现成配置
+// ConnectPage 是接入页：各协议的接口地址与全部接口、各客户端的现成配置
 export function ConnectPage() {
   const m = useMessages(connectMessages)
   return (

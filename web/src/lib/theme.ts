@@ -38,9 +38,20 @@ function savedTheme(): Theme | undefined {
   }
 }
 
+// switchTheme 写入配色模式，换色的这一帧关闭过渡，全部元素在同一帧换成新配色
+function switchTheme(theme: Theme) {
+  const root = document.documentElement
+  root.dataset.themeSwitching = ''
+  root.dataset.theme = theme
+  void getComputedStyle(document.body).color
+  requestAnimationFrame(() => {
+    delete root.dataset.themeSwitching
+  })
+}
+
 // setTheme 切换配色模式并记住选择
 export function setTheme(theme: Theme) {
-  document.documentElement.dataset.theme = theme
+  switchTheme(theme)
   try {
     window.localStorage.setItem(themeKey, theme)
   } catch {
@@ -51,6 +62,6 @@ export function setTheme(theme: Theme) {
 // applyTheme 在没有保存选择时随系统配色切换
 export function applyTheme() {
   systemQuery.addEventListener('change', (event) => {
-    if (!savedTheme()) document.documentElement.dataset.theme = event.matches ? 'dark' : 'light'
+    if (!savedTheme()) switchTheme(event.matches ? 'dark' : 'light')
   })
 }

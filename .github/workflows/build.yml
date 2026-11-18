@@ -61,7 +61,7 @@ jobs:
       - uses: actions/setup-go@v7
         id: go
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: false
       - id: cache
         run: echo "key=go-headless-${TARGET/\//-}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}" >> "$GITHUB_OUTPUT"
@@ -108,7 +108,7 @@ jobs:
       - uses: actions/setup-go@v7
         id: go
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache/restore@v5
         with:
@@ -149,9 +149,9 @@ jobs:
       CGO_ENABLED: '1'
       VERSION: ${{ needs.version.outputs.version }}
       NUMERIC: ${{ needs.version.outputs.numeric }}
-      CGO_CPPFLAGS: -mmacosx-version-min=12.0
-      CGO_LDFLAGS: -mmacosx-version-min=12.0
-      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      CGO_CPPFLAGS: -mmacosx-version-min=13.0
+      CGO_LDFLAGS: -mmacosx-version-min=13.0
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -161,7 +161,7 @@ jobs:
       - uses: actions/setup-go@v7
         id: go
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache/restore@v5
         with:
@@ -221,7 +221,7 @@ jobs:
       - uses: actions/setup-go@v7
         id: go
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache/restore@v5
         with:

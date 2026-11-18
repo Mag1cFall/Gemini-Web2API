@@ -11,6 +11,8 @@ type ConversationSnapshot struct {
 	Token     string
 	ModelMode int
 	Turns     int
+	// Saved 表示会话不是 Temporary Chat，续接时同样不使用 Temporary Chat
+	Saved bool
 }
 
 // ConversationState 保存线程安全的网页会话状态
@@ -22,6 +24,7 @@ type ConversationState struct {
 	token     string
 	modelMode int
 	turns     int
+	saved     bool
 }
 
 // NewConversationState 创建空网页会话状态
@@ -43,7 +46,7 @@ func (s *ConversationState) Snapshot() ConversationSnapshot {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return ConversationSnapshot{CID: s.cid, RID: s.rid, RCID: s.rcid, Token: s.token, ModelMode: s.modelMode, Turns: s.turns}
+	return ConversationSnapshot{CID: s.cid, RID: s.rid, RCID: s.rcid, Token: s.token, ModelMode: s.modelMode, Turns: s.turns, Saved: s.saved}
 }
 
 // Update 原子替换非空会话字段
@@ -70,5 +73,8 @@ func (s *ConversationState) Update(snapshot ConversationSnapshot) {
 	}
 	if snapshot.Turns != 0 {
 		s.turns = snapshot.Turns
+	}
+	if snapshot.Saved {
+		s.saved = true
 	}
 }

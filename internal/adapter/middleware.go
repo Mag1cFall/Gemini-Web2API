@@ -3,6 +3,7 @@ package adapter
 import (
 	"bytes"
 	"crypto/subtle"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -68,6 +69,45 @@ func AuthMiddleware(apiKey func() string) gin.HandlerFunc {
 		}
 		c.Request = c.Request.WithContext(balancer.ContextWithAPIKey(c.Request.Context(), matched))
 		c.Next()
+	}
+}
+
+// accountHeader 是按请求指定处理账号的请求头，值为账号 ID
+const accountHeader = "X-Gemini-Web2API-Account"
+
+// AccountMiddleware 读取指定处理账号的请求头：账号不存在返回 400，不在 API key 绑定的账号中返回 403，其余请求只由该账号处理
+func AccountMiddleware(pool *balancer.AccountPool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID := strings.TrimSpace(c.GetHeader(accountHeader))
+		if accountID == "" {
+			c.Next()
+			return
+		}
+		exists, allowed := pool.AccountAllowed(c.Request.Context(), accountID)
+		switch {
+		case !exists:
+			writeProtocolError(c, http.StatusBadRequest, fmt.Sprintf("%s 指定的账号 %q 不存在", accountHeader, accountID))
+			c.Abort()
+			return
+		case !allowed:
+			writeProtocolError(c, http.StatusForbidden, fmt.Sprintf("%s 指定的账号 %q 不在当前 API key 可用的账号中", accountHeader, accountID))
+			c.Abort()
+			return
+		}
+		c.Request = c.Request.WithContext(balancer.ContextWithAccount(c.Request.Context(), accountID))
+		c.Next()
+	}
+}
+
+// writeProtocolError 按请求所属协议写出错误
+func writeProtocolError(c *gin.Context, status int, message string) {
+	switch {
+	case IsGeminiRequest(c):
+		writeGeminiError(c, status, geminiStatusName(status), message)
+	case strings.HasPrefix(c.Request.URL.Path, "/v1/messages") || c.GetHeader("anthropic-version") != "":
+		writeClaudeError(c, status, claudeErrorType(status), message)
+	default:
+		writeOpenAIError(c, status, "invalid_request", message)
 	}
 }
 
@@ -233,7 +273,8 @@ func thinkingLevelNames(levels []gemini.ThinkingLevel) []string {
 func IsGeminiRequest(c *gin.Context) bool {
 	path := c.Request.URL.Path
 	return strings.HasPrefix(path, "/v1beta/") || strings.HasPrefix(path, "/upload/") || strings.HasPrefix(path, "/ws/google.ai.generativelanguage.") ||
-		strings.HasPrefix(path, "/v1/models/") && strings.Contains(path, ":") || c.GetHeader("x-goog-api-key") != ""
+		strings.HasPrefix(path, "/v1/models/") && strings.Contains(path, ":") || strings.HasPrefix(path, "/v1/interactions") || strings.HasPrefix(path, "/v1/cachedContents") ||
+		c.GetHeader("x-goog-api-key") != ""
 }
 
 // GeminiOr 在 Gemini 与 OpenAI 共用的路径上按请求协议选择处理函数

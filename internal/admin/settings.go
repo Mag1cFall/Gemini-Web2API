@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
@@ -47,6 +48,7 @@ type ServiceConfig struct {
 	ProxyAPIKey      string   `json:"proxy_api_key"`
 	Proxy            string   `json:"proxy"`
 	SaveHistory      bool     `json:"save_history"`
+	ContinueSession  bool     `json:"continue_session"`
 	Keepalive        bool     `json:"nonstream_keepalive"`
 	FakeStream       bool     `json:"fake_stream"`
 	ModelMapping     string   `json:"model_mapping"`
@@ -85,6 +87,7 @@ type ConfigUpdate struct {
 	ProxyAPIKey      *string `json:"proxy_api_key"`
 	Proxy            *string `json:"proxy"`
 	SaveHistory      *bool   `json:"save_history"`
+	ContinueSession  *bool   `json:"continue_session"`
 	Keepalive        *bool   `json:"nonstream_keepalive"`
 	FakeStream       *bool   `json:"fake_stream"`
 	ModelMapping     *string `json:"model_mapping"`
@@ -116,7 +119,7 @@ func (s *Settings) View() ServiceConfig {
 	defer s.mu.RUnlock()
 	cfg := s.current
 	view := ServiceConfig{
-		ProxyAPIKey: cfg.ProxyAPIKey, Proxy: cfg.ProxyURL, SaveHistory: cfg.SaveHistory,
+		ProxyAPIKey: cfg.ProxyAPIKey, Proxy: cfg.ProxyURL, SaveHistory: cfg.SaveHistory, ContinueSession: cfg.ContinueSession,
 		Keepalive: cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream,
 		ModelMapping: config.FormatModelMapping(cfg.ModelMapping), AccountCooldown: shortDuration(cfg.AccountCooldown),
 		SessionTTL: shortDuration(cfg.SessionTTL), InitTimeout: shortDuration(cfg.InitTimeout), LogLevel: cfg.LogLevel,
@@ -141,6 +144,25 @@ func (s *Settings) View() ServiceConfig {
 	}
 	view.RestartRequired = len(view.RestartFields) > 0
 	return view
+}
+
+// hedgeStat 是一个发起首事件备用请求的模型当前的首事件等待 p95
+type hedgeStat struct {
+	Model   string `json:"model"`
+	P95MS   int64  `json:"p95_ms"`
+	Samples int    `json:"samples"`
+	Ready   bool   `json:"ready"`
+}
+
+// hedgeStats 返回设置中各备用请求模型近 24 小时原请求首事件等待的 p95
+func (h *handler) hedgeStats() []hedgeStat {
+	models := config.SplitList(h.settings.View().FirstEventHedgeModels)
+	stats := make([]hedgeStat, 0, len(models))
+	for _, model := range models {
+		p95, samples, ready := adapter.FirstEventP95(model)
+		stats = append(stats, hedgeStat{Model: model, P95MS: p95.Milliseconds(), Samples: samples, Ready: ready})
+	}
+	return stats
 }
 
 // Update 校验修改，写回 .env 并应用可热更新的项
@@ -190,6 +212,7 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		env["PROXY"] = proxy
 	}
 	setBool(update.SaveHistory, "GEMINI_SAVE_HISTORY", &next.SaveHistory)
+	setBool(update.ContinueSession, "GEMINI_CONTINUE_SESSION", &next.ContinueSession)
 	setBool(update.Keepalive, "NONSTREAM_KEEPALIVE", &next.NonstreamKeepalive)
 	setBool(update.FakeStream, "FAKE_STREAM", &next.FakeStream)
 	if update.ModelMapping != nil {

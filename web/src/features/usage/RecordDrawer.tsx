@@ -12,9 +12,9 @@ import { useUsageFormat } from '@/features/usage/format'
 import { usageMessages } from '@/features/usage/messages'
 import { latencyTone } from '@/features/usage/model'
 import type { UsageRecord } from '@/features/usage/types'
-import { useMessages } from '@/lib/i18n'
+import { serverText, useMessages } from '@/lib/i18n'
 
-// RecordDrawer 是一条请求记录的右侧详情：概要、错误、上游尝试与正文
+// RecordDrawer 是一条请求记录的详情对话框：概要、错误、上游尝试与正文
 export function RecordDrawer({
   record,
   onClose,
@@ -53,7 +53,8 @@ export function RecordDrawer({
       }}
     >
       <DialogContent
-        layout="sheet"
+        wide
+        focusContent
         closeLabel={m.close}
         title={
           <span className="flex flex-wrap items-center gap-2">
@@ -83,7 +84,7 @@ export function RecordDrawer({
           {record.error && (
             <DetailSection title={m.detailError}>
               <pre className="rounded-sm bg-error-soft p-3 font-mono text-xs break-words whitespace-pre-wrap text-error-text">
-                {record.error}
+                {serverText(record.error)}
               </pre>
             </DetailSection>
           )}

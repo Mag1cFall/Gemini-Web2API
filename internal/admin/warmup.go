@@ -25,7 +25,7 @@ type warmupResult struct {
 	Usage      *gemini.UsageInfo `json:"usage,omitempty"`
 }
 
-// warmup 以选定的账号与模型发一条最小生成请求，登记为可从管理端停止的进行中请求并写入请求账本，成功后读取该账号的用量；管理端断开连接时预热照常完成
+// warmup 以选定的账号与模型发一条最小生成请求，登记为可从管理端停止的进行中请求并写入请求账本，成功后读取该账号的用量；停用账号以临时客户端预热，账号保持停用；管理端断开连接时预热照常完成
 func (h *handler) warmup(c *gin.Context) {
 	var input struct {
 		Account string `json:"account"`
@@ -34,18 +34,29 @@ func (h *handler) warmup(c *gin.Context) {
 	if !bindJSON(c, &input) {
 		return
 	}
-	client := h.Pool.Client(input.Account)
-	if client == nil {
+	view, ok := h.account(input.Account)
+	if !ok {
 		writeError(c, http.StatusNotFound, "account_not_found", "账号不存在")
 		return
 	}
-	if status, ok := h.account(input.Account); !ok || status.State != balancer.StateReady {
+	disabled := view.State == balancer.StateDisabled
+	client := h.Pool.Client(input.Account)
+	if !disabled && (client == nil || view.State != balancer.StateReady) {
 		writeError(c, http.StatusConflict, "account_not_ready", "账号未就绪")
 		return
 	}
 	request, ctx := logging.NewRequest(context.WithoutCancel(c.Request.Context()), http.MethodPost, c.Request.URL.Path, c.ClientIP())
 	request.Begin("warmup", input.Model, true, 1, 0)
-	err := h.ping(ctx, request, client, input.Account, input.Model)
+	var err error
+	if disabled {
+		request.SetStage("初始化停用账号")
+		if client, err = h.Accounts.TemporaryClient(ctx, input.Account); err == nil {
+			defer client.CloseIdleConnections()
+		}
+	}
+	if err == nil {
+		err = h.ping(ctx, request, client, input.Account, input.Model, !disabled)
+	}
 	status := http.StatusOK
 	if err != nil {
 		status = http.StatusBadGateway
@@ -66,8 +77,8 @@ func (h *handler) warmup(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-// ping 等到账号有空闲并发名额后经生成路径发送 warmupPrompt 并读完回答，按结果更新账号与模型的冷却
-func (h *handler) ping(ctx context.Context, request *logging.Request, client *gemini.Client, account string, model string) error {
+// ping 等到账号有空闲并发名额后经生成路径发送 warmupPrompt 并读完回答，report 为真时按结果更新账号与模型的冷却
+func (h *handler) ping(ctx context.Context, request *logging.Request, client *gemini.Client, account string, model string, report bool) error {
 	request.SetStage("等待账号")
 	release, err := client.AcquireRequest(ctx)
 	if err != nil {
@@ -91,9 +102,11 @@ func (h *handler) ping(ctx context.Context, request *logging.Request, client *ge
 	var protocolErr *gemini.ProtocolError
 	switch {
 	case err == nil:
-		h.Pool.ReportSuccess(account, model)
 		request.SetResult(model, "", finish)
-	case ctx.Err() == nil && (!errors.As(err, &protocolErr) || protocolErr.Retryable):
+		if report {
+			h.Pool.ReportSuccess(account, model)
+		}
+	case report && ctx.Err() == nil && (!errors.As(err, &protocolErr) || protocolErr.Retryable):
 		h.Pool.ReportFailure(account, model, err)
 	}
 	return err

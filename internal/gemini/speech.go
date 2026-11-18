@@ -3,7 +3,6 @@ package gemini
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 )
 
 // speechRPC 是官网回答菜单 Listen 朗读使用的 batchexecute RPC
@@ -48,7 +47,7 @@ func (c *Client) Speech(ctx context.Context, text string, language string, forma
 	encoded, _ := stringAt(result, 0)
 	audio, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil || len(audio) < 16 {
-		return nil, retryableProtocolError(fmt.Sprintf("%s returned no audio", speechRPC), err)
+		return nil, retryableProtocolError("上游没有返回音频", err)
 	}
 	return audio, nil
 }

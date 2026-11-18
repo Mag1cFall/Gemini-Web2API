@@ -4,6 +4,7 @@ import { useId, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Tooltip } from '@/components/ui/tooltip'
 import { usageMessages } from '@/features/usage/messages'
 import { useMessages } from '@/lib/i18n'
 
@@ -45,9 +46,9 @@ export function FilterMenu({
             (selected.length > 0 ? 'border-primary-border bg-primary-soft text-primary' : '')
           }
         >
-          <span className="min-w-0 truncate" title={label}>
-            {label}
-          </span>
+          <Tooltip overflow label={label}>
+            <span className="min-w-0 truncate">{label}</span>
+          </Tooltip>
           {selected.length > 0 && (
             <span className="rounded-sm bg-primary px-1 text-xs text-primary-foreground tabular-nums">
               {selected.length}
@@ -82,6 +83,7 @@ export function FilterMenu({
             visible.map((value, index) => (
               <label
                 key={value}
+                aria-label={format(value)}
                 htmlFor={`${id}-${String(index)}`}
                 className="flex h-control-sm cursor-pointer items-center gap-2 rounded-sm px-2 text-sm hover:bg-hover"
               >
@@ -98,9 +100,9 @@ export function FilterMenu({
                   }}
                   className="size-4 shrink-0 accent-primary"
                 />
-                <span className="min-w-0 flex-1 truncate" title={format(value)}>
-                  {format(value)}
-                </span>
+                <Tooltip overflow label={format(value)}>
+                  <span className="min-w-0 flex-1 truncate">{format(value)}</span>
+                </Tooltip>
               </label>
             ))
           )}

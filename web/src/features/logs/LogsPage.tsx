@@ -1,6 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { Trash } from 'lucide-react'
-import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { logsKey } from '@/app/events'
@@ -10,81 +11,25 @@ import { SearchInput } from '@/components/ui/search-input'
 import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { toast, toastDuration } from '@/components/ui/toast'
+import { DisabledHint } from '@/components/ui/tooltip'
 import {
   groupLogs,
   type LogFilter,
-  type LogRow,
   matchRow,
   minimumLevels,
   parseLogFilter,
 } from '@/features/logs/filter'
-import { LogMessage } from '@/features/logs/LogField'
+import { LogLine } from '@/features/logs/LogLine'
 import { logsMessages } from '@/features/logs/messages'
-import { RequestLogCard } from '@/features/logs/RequestLogCard'
-import type { LogEntry, LogLevel } from '@/features/logs/types'
+import { SavedLogs } from '@/features/logs/SavedLogs'
+import type { LogEntry } from '@/features/logs/types'
 import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { useI18n, useMessages } from '@/lib/i18n'
 
-// pageRows 是首次显示与每次加载更早日志的行数
-const pageRows = 200
-
-// levelClass 是各级别日志行的左侧色条与底色，警告与错误才有色条
-const levelClass: Record<LogLevel, string> = {
-  DEBUG: 'border-l-transparent text-foreground-muted',
-  INFO: 'border-l-transparent',
-  WARN: 'border-l-warning bg-warning-soft/60',
-  ERROR: 'border-l-error bg-error-soft/60',
-}
-
-// levelText 是级别列的文字颜色
-const levelText: Record<LogLevel, string> = {
-  DEBUG: 'text-foreground-subtle',
-  INFO: 'text-primary',
-  WARN: 'text-warning-text',
-  ERROR: 'text-error-text',
-}
-
-// timeFormat 是日志行的 24 小时制时分秒
-const timeFormat = new Intl.DateTimeFormat('en-GB', {
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: false,
-})
-
-// LogLine 渲染一行日志或请求卡片，行的最新事件与事件数不变时不重新渲染
-const LogLine = memo(
-  function LogLine({ row }: { row: LogRow }) {
-    const level = row.entry.level
-    const time = row.events[0]?.time ?? row.entry.time
-    return (
-      <div
-        className={
-          'grid grid-cols-[auto_auto_minmax(0,1fr)] items-baseline gap-x-4 border-b border-l-2 border-b-border py-2 pr-5 pl-[18px] text-base select-text ' +
-          levelClass[level]
-        }
-      >
-        <time dateTime={time} className="font-mono text-sm text-foreground-subtle tabular-nums">
-          {timeFormat.format(new Date(time))}
-        </time>
-        <span className={'w-[44px] font-mono text-sm font-semibold ' + levelText[level]}>
-          {level}
-        </span>
-        {row.entry.request ? (
-          <RequestLogCard row={row} />
-        ) : (
-          <LogMessage source={row.entry.source} message={row.entry.message} />
-        )}
-      </div>
-    )
-  },
-  (prev, next) =>
-    prev.row.entry === next.row.entry && prev.row.events.length === next.row.events.length,
-)
-
-// LogsPage 显示实时日志：请求的生命周期合成卡片，按级别、来源与搜索词筛选，可跟随最新日志滚动
-export function LogsPage() {
+// LiveLogs 显示实时日志：请求的生命周期合成卡片，按级别、来源与搜索词筛选，只渲染可见的行，可跟随最新日志滚动；清空后 5 秒内可撤销；toolbar 是视图切换
+function LiveLogs({ toolbar }: { toolbar: ReactNode }) {
   const m = useMessages(logsMessages)
   const { locale } = useI18n()
   const client = useQueryClient()
@@ -95,7 +40,11 @@ export function LogsPage() {
     queryFn: () => [] as LogEntry[],
     enabled: false,
   }).data
-  const logs = useMemo(() => logData ?? [], [logData])
+  const [hidden, setHidden] = useState<ReadonlySet<LogEntry>>()
+  const logs = useMemo(
+    () => (logData ?? []).filter((entry) => !hidden?.has(entry)),
+    [logData, hidden],
+  )
   const rows = useMemo(() => groupLogs(logs), [logs])
   const sources = useMemo(
     () => [...new Set(logs.map((entry) => entry.source))].sort((a, b) => a.localeCompare(b)),
@@ -109,56 +58,60 @@ export function LogsPage() {
     [rows, filter.level, filter.source, filter.q],
   )
   const [autoScroll, setAutoScroll] = useState(true)
-  const [limit, setLimit] = useState(pageRows)
-  const [pinned, setPinned] = useState<string | undefined>()
   const output = useRef<HTMLDivElement>(null)
-  const first =
-    pinned === undefined
-      ? Math.max(0, filtered.length - limit)
-      : Math.max(
-          0,
-          filtered.findIndex((row) => row.key === pinned),
-        )
-  const visible = filtered.slice(first)
+  const virtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => output.current,
+    estimateSize: () => 41,
+    getItemKey: (index) => filtered[index]?.key ?? index,
+    overscan: 12,
+  })
+  const totalSize = virtualizer.getTotalSize()
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const node = output.current
     if (autoScroll && node) node.scrollTop = node.scrollHeight
-  }, [autoScroll, logs, filtered.length])
+  }, [autoScroll, filtered.length, totalSize])
 
-  const clear = useMutation({
-    mutationFn: () => api('/api/logs', { method: 'DELETE' }),
-    onSuccess: () => client.setQueryData(logsKey, []),
-  })
+  // clear 立即隐藏当前全部日志并提示可撤销，5 秒内没有撤销时清空服务端日志
+  const clear = () => {
+    const removed = new Set(logData ?? [])
+    setHidden(removed)
+    const timer = setTimeout(() => {
+      void api('/api/logs', { method: 'DELETE' }).then(
+        () => {
+          client.setQueryData<LogEntry[]>(logsKey, (current = []) =>
+            current.filter((entry) => !removed.has(entry)),
+          )
+          setHidden(undefined)
+        },
+        (error: unknown) => {
+          setHidden(undefined)
+          toast({ tone: 'error', title: error instanceof Error ? error.message : String(error) })
+        },
+      )
+    }, toastDuration)
+    toast({
+      tone: 'success',
+      title: m.cleared,
+      action: {
+        label: m.undo,
+        onClick: () => {
+          clearTimeout(timer)
+          setHidden(undefined)
+        },
+      },
+    })
+  }
 
-  // windowStart 返回跟随末尾时窗口首行的标识，自动滚动开启时为空
-  const windowStart = (list: LogRow[], size: number, follow: boolean) =>
-    follow ? undefined : list[Math.max(0, list.length - size)]?.key
-
-  // update 同步写入筛选条件，窗口回到最近的一页
+  // update 同步写入筛选条件
   const update = (next: Partial<LogFilter>) => {
     const search = new URLSearchParams(params)
     for (const [key, value] of Object.entries(next)) {
       if (value && value !== 'all') search.set(key, value)
       else search.delete(key)
     }
-    setParams(search, { replace: true, flushSync: true })
-    const nextFilter = { ...filter, ...next }
-    setLimit(pageRows)
-    setPinned(
-      windowStart(
-        rows.filter((row) => matchRow(row, nextFilter)),
-        pageRows,
-        autoScroll,
-      ),
-    )
-  }
-
-  // toggleAutoScroll 开关跟随末尾，关闭时固定当前窗口首行
-  const toggleAutoScroll = (on: boolean) => {
-    setAutoScroll(on)
-    setLimit(Math.max(pageRows, visible.length))
-    setPinned(on ? undefined : visible[0]?.key)
+    setParams(search, { replace: true })
   }
 
   // followScroll 在日志区离开末尾时停止跟随，回到末尾时恢复跟随
@@ -166,15 +119,8 @@ export function LogsPage() {
     const node = output.current
     if (!node) return
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight
-    if (autoScroll && distance > 40) toggleAutoScroll(false)
-    else if (!autoScroll && distance <= 10) toggleAutoScroll(true)
-  }
-
-  // loadOlder 在窗口上方多显示一页更早的日志
-  const loadOlder = () => {
-    const size = visible.length + pageRows
-    setLimit(size)
-    setPinned(windowStart(filtered, size, autoScroll))
+    if (autoScroll && distance > 40) setAutoScroll(false)
+    else if (!autoScroll && distance <= 10) setAutoScroll(true)
   }
 
   return (
@@ -183,15 +129,12 @@ export function LogsPage() {
         title={m.title}
         description={m.description}
         actions={
-          <Button
-            onClick={() => {
-              clear.mutate()
-            }}
-            loading={clear.isPending}
-          >
-            <Trash size={16} aria-hidden />
-            {m.clear}
-          </Button>
+          <DisabledHint reason={logs.length === 0 ? m.nothingToClear : ''}>
+            <Button onClick={clear} disabled={logs.length === 0}>
+              <Trash size={16} aria-hidden />
+              {m.clear}
+            </Button>
+          </DisabledHint>
         }
       />
       <Card className="flex grow basis-0 flex-col max-lg:grow-0 max-lg:basis-auto">
@@ -200,6 +143,7 @@ export function LogsPage() {
           actions={<CountBadge>{formatNumber(filtered.length, locale)}</CountBadge>}
         />
         <div className="flex flex-wrap items-center gap-3 border-b border-border px-5 py-3">
+          {toolbar}
           <Segmented
             label={m.level}
             value={filter.level}
@@ -223,21 +167,23 @@ export function LogsPage() {
                 (source) => ({ value: source, label: source }),
               ),
             ]}
-            className="w-[200px]"
+            className="min-w-[200px]"
           />
-          <SearchInput
-            aria-label={m.search}
-            placeholder={m.search}
-            value={filter.q}
-            onChange={(event) => {
-              update({ q: event.target.value })
-            }}
-            className="w-[280px]"
-          />
-          <label className="ml-auto flex items-center gap-2 text-sm whitespace-nowrap">
-            <Switch checked={autoScroll} onCheckedChange={toggleAutoScroll} />
-            {m.autoScroll}
-          </label>
+          <div className="flex w-full flex-wrap items-center gap-3">
+            <SearchInput
+              aria-label={m.search}
+              placeholder={m.search}
+              value={filter.q}
+              onChange={(event) => {
+                update({ q: event.target.value })
+              }}
+              className="max-w-[520px] min-w-[200px] flex-1"
+            />
+            <label className="ml-auto flex items-center gap-2 text-sm whitespace-nowrap">
+              <Switch checked={autoScroll} onCheckedChange={setAutoScroll} />
+              {m.autoScroll}
+            </label>
+          </div>
         </div>
         <div
           ref={output}
@@ -250,21 +196,48 @@ export function LogsPage() {
           {filtered.length === 0 ? (
             <CardEmpty>{logs.length === 0 ? m.waiting : m.empty}</CardEmpty>
           ) : (
-            <>
-              {first > 0 && (
-                <div className="flex justify-center py-2">
-                  <Button size="sm" onClick={loadOlder}>
-                    {fill(m.loadOlder, { count: formatNumber(first, locale) })}
-                  </Button>
-                </div>
-              )}
-              {visible.map((row) => (
-                <LogLine key={row.key} row={row} />
-              ))}
-            </>
+            <div className="relative w-full" style={{ height: totalSize }}>
+              {virtualizer.getVirtualItems().map((item) => {
+                const row = filtered[item.index]
+                return (
+                  row && (
+                    <div
+                      key={item.key}
+                      data-index={item.index}
+                      ref={virtualizer.measureElement}
+                      className="absolute top-0 left-0 w-full"
+                      style={{ transform: `translateY(${String(item.start)}px)` }}
+                    >
+                      <LogLine row={row} account={filter.source} />
+                    </div>
+                  )
+                )
+              })}
+            </div>
           )}
         </div>
       </Card>
     </>
   )
+}
+
+// LogsPage 是日志页：实时日志与已保存日志检索两个视图，视图保存在 URL
+export function LogsPage() {
+  const m = useMessages(logsMessages)
+  const [params, setParams] = useSearchParams()
+  const view = params.get('view') === 'saved' ? 'saved' : 'live'
+  const toolbar = (
+    <Segmented
+      label={m.view}
+      value={view}
+      onValueChange={(value) => {
+        setParams(value === 'saved' ? { view: 'saved' } : {}, { replace: true })
+      }}
+      options={[
+        { value: 'live', label: m.live },
+        { value: 'saved', label: m.saved },
+      ]}
+    />
+  )
+  return view === 'saved' ? <SavedLogs toolbar={toolbar} /> : <LiveLogs toolbar={toolbar} />
 }

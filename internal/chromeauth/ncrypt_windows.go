@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"runtime"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -23,12 +24,17 @@ var (
 	ncryptFreeObject          = ncryptDLL.NewProc("NCryptFreeObject")
 )
 
+// ncryptMu 串行化对 Microsoft Platform Crypto Provider 的调用，TPM 同时执行多条命令时返回 NTE_DEVICE_NOT_READY
+var ncryptMu sync.Mutex
+
 type ncryptDeviceKey struct {
 	provider uintptr
 	key      uintptr
 }
 
 func openDeviceBindingKey(wrappedKey []byte) (deviceBindingKey, error) {
+	ncryptMu.Lock()
+	defer ncryptMu.Unlock()
 	providerName, err := windows.UTF16PtrFromString("Microsoft Platform Crypto Provider")
 	if err != nil {
 		return nil, fmt.Errorf("编码 NCrypt Provider 名称: %w", err)
@@ -43,7 +49,7 @@ func openDeviceBindingKey(wrappedKey []byte) (deviceBindingKey, error) {
 	key := &ncryptDeviceKey{provider: provider}
 	blobType, err := windows.UTF16PtrFromString("OpaqueKeyBlob")
 	if err != nil {
-		key.Close()
+		key.free()
 		return nil, fmt.Errorf("编码 NCrypt Blob 类型: %w", err)
 	}
 	status, _, _ = ncryptImportKey.Call(
@@ -58,13 +64,15 @@ func openDeviceBindingKey(wrappedKey []byte) (deviceBindingKey, error) {
 	)
 	runtime.KeepAlive(wrappedKey)
 	if uint32(status) != 0 {
-		key.Close()
+		key.free()
 		return nil, fmt.Errorf("NCryptImportKey 返回 %d", int32(status))
 	}
 	return key, nil
 }
 
 func (key *ncryptDeviceKey) PublicKey() (*ecdsa.PublicKey, []byte, error) {
+	ncryptMu.Lock()
+	defer ncryptMu.Unlock()
 	blobType, err := windows.UTF16PtrFromString("ECCPUBLICBLOB")
 	if err != nil {
 		return nil, nil, fmt.Errorf("编码 NCrypt 公钥类型: %w", err)
@@ -90,6 +98,8 @@ func (key *ncryptDeviceKey) PublicKey() (*ecdsa.PublicKey, []byte, error) {
 }
 
 func (key *ncryptDeviceKey) SignSHA256(value []byte) ([]byte, error) {
+	ncryptMu.Lock()
+	defer ncryptMu.Unlock()
 	digest := sha256.Sum256(value)
 	var size uint32
 	status, _, _ := ncryptSignHash.Call(
@@ -112,6 +122,13 @@ func (key *ncryptDeviceKey) SignSHA256(value []byte) ([]byte, error) {
 }
 
 func (key *ncryptDeviceKey) Close() {
+	ncryptMu.Lock()
+	defer ncryptMu.Unlock()
+	key.free()
+}
+
+// free 释放密钥与 Provider 句柄，调用方持有 ncryptMu
+func (key *ncryptDeviceKey) free() {
 	if key.key != 0 {
 		ncryptFreeObject.Call(key.key)
 		key.key = 0

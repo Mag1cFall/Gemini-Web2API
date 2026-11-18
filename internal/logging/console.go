@@ -43,20 +43,31 @@ func SetSourceWidth(sources []string) {
 type textConsole struct {
 	writer io.Writer
 	color  bool
+	// timeLayout 是每行开头的时间格式
+	timeLayout string
 }
 
+// consoleTimeLayout 与 fileTimeLayout 是终端与日志文件每行开头的时间格式，日志文件带年份与时区偏移
+const (
+	consoleTimeLayout = "01-02 15:04:05.000"
+	fileTimeLayout    = "2006-01-02 15:04:05.000 -07:00"
+)
+
 // newTextConsole 创建可读文本控制台，输出到终端且未设置 NO_COLOR 时着色
-func newTextConsole(writer io.Writer) *textConsole {
+func newTextConsole(writer io.Writer, timeLayout string) *textConsole {
 	color := false
 	if file, ok := writer.(*os.File); ok && os.Getenv("NO_COLOR") == "" && term.IsTerminal(int(file.Fd())) {
 		color = enableVirtualTerminal(file)
 	}
-	return &textConsole{writer: writer, color: color}
+	return &textConsole{writer: writer, color: color, timeLayout: timeLayout}
 }
+
+// reasonKey 是另起一行显示的失败原因字段
+const reasonKey = "原因"
 
 func (c *textConsole) write(event Event) {
 	var line strings.Builder
-	c.paint(&line, colorDim, event.Time.Local().Format("01-02 15:04:05.000"))
+	c.paint(&line, colorDim, event.Time.Local().Format(c.timeLayout))
 	line.WriteByte(' ')
 	c.paint(&line, levelColor(event.Level), padRight(event.Level, 5))
 	line.WriteByte(' ')
@@ -66,25 +77,27 @@ func (c *textConsole) write(event Event) {
 		c.paint(&line, colorDim, "#"+ShortID(event.Request.ID))
 		line.WriteByte(' ')
 	}
-	first, rest, multiline := strings.Cut(event.Message, "\n")
-	if event.Event == EventRequestFinished && event.Request != nil {
-		stage, tail, found := strings.Cut(first, " | ")
-		line.WriteString(stage)
-		if found {
-			line.WriteString(" | ")
-			status, after, _ := strings.Cut(tail, " | ")
-			c.paint(&line, statusColor(event.Request.Status), status)
-			if after != "" {
-				line.WriteString(" | ")
-				line.WriteString(after)
-			}
+	line.WriteString(event.Message)
+	var extra []string
+	for index, field := range event.Fields {
+		if field.Key == reasonKey || strings.Contains(field.Value, "\n") {
+			extra = append(extra, field.Key+": "+field.Value)
+			continue
 		}
-	} else {
-		line.WriteString(first)
+		line.WriteString(" | ")
+		if field.Key != "" {
+			line.WriteString(field.Key)
+			line.WriteByte('=')
+		}
+		if index == 0 && event.Event == EventRequestFinished && event.Request != nil {
+			c.paint(&line, statusColor(event.Request.Status), field.Value)
+		} else {
+			line.WriteString(field.Value)
+		}
 	}
-	if multiline {
-		indent := strings.Repeat(" ", 25+int(sourceWidth.Load()))
-		for _, next := range strings.Split(rest, "\n") {
+	indent := strings.Repeat(" ", len(c.timeLayout)+7+int(sourceWidth.Load()))
+	for _, text := range extra {
+		for _, next := range strings.Split(text, "\n") {
 			line.WriteByte('\n')
 			line.WriteString(indent)
 			c.paint(&line, colorDim, next)
@@ -155,6 +168,9 @@ func newJSONConsole(writer io.Writer) func(Event) {
 		level, _ := ParseLevel(event.Level)
 		record := slog.NewRecord(event.Time, level, event.Message, 0)
 		record.AddAttrs(slog.String("event", event.Event), slog.String("source", event.Source))
+		if len(event.Fields) > 0 {
+			record.AddAttrs(slog.Any("fields", event.Fields))
+		}
 		if event.Request != nil {
 			record.AddAttrs(slog.Any("request", event.Request))
 		}

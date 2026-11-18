@@ -74,10 +74,12 @@ describe('agent 接入配置', () => {
     models: [{ id: 'gemini-4-carbon', name: '4 Carbon' }],
   }
 
-  test('omp 经 Gemini 协议接入，模型写入配置，key 取自环境变量', () => {
-    expect(ompModels(agent)).toContain('baseUrl: http://127.0.0.1:8007/v1beta')
-    expect(ompModels(agent)).toContain('api: google-generative-ai')
-    expect(ompModels(agent)).toContain('- id: gemini-4-carbon')
+  test('omp 经所选协议接入，模型写入配置，key 取自环境变量', () => {
+    expect(ompModels(agent, 'gemini')).toContain('baseUrl: http://127.0.0.1:8007/v1beta')
+    expect(ompModels(agent, 'gemini')).toContain('api: google-generative-ai')
+    expect(ompModels(agent, 'anthropic')).toContain('baseUrl: http://127.0.0.1:8007\n')
+    expect(ompModels(agent, 'anthropic')).toContain('api: anthropic-messages')
+    expect(ompModels(agent, 'gemini')).toContain('- id: gemini-4-carbon')
     expect(ompEnv(agent, 'unix')).toBe(
       "export GEMINI_WEB2API_KEY='k'\nomp --provider gemini-web2api --model gemini-4-carbon",
     )

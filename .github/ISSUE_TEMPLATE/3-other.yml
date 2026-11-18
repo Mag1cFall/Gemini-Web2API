@@ -1,0 +1,15 @@
+name: 只是想发Issue / Just an issue
+description: 不属于上面两类，想说什么都可以 / Anything else
+body:
+  - type: textarea
+    id: content
+    attributes:
+      label: 内容 / Details
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: 管理端“关于”页显示的版本号 / Shown on the About page of the admin console
+      placeholder: v0.2.0

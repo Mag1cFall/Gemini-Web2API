@@ -21,7 +21,7 @@ type CatalogModel struct {
 	AccountCount       int
 	// Accounts 为提供该模型的已就绪账号
 	Accounts []string
-	// AliasOf 为 MODEL_MAPPING 别名指向的模型 ID
+	// AliasOf 为 MODEL_MAPPING 别名或改名前的旧 ID 指向的模型 ID
 	AliasOf string
 }
 
@@ -30,12 +30,22 @@ func Catalog(pool *balancer.AccountPool) []CatalogModel {
 	return availableModels(pool)
 }
 
-// availableModels 汇总已就绪或已读取目录的账号的模型目录，并追加 MODEL_MAPPING 中指向已有模型的别名
+// availableModels 汇总已就绪或已读取目录的账号的模型目录，追加 gemini-default、MODEL_MAPPING 中指向已有模型的别名与改名前的旧 ID
 func availableModels(pool *balancer.AccountPool) []CatalogModel {
 	byID := make(map[string]CatalogModel)
 	defaultVotes := make(map[string]int)
+	defaults := CatalogModel{Model: gemini.Model{ID: gemini.DefaultModelID, DisplayName: "Default", Description: "Each account's official default model", Capabilities: []string{"generateContent", "streamGenerateContent"}}}
 	for _, account := range pool.CatalogAccounts() {
 		client := account.Client
+		contextWindow := client.ContextWindow()
+		if account.Ready {
+			defaults.AccountCount++
+			defaults.Accounts = append(defaults.Accounts, account.ID)
+		}
+		if defaults.MinInputTokenLimit == 0 || contextWindow < defaults.MinInputTokenLimit {
+			defaults.MinInputTokenLimit = contextWindow
+		}
+		defaults.MaxInputTokenLimit = max(defaults.MaxInputTokenLimit, contextWindow)
 		for _, model := range client.Models() {
 			if model.Default {
 				defaultVotes[model.ID]++
@@ -48,7 +58,6 @@ func availableModels(pool *balancer.AccountPool) []CatalogModel {
 				availability.AccountCount++
 				availability.Accounts = append(availability.Accounts, account.ID)
 			}
-			contextWindow := client.ContextWindow()
 			if availability.MinInputTokenLimit == 0 || contextWindow < availability.MinInputTokenLimit {
 				availability.MinInputTokenLimit = contextWindow
 			}
@@ -77,6 +86,10 @@ func availableModels(pool *balancer.AccountPool) []CatalogModel {
 		}
 		return models[left].ID < models[right].ID
 	})
+	if _, exists := byID[gemini.DefaultModelID]; !exists && len(byID) > 0 {
+		defaults.ThinkingLevels = byID[globalDefault].ThinkingLevels
+		models = append(models, defaults)
+	}
 	aliases := config.ModelAliases()
 	names := make([]string, 0, len(aliases))
 	for alias := range aliases {
@@ -84,19 +97,33 @@ func availableModels(pool *balancer.AccountPool) []CatalogModel {
 	}
 	sort.Strings(names)
 	for _, alias := range names {
-		target, ok := byID[aliases[alias]]
+		target, ok := byID[gemini.CanonicalModelID(aliases[alias])]
 		if _, exists := byID[alias]; !ok || exists {
 			continue
 		}
-		target.ID, target.AliasOf, target.Default = alias, aliases[alias], false
+		target.ID, target.AliasOf, target.Default = alias, target.ID, false
+		models = append(models, target)
+	}
+	renames := gemini.ModelRenames()
+	olds := make([]string, 0, len(renames))
+	for old := range renames {
+		olds = append(olds, old)
+	}
+	sort.Strings(olds)
+	for _, old := range olds {
+		target, ok := byID[renames[old]]
+		if _, exists := byID[old]; !ok || exists {
+			continue
+		}
+		target.ID, target.AliasOf, target.Default = old, renames[old], false
 		models = append(models, target)
 	}
 	return models
 }
 
-// findModel 在公开目录中查找模型 ID 或别名
+// findModel 在公开目录中查找模型 ID、别名或改名前的旧 ID，ID 可带 models/ 或 google/ 前缀
 func findModel(pool *balancer.AccountPool, id string) (CatalogModel, bool) {
-	id = strings.TrimPrefix(strings.TrimSpace(id), "models/")
+	id = gemini.NormalizeModelID(id)
 	for _, model := range availableModels(pool) {
 		if strings.EqualFold(model.ID, id) {
 			return model, true
@@ -139,12 +166,21 @@ func openAIModelObject(model CatalogModel) gin.H {
 		"display_name": model.DisplayName, "description": model.Description,
 		"context_window": model.MaxInputTokenLimit, "context_length": model.MaxInputTokenLimit, "min_context_window": model.MinInputTokenLimit,
 		"max_context_window": model.MaxInputTokenLimit, "available_account_count": model.AccountCount,
-		"thinking_levels": thinkingLevelNames(model.ThinkingLevels),
+		"thinking_levels": thinkingLevelNames(model.ThinkingLevels), "input_modalities": inputModalities(model.Model),
 	}
 	if model.AliasOf != "" {
 		object["alias_of"] = model.AliasOf
 	}
 	return object
+}
+
+// inputModalities 返回模型接受的输入类型：图片、视频与音乐工具接受文字与参考图，对话模型另接受音频、视频与文件附件
+func inputModalities(model gemini.Model) []string {
+	switch model.Feature {
+	case gemini.FeatureImage, gemini.FeatureVideo, gemini.FeatureMusic:
+		return []string{"text", "image"}
+	}
+	return []string{"text", "image", "audio", "video", "file"}
 }
 
 func claudeModelObject(model CatalogModel) gin.H {

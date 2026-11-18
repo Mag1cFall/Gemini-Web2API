@@ -218,7 +218,7 @@ export function UsageCharts({
               onValueChange={onStack}
               options={dimensions.map((item) => ({ value: item, label: dimensionLabels[item] }))}
               size="sm"
-              className="w-[128px]"
+              className="min-w-[128px]"
             />
             <Segmented
               label={m.chartTraffic}

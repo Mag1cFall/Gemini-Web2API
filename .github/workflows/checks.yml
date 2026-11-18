@@ -93,13 +93,16 @@ jobs:
           restore-keys: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
       - name: Run Unit Tests
         if: matrix.check == 'test'
-        run: go test -mod=readonly ./...
+        run: go test -mod=readonly -vet=off ./...
       - name: Check Minimum Go Version
         if: matrix.check == 'vet'
         run: |
           go version
-          go vet ./...
+          go vet -mod=readonly ./...
           go build -mod=readonly ./cmd/gemini-web2api
+      - name: Vet Windows Desktop Build
+        if: matrix.check == 'vet'
+        run: GOOS=windows go vet -mod=readonly -tags desktop,production,nomsgpack ./...
       - uses: actions/cache/save@v5
         if: github.ref == 'refs/heads/main'
         with:

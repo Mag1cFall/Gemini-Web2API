@@ -1,4 +1,4 @@
-import { type QueryClient, useQueryClient } from '@tanstack/react-query'
+import { type QueryClient, type QueryKey, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useState } from 'react'
 
 import { accountsKey } from '@/features/accounts/queries'
@@ -36,6 +36,9 @@ export interface EventsConnection {
 // maxLogs 是页面保留的日志条数
 const maxLogs = 2000
 
+// logBatchDelay 是合并日志事件的时长，期间收到的日志一次写入缓存
+const logBatchDelay = 250
+
 type AdminEvent =
   | { type: 'status'; data: ServiceStatus }
   | { type: 'accounts'; data: Account[] }
@@ -52,10 +55,23 @@ function upsertRunning(running: RequestInfo[], record: RequestInfo): RequestInfo
   return record.state === 'running' ? [...others, record] : others
 }
 
+// invalidate 让 queryKey 下的查询重新读取，正在读取的查询不打断，读完后再读一次
+function invalidate(client: QueryClient, queryKey: QueryKey) {
+  const fetching = client.isFetching({ queryKey }) > 0
+  void client.invalidateQueries({ queryKey }, { cancelRefetch: false }).then(() => {
+    if (fetching) void client.invalidateQueries({ queryKey }, { cancelRefetch: false })
+  })
+}
+
+// pageVersion 是本页载入后第一次收到的服务版本，事件流重连后版本不同时重新载入页面
+let pageVersion: string | undefined
+
 // apply 把一条管理事件写入对应的查询缓存
 function apply(client: QueryClient, event: AdminEvent) {
   switch (event.type) {
     case 'status':
+      pageVersion ??= event.data.version
+      if (event.data.version !== pageVersion) window.location.reload()
       client.setQueryData(statusKey, event.data)
       break
     case 'accounts':
@@ -72,30 +88,25 @@ function apply(client: QueryClient, event: AdminEvent) {
       break
     case 'recent':
       client.setQueryData(recentKey, event.data)
-      void client.invalidateQueries({ queryKey: ['usage'] })
+      invalidate(client, ['usage'])
       break
     case 'logs':
       client.setQueryData(logsKey, event.data)
       break
-    case 'log': {
-      const entry = event.data
-      client.setQueryData<LogEntry[]>(logsKey, (logs = []) =>
-        logs.length >= maxLogs
-          ? [...logs.slice(logs.length - maxLogs + 1), entry]
-          : [...logs, entry],
-      )
-      if (entry.request) {
-        const record = entry.request
-        client.setQueryData<RequestInfo[]>(runningKey, (running = []) =>
-          upsertRunning(running, record),
-        )
-      }
-      break
-    }
   }
 }
 
-// useAdminEvents 订阅管理事件流，断开后等待 retryDelay 自动重连，重连后重新收到初始快照
+// appendLogs 把一批日志一次写入日志缓存，并按其中的请求快照更新进行中请求
+function appendLogs(client: QueryClient, entries: LogEntry[]) {
+  client.setQueryData<LogEntry[]>(logsKey, (logs = []) => [...logs, ...entries].slice(-maxLogs))
+  const records = entries.flatMap((entry) => (entry.request ? [entry.request] : []))
+  if (records.length === 0) return
+  client.setQueryData<RequestInfo[]>(runningKey, (running = []) =>
+    records.reduce(upsertRunning, running),
+  )
+}
+
+// useAdminEvents 订阅管理事件流，250 ms 内的日志合并为一次写入，断开后等待 retryDelay 自动重连，重连后重新收到初始快照
 export function useAdminEvents(enabled: boolean): EventsConnection {
   const client = useQueryClient()
   const [phase, setPhase] = useState<EventsPhase>('connecting')
@@ -105,6 +116,14 @@ export function useAdminEvents(enabled: boolean): EventsConnection {
     if (!enabled) return
     const source = new EventSource(appURL('/api/events'))
     let timer: ReturnType<typeof setTimeout> | undefined
+    let pending: LogEntry[] = []
+    let flushTimer: ReturnType<typeof setTimeout> | undefined
+    const flush = () => {
+      flushTimer = undefined
+      const batch = pending
+      pending = []
+      appendLogs(client, batch)
+    }
     source.onopen = () => {
       client.setQueryData(logsKey, [])
       client.setQueryData(runningKey, [])
@@ -120,11 +139,18 @@ export function useAdminEvents(enabled: boolean): EventsConnection {
       }, retryDelay)
     }
     source.onmessage = (message: MessageEvent<string>) => {
-      apply(client, JSON.parse(message.data) as AdminEvent)
+      const event = JSON.parse(message.data) as AdminEvent
+      if (event.type !== 'log') {
+        apply(client, event)
+        return
+      }
+      pending.push(event.data)
+      flushTimer ??= setTimeout(flush, logBatchDelay)
     }
     return () => {
       source.close()
       clearTimeout(timer)
+      clearTimeout(flushTimer)
     }
   }, [client, enabled, attempt])
   const reconnect = useCallback(() => {

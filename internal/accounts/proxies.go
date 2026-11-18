@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
@@ -85,8 +86,14 @@ func (m *Manager) CheckProxies(ctx context.Context) []proxypool.Status {
 			logging.Warn(logging.SourceService, "代理不可用", "代理", status.URL, "原因", status.Error)
 		}
 	}
+	m.moveAccounts(moved)
+	return m.proxies.Status()
+}
+
+// moveAccounts 并行为账号与访客会话重新分配代理池中的代理，代理有变化的以新代理重新初始化
+func (m *Manager) moveAccounts(ids []string) {
 	var wait sync.WaitGroup
-	for _, id := range moved {
+	for _, id := range ids {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
@@ -98,7 +105,19 @@ func (m *Manager) CheckProxies(ctx context.Context) []proxypool.Status {
 		}()
 	}
 	wait.Wait()
-	return m.proxies.Status()
+}
+
+// handleCaptcha 在账号被人机验证页拦截后停用它的出口 balancer.CaptchaCooldown：出口来自代理池且还有其他可用代理时，绑定该出口的账号与访客会话改用其他代理，否则经该出口的账号冷却到同一时刻
+func (m *Manager) handleCaptcha(accountID string, proxy string, pooled bool) {
+	until := time.Now().Add(balancer.CaptchaCooldown)
+	logging.Warn(accountID, "出口被人机验证拦截，暂停使用", "出口", cmp.Or(proxypool.Redact(proxy), "直连"), "恢复时间", until)
+	if pooled {
+		if moved := m.proxies.Block(proxy, until); len(moved) > 0 {
+			m.moveAccounts(moved)
+			return
+		}
+	}
+	m.pool.CoolExit(proxy, until)
 }
 
 // ProxyStatus 返回代理池中每个代理的状态
@@ -128,10 +147,12 @@ func (m *Manager) rebind(accountID string) {
 	_ = m.restart(stopped.account)
 }
 
-// relaunchGuest 以重新分配的代理重启访客会话并等待首轮初始化结束
+// relaunchGuest 以重新分配的代理与当前设置替换访客客户端并等待首轮初始化结束，期间原访客客户端照常处理请求
 func (m *Manager) relaunchGuest() {
 	m.guestMu.Lock()
 	defer m.guestMu.Unlock()
-	m.stopGuest()
-	_ = m.await(m.launchGuest)
+	m.mu.Lock()
+	previous := m.guest
+	m.mu.Unlock()
+	_ = m.await(func(firstDone func()) { m.launchGuest(previous, firstDone) })
 }

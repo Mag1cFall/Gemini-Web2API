@@ -2,6 +2,7 @@ import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { useAccountLabel } from '@/features/accounts/queries'
+import { Elapsed } from '@/features/requests/Elapsed'
 import { bodyMessages, finishMessages, requestsMessages } from '@/features/requests/messages'
 import {
   AttemptList,
@@ -13,18 +14,16 @@ import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import type { RequestInfo } from '@/features/requests/types'
 import { protocolLabels } from '@/features/usage/model'
 import { formatBytes, formatDuration, formatFullDateTime, formatNumber } from '@/lib/format'
-import { useI18n, useMessages } from '@/lib/i18n'
+import { serverText, useI18n, useMessages } from '@/lib/i18n'
 
-// RequestDetailSheet 是一个请求的右侧详情：概要、用量、错误、上游尝试与正文，进行中的请求可在此取消
+// RequestDetailSheet 是一个请求的详情对话框：概要、用量、错误、上游尝试与正文，进行中的请求可在此取消
 export function RequestDetailSheet({
   request,
-  durationMs,
   cancelling,
   onCancel,
   onClose,
 }: {
   request: RequestInfo | null
-  durationMs: number
   cancelling: boolean
   onCancel: (id: string) => void
   onClose: () => void
@@ -49,7 +48,7 @@ export function RequestDetailSheet({
       : []),
     { label: m.stream, value: request.stream ? m.yes : m.no },
     { label: m.status, value: request.status ? String(request.status) : '—' },
-    { label: m.duration, value: duration(durationMs) },
+    { label: m.duration, value: <Elapsed request={request} /> },
     { label: m.queue, value: duration(request.queue_ms) },
     { label: m.firstEvent, value: duration(request.first_event_ms) },
     ...(request.stage ? [{ label: m.stage, value: request.stage }] : []),
@@ -81,7 +80,8 @@ export function RequestDetailSheet({
       }}
     >
       <DialogContent
-        layout="sheet"
+        wide
+        focusContent
         closeLabel={m.close}
         title={
           <span className="flex flex-wrap items-center gap-2">
@@ -133,7 +133,7 @@ export function RequestDetailSheet({
           {request.error && (
             <DetailSection title={m.error}>
               <pre className="rounded-sm bg-error-soft p-3 font-mono text-xs break-words whitespace-pre-wrap text-error-text">
-                {request.error}
+                {serverText(request.error)}
               </pre>
             </DetailSection>
           )}

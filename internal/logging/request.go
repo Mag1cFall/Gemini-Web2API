@@ -28,7 +28,7 @@ const (
 // 等待诊断阈值
 const (
 	stallThreshold = 15 * time.Second
-	stallRepeat    = time.Minute
+	stallRepeat    = 30 * time.Second
 )
 
 // requestPhase 是请求当前所处的等待位置
@@ -118,6 +118,8 @@ type Request struct {
 	stallLogged    time.Time
 	stalled        bool
 	finished       bool
+	// failedUsage 是失败尝试的用量之和
+	failedUsage Usage
 
 	// parent 是备用请求跟踪所属的原请求，owner 是备用请求胜出后接管其后续记录的原请求
 	parent *Request
@@ -169,7 +171,7 @@ func (r *Request) Progress(level string, source string, message string, fields .
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.publishLocked(level, source, EventRequestProgress, Message(message, fields...))
+	r.publishLocked(level, source, EventRequestProgress, message, Fields(fields...))
 }
 
 // self 返回实际记录的跟踪：备用请求胜出后为原请求
@@ -254,7 +256,7 @@ func (r *Request) Begin(protocol string, model string, stream bool, messages int
 	if tools > 0 {
 		fields = append(fields, "工具", tools)
 	}
-	r.publishLocked("INFO", SourceRequest, EventRequestStarted, Message("请求开始", fields...))
+	r.publishLocked("INFO", SourceRequest, EventRequestStarted, "请求开始", Fields(fields...))
 	r.mu.Unlock()
 }
 
@@ -301,7 +303,7 @@ func (r *Request) AccountReady(account string, model string) {
 	if len(r.info.Attempts) > 0 {
 		fields = append(fields, "尝试", len(r.info.Attempts)+1)
 	}
-	r.publishLocked("INFO", account, EventRequestProgress, Message("账号开始处理", fields...))
+	r.publishLocked("INFO", account, EventRequestProgress, "账号开始处理", Fields(fields...))
 }
 
 // Stage 记录上游准备阶段，例如上传附件与接受条款
@@ -312,7 +314,7 @@ func (r *Request) Stage(stage string, fields ...any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.info.Stage = stage
-	r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, Message(stage, fields...))
+	r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, stage, Fields(fields...))
 }
 
 // SetThinking 记录按账号模型目录选定的网页思考强度
@@ -344,10 +346,10 @@ func (r *Request) UpstreamResponse(status int) {
 	defer r.mu.Unlock()
 	now := time.Now()
 	if r.stalled {
-		r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, Message("请求准备结束", "等待", now.Sub(r.phaseStarted), "响应头", status))
+		r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, "请求准备结束", Fields("等待", now.Sub(r.phaseStarted), "响应头", status))
 		r.stalled = false
 	}
-	r.info.Stage = "等待上游首事件"
+	r.info.Stage = "等待模型开始输出"
 	r.setPhaseLocked(phaseAwaiting, now)
 }
 
@@ -386,11 +388,11 @@ func (r *Request) UpstreamEvent(kind string) {
 	}
 	switch {
 	case r.phase == phaseAwaiting || r.phase == phasePreparing:
-		r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, Message("收到首个输出", "", eventName(kind), "等待", now.Sub(r.attemptStarted)))
+		r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, "收到首个输出", Fields("", eventName(kind), "等待", now.Sub(r.attemptStarted)))
 	case r.stalled:
-		r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, Message("事件流恢复", "停顿", now.Sub(r.lastEvent), "当前事件", eventName(kind)))
+		r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, "模型继续输出", Fields("等待", now.Sub(r.lastEvent), "当前事件", eventName(kind)))
 	}
-	r.stalled = false
+	r.stallLogged, r.stalled = time.Time{}, false
 	r.lastEvent, r.lastEventKind = now, kind
 	r.info.Stage = "接收输出"
 	if r.phase != phaseStreaming {
@@ -407,7 +409,7 @@ func (r *Request) Background(kind string) {
 	defer r.mu.Unlock()
 	r.info.Stage = "后台生成"
 	r.setPhaseLocked(phaseBackground, time.Now())
-	r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, Message("转入后台生成", "", kind))
+	r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, "转入后台生成", Fields("", kind))
 }
 
 // AttemptFailed 记录一次失败的上游尝试，retry 表示随后换账号重试
@@ -425,21 +427,41 @@ func (r *Request) AttemptFailed(account string, status int, err error, retry boo
 	r.info.Attempts = append(r.info.Attempts, Attempt{Account: account, Status: status, Error: message, DurationMS: duration.Milliseconds()})
 	if retry {
 		r.setPhaseLocked(phaseQueued, time.Now())
-		r.publishLocked("WARN", account, EventRequestProgress, Message("账号切换", "模型", r.info.Model, "状态", status, "耗时", duration)+"\n原因: "+message)
+		r.publishLocked("WARN", account, EventRequestProgress, "账号切换", Fields("模型", r.info.Model, "状态", status, "耗时", duration, "原因", message))
 	}
 }
 
-// SetUsage 记录 token 用量
+// SetUsage 记录 token 用量：最终回答的用量加上此前失败尝试的用量之和
 func (r *Request) SetUsage(input int, reasoning int, reply int) {
 	if r = r.self(); r == nil {
 		return
 	}
 	r.mu.Lock()
-	r.info.Usage = &Usage{
-		InputTokens: input, ReasoningTokens: reasoning, ReplyTokens: reply,
-		OutputTokens: reasoning + reply, TotalTokens: input + reasoning + reply,
-	}
+	usage := r.failedUsage.plus(input, reasoning, reply)
+	r.info.Usage = &usage
 	r.mu.Unlock()
+}
+
+// AddAttemptUsage 累加一次失败尝试的 token 用量，请求的用量随之更新
+func (r *Request) AddAttemptUsage(input int, reasoning int, reply int) {
+	if r = r.self(); r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.failedUsage = r.failedUsage.plus(input, reasoning, reply)
+	usage := r.failedUsage
+	r.info.Usage = &usage
+	r.mu.Unlock()
+}
+
+// plus 返回加上一次尝试用量后的用量
+func (u Usage) plus(input int, reasoning int, reply int) Usage {
+	u.InputTokens += input
+	u.ReasoningTokens += reasoning
+	u.ReplyTokens += reply
+	u.OutputTokens += reasoning + reply
+	u.TotalTokens += input + reasoning + reply
+	return u
 }
 
 // SetResult 记录上游实际模型、会话与结束原因
@@ -551,8 +573,8 @@ func (r *Request) Finish(httpStatus int, clientGone bool) RequestInfo {
 	r.info.Stage = ""
 	info := r.snapshotLocked(now)
 	if r.begun {
-		level, message := finishMessage(info, stage)
-		r.publishLocked(level, r.sourceLocked(), EventRequestFinished, message)
+		level, message, fields := finishMessage(info, stage)
+		r.publishLocked(level, r.sourceLocked(), EventRequestFinished, message, fields)
 	}
 	begun := r.begun
 	r.mu.Unlock()
@@ -571,7 +593,8 @@ func (r *Request) Finish(httpStatus int, clientGone bool) RequestInfo {
 	return info
 }
 
-func finishMessage(info RequestInfo, stage string) (string, string) {
+// finishMessage 返回请求结束日志的级别、名称与字段
+func finishMessage(info RequestInfo, stage string) (string, string, []Field) {
 	duration := time.Duration(info.DurationMS) * time.Millisecond
 	fields := []any{"", info.Status, "", info.Model, "", duration}
 	switch info.State {
@@ -579,16 +602,15 @@ func finishMessage(info RequestInfo, stage string) (string, string) {
 		if stage != "" {
 			fields = append(fields, "阶段", stage)
 		}
-		return "WARN", Message("请求取消", fields...)
+		return "WARN", "请求取消", Fields(fields...)
 	case StateFailed:
-		message := Message("请求失败", fields...)
 		if info.Error != "" {
-			message += "\n原因: " + info.Error
+			fields = append(fields, "原因", info.Error)
 		}
 		if info.Status < 500 {
-			return "WARN", message
+			return "WARN", "请求失败", Fields(fields...)
 		}
-		return "ERROR", message
+		return "ERROR", "请求失败", Fields(fields...)
 	}
 	if info.Usage != nil {
 		usage := fmt.Sprintf("输入 %d · 回复 %d", info.Usage.InputTokens, info.Usage.ReplyTokens)
@@ -609,7 +631,7 @@ func finishMessage(info RequestInfo, stage string) (string, string) {
 	if info.ProviderModel != "" && info.ProviderModel != info.Model {
 		fields = append(fields, "实际模型", info.ProviderModel)
 	}
-	return "INFO", Message("请求完成", fields...)
+	return "INFO", "请求完成", Fields(fields...)
 }
 
 func (r *Request) snapshotLocked(now time.Time) RequestInfo {
@@ -635,7 +657,7 @@ func (r *Request) setPhaseLocked(phase requestPhase, now time.Time) {
 	r.stallLogged, r.stalled = time.Time{}, false
 }
 
-func (r *Request) publishLocked(level string, source string, name string, message string) {
+func (r *Request) publishLocked(level string, source string, name string, message string, fields []Field) {
 	parsed, err := ParseLevel(level)
 	if err != nil || !Enabled(parsed) {
 		return
@@ -648,7 +670,7 @@ func (r *Request) publishLocked(level string, source string, name string, messag
 	} else {
 		info = r.snapshotLocked(time.Now())
 	}
-	Publish(Event{Level: level, Source: source, Message: message, Event: name, Request: &info})
+	Publish(Event{Level: level, Source: source, Message: message, Fields: fields, Event: name, Request: &info})
 }
 
 // watch 在请求停留超过阈值时输出等待诊断
@@ -676,19 +698,20 @@ func (r *Request) watch(now time.Time) {
 		network = append(network, "最近网络", now.Sub(r.lastRead).Truncate(100*time.Millisecond))
 	}
 	var message string
+	var fields []any
 	switch r.phase {
 	case phaseQueued:
-		message = Message("等待可用账号", "已等待", waited, "当前", r.stageOr("选择账号"), "模型", r.info.Model)
+		message, fields = "等待可用账号", []any{"已等待", waited, "当前", r.stageOr("选择账号"), "模型", r.info.Model}
 	case phasePreparing:
-		message = Message("请求准备等待", "已等待", waited, "当前", r.stageOr("发送生成请求"), "模型", r.info.Model)
+		message, fields = "请求准备等待", []any{"已等待", waited, "当前", r.stageOr("发送生成请求"), "模型", r.info.Model}
 	case phaseAwaiting:
-		message = Message("上游首事件等待", append([]any{"已等待", waited, "模型", r.info.Model}, network...)...)
+		message, fields = "等待模型开始输出", append([]any{"已等待", waited, "模型", r.info.Model}, network...)
 	case phaseStreaming:
-		message = Message("事件流停顿", append([]any{"已等待", waited, "最近事件", eventName(r.lastEventKind)}, network...)...)
+		message, fields = "等待模型继续输出", append([]any{"已等待", waited, "最近事件", eventName(r.lastEventKind)}, network...)
 	default:
 		return
 	}
-	r.publishLocked("WARN", r.sourceLocked(), EventRequestProgress, message)
+	r.publishLocked("INFO", r.sourceLocked(), EventRequestProgress, message, Fields(fields...))
 }
 
 func (r *Request) stageOr(fallback string) string {

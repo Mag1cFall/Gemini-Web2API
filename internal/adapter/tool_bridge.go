@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,11 +57,25 @@ type ToolBridge struct {
 	Stop []string
 	// SingleCall 表示一次回答只调用一个工具
 	SingleCall bool
+	// MaxTokens 是请求的输出上限，思考与正文合计超过时在本地截断，0 表示不限
+	MaxTokens int
+	// SearchDomains 是搜索来源限定的域名，SearchBlocked 是搜索来源排除的域名，SearchLocation 是搜索按其所在的用户位置
+	SearchDomains  []string
+	SearchBlocked  []string
+	SearchLocation string
+	// Truncated 表示回答达到输出上限而截断，解析时不要求必需的工具调用，正文不按枚举与 JSON Schema 校验
+	Truncated bool
 }
 
 // declared 返回标记工具定义是否已在会话中发送的副本
 func (b ToolBridge) declared(value bool) ToolBridge {
 	b.Declared = value
+	return b
+}
+
+// truncated 返回标记回答是否因输出上限截断的副本
+func (b ToolBridge) truncated(value bool) ToolBridge {
+	b.Truncated = value
 	return b
 }
 
@@ -93,7 +108,7 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 			rule, otherwise = "必须调用一个可用工具", ""
 		}
 
-		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。复制工具结果中的内容时逐字照抄，结尾也与原文一致：结果代码块的结束围栏前有空行时，参数代码块的结束围栏前同样留一个空行，没有就不留；原文带行号等看不出结尾时，以及新建源代码或文本文件时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。%s\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]%s", available, choice, rule, count, otherwise))
+		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行。在回答中按下面的格式写出调用就是调用工具的唯一方式：写出调用即完成调用，由客户端执行，你自己不需要具备这些工具，也不要改为把要写的内容或要运行的命令直接展示给用户。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。复制工具结果中的内容时逐字照抄，结尾也与原文一致：结果代码块的结束围栏前有空行时，参数代码块的结束围栏前同样留一个空行，没有就不留；原文带行号等看不出结尾时，以及新建源代码或文本文件时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。%s\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]\n例如可用工具中有 get_weather、用户问北京的天气时，回答就是下面这段调用（示例中的工具名只作说明，调用时用上面可用工具中的真实名称与参数）：\n[Call:get_weather]\n[Arg:city]\n```\n北京\n```\n[/Arg]\n[/Call]%s", available, choice, rule, count, otherwise))
 	}
 
 	if len(b.Enum) > 0 {
@@ -114,9 +129,18 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 		}
 		if b.WebSearch {
 			sections = append(sections, "本次请求可使用 Gemini Web 内置 Google 搜索；涉及实时或外部信息时搜索并保留来源")
+			if len(b.SearchDomains) > 0 {
+				sections = append(sections, "搜索只使用以下域名及其子域名的网页作为来源："+strings.Join(b.SearchDomains, "、"))
+			}
+			if len(b.SearchBlocked) > 0 {
+				sections = append(sections, "搜索不使用以下域名及其子域名的网页作为来源："+strings.Join(b.SearchBlocked, "、"))
+			}
+			if b.SearchLocation != "" {
+				sections = append(sections, "用户位于"+b.SearchLocation+"，搜索与回答按这个位置")
+			}
 		}
 		if b.URLContext {
-			sections = append(sections, "本次请求可读取网页；用户给出网页地址时先打开并读取该地址，只根据读到的网页内容作答，不凭记忆回答")
+			sections = append(sections, "本次请求可读取网页；用户给出的网页地址由服务读取，读取结果附在下面，只根据读到的网页内容作答，读取失败的地址如实说明无法读取，不凭记忆回答")
 		}
 		if b.ImageGeneration {
 			sections = append(sections, "本次请求可使用 Gemini Web 内置图片生成；仅在用户请求生成或编辑图片时使用")
@@ -143,6 +167,49 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 	return "\n\n" + strings.Join(sections, "\n\n"), nil
 }
 
+// searchLocation 把 Chat 的 {approximate: {...}} 与 Responses、Anthropic 的 {city, region, country, timezone} 两种用户位置写成一句位置描述
+func searchLocation(raw json.RawMessage) string {
+	type place struct {
+		City     string `json:"city"`
+		Region   string `json:"region"`
+		Country  string `json:"country"`
+		Timezone string `json:"timezone"`
+	}
+	var location struct {
+		place
+		Approximate *place `json:"approximate"`
+	}
+	if json.Unmarshal(raw, &location) != nil {
+		return ""
+	}
+	if location.Approximate != nil {
+		location.place = *location.Approximate
+	}
+	text := strings.Join(slices.DeleteFunc([]string{location.City, location.Region, location.Country}, func(part string) bool { return part == "" }), ", ")
+	if location.Timezone != "" {
+		text = strings.TrimSpace(text + "（时区 " + location.Timezone + "）")
+	}
+	return text
+}
+
+// domainAllowed 判断地址的主机是否为 domains 中的域名或其子域名
+func domainAllowed(rawURL string, domains []string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return slices.ContainsFunc(domains, func(domain string) bool {
+		domain = strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(domain, "https://"), "http://"), "/"))
+		return host == domain || strings.HasSuffix(host, "."+domain)
+	})
+}
+
+// domainsPermit 判断域名名单是否允许地址：给出 allowed 时主机须为其中的域名或其子域名，主机为 blocked 中的域名或其子域名时不允许
+func domainsPermit(rawURL string, allowed, blocked []string) bool {
+	return (len(allowed) == 0 || domainAllowed(rawURL, allowed)) && !domainAllowed(rawURL, blocked)
+}
+
 // Parse 解析工具调用并验证结构化输出，调用块组之前的文字作为正文与调用一起返回，调用块组之后的内容丢弃
 func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	if len(b.Definitions) > 0 {
@@ -166,10 +233,10 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	}
 	trimmed := stripJSONFence(strings.TrimSpace(text))
 
-	if b.requiresTool() {
+	if b.requiresTool() && !b.Truncated {
 		return "", nil, fmt.Errorf("模型没有返回必需的工具调用")
 	}
-	if len(b.Enum) > 0 {
+	if len(b.Enum) > 0 && !b.Truncated {
 		value := strings.Trim(trimmed, "\"'` \n")
 		if !slices.Contains(b.Enum, value) {
 			head := []rune(trimmed)
@@ -177,7 +244,7 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 		}
 		return value, nil, nil
 	}
-	if len(b.JSONSchema) > 0 && b.SchemaUnchecked {
+	if len(b.JSONSchema) > 0 && (b.SchemaUnchecked || b.Truncated) {
 		return trimmed, nil, nil
 	}
 	if len(b.JSONSchema) > 0 {

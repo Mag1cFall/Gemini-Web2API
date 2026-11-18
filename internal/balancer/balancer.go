@@ -155,6 +155,8 @@ type AccountPool struct {
 	lastSessionGC time.Time
 	mu            sync.Mutex
 	transport     func()
+	// captcha 是账号被人机验证页拦截时调用的函数
+	captcha func(accountID string, proxy string, pooled bool)
 	// changed 在账号状态、冷却或请求槽变化时关闭并替换，唤醒等待账号的请求
 	changed chan struct{}
 	// queues 为按排队键分组、按到达顺序排列的等待请求唤醒通道
@@ -346,6 +348,9 @@ func (p *AccountPool) MarkFailed(accountID string, err error) bool {
 		state = StateAuthRequired
 	}
 	p.reportTransport(err)
+	if errors.Is(err, gemini.ErrCaptcha) {
+		p.reportCaptcha(entry)
+	}
 	changed := entry.State != state || entry.LastError != errorText(err)
 	entry.State = state
 	entry.LastError, entry.LastErrorAt = errorText(err), time.Now()
@@ -395,12 +400,12 @@ func (p *AccountPool) SetDisabled(accountID string, disabled bool) {
 	}
 }
 
-// SetProxy 更新账号显示的代理
-func (p *AccountPool) SetProxy(accountID string, proxy string) {
+// SetInfo 更新账号的来源、代理与认证文件信息，不改变账号状态
+func (p *AccountPool) SetInfo(accountID string, info AccountInfo) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry := p.entry(accountID); entry != nil {
-		entry.Info.Proxy = proxy
+		entry.Info = info
 	}
 }
 
@@ -531,7 +536,7 @@ func (p *AccountPool) NextForModelExcluding(sessionKey string, modelID string, e
 		if binding, ok := p.sessions[sessionKey]; ok && now.Before(binding.ExpiresAt) {
 			entry := p.entry(binding.AccountID)
 			_, excluded := excludedAccountIDs[binding.AccountID]
-			if entry != nil && !excluded && entry.schedulable(now, modelID) {
+			if entry != nil && !excluded && p.schedulable(entry, now, modelID) {
 				entry.LastUsed = now
 				p.sessions[sessionKey] = sessionBinding{AccountID: entry.AccountID, ExpiresAt: now.Add(p.sessionTTL)}
 				return entry.Client, entry.AccountID
@@ -562,7 +567,7 @@ func (p *AccountPool) SessionIdle(sessionKey string, modelID string) bool {
 		return false
 	}
 	entry := p.entry(binding.AccountID)
-	return entry != nil && entry.schedulable(now, modelID) && !entry.Client.Busy()
+	return entry != nil && p.schedulable(entry, now, modelID) && !entry.Client.Busy()
 }
 
 // RetryAfter 返回请求 API key 与目标模型可用账号中该模型最早结束冷却的时间，有未冷却的登录账号或没有冷却中的账号时为零值
@@ -576,7 +581,7 @@ func (p *AccountPool) RetryAfter(ctx context.Context, modelID string) time.Time 
 		if _, skip := excluded[entry.AccountID]; skip || entry.Client == nil || entry.State != StateReady || !entry.supportsModel(modelID) {
 			continue
 		}
-		until := entry.blockedUntil(now, modelID)
+		until := p.blockedUntil(entry, now, modelID)
 		if until.IsZero() {
 			if entry.guest() {
 				continue
@@ -638,29 +643,96 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 		logging.Warn(accountID, "上游临时失败，账号不冷却", "原因", err)
 		return
 	}
-	entry.ConsecutiveFails++
 	if gemini.IsAuthenticationError(err) {
+		entry.ConsecutiveFails++
 		entry.State = StateAuthRequired
-		logging.Warn(accountID, "账号待认证", "原因", err)
+		logging.Warn(accountID, "账号需重新登录", "原因", err)
 		return
 	}
 	modelScope, reason := failureScope(err)
+	existing := entry.Cooldown
+	if modelScope && modelID != "" {
+		existing = entry.ModelCooldowns[modelID]
+	}
+	cooling := now.Before(existing.until)
+	if !cooling {
+		entry.ConsecutiveFails++
+	}
+	fails := max(entry.ConsecutiveFails, 1)
 	until := now.Add(p.cooldown)
-	if reason == "rate_limited" {
-		until = now.Add(rateLimitBackoff(min(p.cooldown, rateLimitCooldown), entry.ConsecutiveFails))
+	switch reason {
+	case "rate_limited":
+		until = now.Add(rateLimitBackoff(min(p.cooldown, rateLimitCooldown), fails))
+	case "ip_restricted":
+		until = now.Add(ipRestrictedBackoff(p.cooldown, fails))
+	case "captcha":
+		until = now.Add(CaptchaCooldown)
 	}
 	if reset := usageReset(entry.Client, err); !reset.IsZero() {
 		until = reset
+	}
+	until = until.Round(0)
+	if cooling && !until.After(existing.until) {
+		return
 	}
 	value := cooldown{until: until, reason: reason, cause: entry.LastError}
 	cooled = true
 	if modelScope && modelID != "" {
 		entry.ModelCooldowns[modelID] = value
-		logging.Warn(accountID, "模型冷却", "模型", modelID, "至", until, "原因", reason)
+		logging.Warn(accountID, "模型冷却", "模型", modelID, "至", until, "原因", reasonTexts[reason])
 		return
 	}
 	entry.Cooldown = value
-	logging.Warn(accountID, "账号冷却", "至", until, "原因", reason)
+	logging.Warn(accountID, "账号冷却", "至", until, "原因", reasonTexts[reason])
+	if reason == "captcha" {
+		p.reportCaptcha(entry)
+	}
+}
+
+// reasonTexts 是冷却原因代码在日志中的说明，与管理端的原因文案一致
+var reasonTexts = map[string]string{
+	"usage_limit":    "用量上限",
+	"rate_limited":   "频率限制",
+	"ip_restricted":  "出口 IP 受限",
+	"captcha":        "人机验证",
+	"model_mismatch": "模型降级",
+	"upstream_error": "上游错误",
+}
+
+// CaptchaCooldown 是出口被人机验证页拦截后停用该出口的时长
+const CaptchaCooldown = 2 * time.Hour
+
+// OnCaptcha 设置账号被人机验证页拦截时调用的函数，参数为账号 ID、出口代理（直连为空）与出口是否来自代理池
+func (p *AccountPool) OnCaptcha(fn func(accountID string, proxy string, pooled bool)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.captcha = fn
+}
+
+// reportCaptcha 在后台调用 OnCaptcha 设置的函数，调用方持有 p.mu
+func (p *AccountPool) reportCaptcha(entry *accountEntry) {
+	if p.captcha != nil {
+		go p.captcha(entry.AccountID, entry.Info.Proxy, entry.Info.ProxySource == "pool")
+	}
+}
+
+// CoolExit 让经同一出口的账号与访客会话冷却到 until，原因为人机验证拦截，proxy 为出口代理 URL，直连为空
+func (p *AccountPool) CoolExit(proxy string, until time.Time) {
+	cooled := false
+	p.mu.Lock()
+	for _, entry := range p.entries {
+		if entry.Info.Proxy != proxy || !until.After(entry.Cooldown.until) {
+			continue
+		}
+		entry.Cooldown = cooldown{until: until.Round(0), reason: "captcha"}
+		cooled = true
+		logging.Warn(entry.AccountID, "账号冷却", "至", until, "原因", reasonTexts["captcha"])
+	}
+	p.notifyLocked()
+	p.mu.Unlock()
+	if cooled {
+		p.persistCooldowns()
+	}
 }
 
 // rateLimitCooldown 是上游频率限制的首次冷却时长
@@ -672,6 +744,17 @@ const rateLimitMaxCooldown = 10 * time.Minute
 // rateLimitBackoff 返回账号连续第 fails 次失败时的冷却时长，从 base 起逐次翻倍
 func rateLimitBackoff(base time.Duration, fails int) time.Duration {
 	return min(base<<min(fails-1, 4), rateLimitMaxCooldown)
+}
+
+// ipRestrictedSteps 是出口 IP 连续暂时受限时第二次起的冷却时长
+var ipRestrictedSteps = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+
+// ipRestrictedBackoff 返回出口 IP 连续第 fails 次暂时受限时的冷却时长：首次为 base，之后依次为 5、15、30、60 分钟，每次不短于 base
+func ipRestrictedBackoff(base time.Duration, fails int) time.Duration {
+	if fails <= 1 {
+		return base
+	}
+	return max(base, ipRestrictedSteps[min(fails-2, len(ipRestrictedSteps)-1)])
 }
 
 // failureScope 返回错误是否只影响当前模型与冷却原因 code
@@ -702,20 +785,10 @@ func failureScope(err error) (bool, string) {
 func usageReset(client *gemini.Client, err error) time.Time {
 	var protocolErr *gemini.ProtocolError
 	limited := errors.As(err, &protocolErr) && protocolErr.Code == 1037 || errors.Is(err, gemini.ErrModelMismatch)
-	if !limited || client == nil {
+	if !limited {
 		return time.Time{}
 	}
-	usage := client.CachedUsage()
-	if usage == nil {
-		return time.Time{}
-	}
-	var reset time.Time
-	for _, window := range []*gemini.UsageWindow{usage.Current, usage.Weekly} {
-		if window != nil && window.UsedRatio >= 1 && window.ResetAt.After(time.Now()) && window.ResetAt.After(reset) {
-			reset = window.ResetAt
-		}
-	}
-	return reset
+	return usageExhausted(client, time.Now())
 }
 
 // BindSession 将成功响应标识绑定到产生它的账号
@@ -754,6 +827,8 @@ type CatalogAccount struct {
 	ID     string
 	Client *gemini.Client
 	Ready  bool
+	// Guest 表示访客会话，只在没有可用账号时处理请求
+	Guest bool
 }
 
 // CatalogAccounts 返回已就绪或已读取模型目录的账号，用于汇总模型目录
@@ -766,7 +841,7 @@ func (p *AccountPool) CatalogAccounts() []CatalogAccount {
 		if entry.Client == nil || entry.State != StateReady && len(entry.Client.Models()) == 0 {
 			continue
 		}
-		accounts = append(accounts, CatalogAccount{ID: entry.AccountID, Client: entry.Client, Ready: entry.State == StateReady})
+		accounts = append(accounts, CatalogAccount{ID: entry.AccountID, Client: entry.Client, Ready: entry.State == StateReady, Guest: entry.guest()})
 	}
 	return accounts
 }
@@ -782,10 +857,10 @@ func (p *AccountPool) ModelAccounts() map[string]int {
 			continue
 		}
 		for _, model := range entry.Client.Models() {
-			if scope, bound := p.modelAccounts[modelKey(model.ID)]; bound && !slices.Contains(scope, entry.AccountID) {
+			if scope, bound := p.modelBinding(model.ID); bound && !slices.Contains(scope, entry.AccountID) {
 				continue
 			}
-			if entry.blockedUntil(now, model.ID).IsZero() {
+			if p.blockedUntil(entry, now, model.ID).IsZero() {
 				counts[model.ID]++
 			}
 		}
@@ -821,7 +896,7 @@ func (p *AccountPool) ModelAvailability(ctx context.Context, modelID string) Mod
 		}
 		if entry.Client == nil || entry.State != StateReady && len(entry.Client.Models()) == 0 {
 			if entry.State != StateDisabled {
-				availability.Pending = append(availability.Pending, entry.unavailableReason(now, modelID))
+				availability.Pending = append(availability.Pending, p.unavailableReason(entry, now, modelID))
 			}
 			continue
 		}
@@ -830,11 +905,11 @@ func (p *AccountPool) ModelAvailability(ctx context.Context, modelID string) Mod
 			continue
 		}
 		availability.Known = true
-		if entry.schedulable(now, modelID) {
+		if p.schedulable(entry, now, modelID) {
 			availability.Ready = true
 			continue
 		}
-		availability.Reasons = append(availability.Reasons, entry.unavailableReason(now, modelID))
+		availability.Reasons = append(availability.Reasons, p.unavailableReason(entry, now, modelID))
 	}
 	if availability.Ready {
 		availability.Reasons = nil
@@ -850,21 +925,24 @@ func (p *AccountPool) AccountReason(ctx context.Context, accountID string, model
 	if scope, bound := p.apiKeyAccounts[key]; key != "" && bound && !slices.Contains(scope, accountID) {
 		return accountID + " 不在当前 API key 的绑定账号中"
 	}
-	if scope, bound := p.modelAccounts[modelKey(modelID)]; bound && !slices.Contains(scope, accountID) {
+	if scope, bound := p.modelBinding(modelID); bound && !slices.Contains(scope, accountID) {
 		return accountID + " 不在模型 " + modelID + " 的绑定账号中"
 	}
 	if entry := p.entry(accountID); entry != nil {
-		return entry.unavailableReason(time.Now(), modelID)
+		return p.unavailableReason(entry, time.Now(), modelID)
 	}
 	return accountID + " 已移除"
 }
 
 // unavailableReason 返回账号不能调度该模型的原因，调用方持有 p.mu
-func (e *accountEntry) unavailableReason(now time.Time, modelID string) string {
-	if until := e.blockedUntil(now, modelID); e.State == StateReady && !until.IsZero() {
+func (p *AccountPool) unavailableReason(e *accountEntry, now time.Time, modelID string) string {
+	if until := p.blockedUntil(e, now, modelID); e.State == StateReady && !until.IsZero() {
 		value := e.Cooldown
 		if model, ok := e.ModelCooldowns[modelID]; ok && !model.until.Before(value.until) {
 			value = model
+		}
+		if until.After(value.until) {
+			value = cooldown{until: until, reason: "usage_limit"}
 		}
 		reason := fmt.Sprintf("%s 冷却至 %s（%s", e.AccountID, until.Local().Format(time.TimeOnly), cooldownNames[value.reason])
 		if value.cause != "" {
@@ -1002,12 +1080,12 @@ func (e *accountEntry) status(now time.Time) AccountStatus {
 }
 
 // schedulable 报告账号此刻能否接收目标模型的请求
-func (e *accountEntry) schedulable(now time.Time, modelID string) bool {
-	return e.Client != nil && e.State == StateReady && e.blockedUntil(now, modelID).IsZero() && e.supportsModel(modelID)
+func (p *AccountPool) schedulable(e *accountEntry, now time.Time, modelID string) bool {
+	return e.Client != nil && e.State == StateReady && p.blockedUntil(e, now, modelID).IsZero() && e.supportsModel(modelID)
 }
 
-// blockedUntil 返回账号或目标模型冷却的结束时间，没有冷却时为零值
-func (e *accountEntry) blockedUntil(now time.Time, modelID string) time.Time {
+// blockedUntil 返回账号或目标模型冷却的结束时间，账号已读取的用量有用满的窗口且该模型不是访客会话也提供的模型时不早于窗口重置时间，没有冷却时为零值；调用方持有 p.mu
+func (p *AccountPool) blockedUntil(e *accountEntry, now time.Time, modelID string) time.Time {
 	var until time.Time
 	if now.Before(e.Cooldown.until) {
 		until = e.Cooldown.until
@@ -1015,7 +1093,43 @@ func (e *accountEntry) blockedUntil(now time.Time, modelID string) time.Time {
 	if value, ok := e.ModelCooldowns[modelID]; ok && now.Before(value.until) && value.until.After(until) {
 		until = value.until
 	}
+	if reset := usageExhausted(e.Client, now); reset.After(until) && !e.guest() && !p.quotaFree(e, modelID) {
+		until = reset
+	}
 	return until
+}
+
+// quotaFree 报告账号解析出的该模型与访客会话解析出的模型相同，用量用满后官网改由这类模型回答；调用方持有 p.mu
+func (p *AccountPool) quotaFree(e *accountEntry, modelID string) bool {
+	model, err := e.Client.ResolveModel(modelID)
+	if err != nil {
+		return false
+	}
+	for _, entry := range p.entries {
+		if entry.guest() && entry.Client != nil {
+			served, err := entry.Client.ResolveModel(modelID)
+			return err == nil && served.ID == model.ID
+		}
+	}
+	return false
+}
+
+// usageExhausted 返回账号已读取的用量中已用满的五小时或周窗口的最晚重置时间，没有用满的窗口时为零值
+func usageExhausted(client *gemini.Client, now time.Time) time.Time {
+	if client == nil {
+		return time.Time{}
+	}
+	usage := client.CachedUsage()
+	if usage == nil {
+		return time.Time{}
+	}
+	var reset time.Time
+	for _, window := range []*gemini.UsageWindow{usage.Current, usage.Weekly} {
+		if window != nil && window.UsedRatio >= 1 && window.ResetAt.After(now) && window.ResetAt.After(reset) {
+			reset = window.ResetAt
+		}
+	}
+	return reset
 }
 
 func timePointer(value time.Time) *time.Time {
@@ -1049,7 +1163,7 @@ func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs
 
 	eligible := func(entry *accountEntry) bool {
 		_, excluded := excludedAccountIDs[entry.AccountID]
-		return !excluded && entry.guest() == guest && entry.schedulable(now, modelID)
+		return !excluded && entry.guest() == guest && p.schedulable(entry, now, modelID)
 	}
 	start := p.index
 	if p.strategy == FillFirst {

@@ -5,7 +5,7 @@ import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Card, CardHeader, PageHeader } from '@/components/ui/page'
-import { ErrorState, Loading } from '@/components/ui/states'
+import { ErrorState, PagePlaceholder } from '@/components/ui/states'
 import { UpdateCard } from '@/features/about/UpdateCard'
 import { useStatus } from '@/features/service/queries'
 import { formatFullDateTime } from '@/lib/format'
@@ -150,7 +150,9 @@ export function AboutPage() {
   const app = useMessages(appMessages)
   const { locale } = useI18n()
   const status = useStatus()
-  if (status.isPending) return <Loading label={app.loading} />
+  if (status.isPending) {
+    return <PagePlaceholder title={m.title} description={m.tagline} label={app.loading} />
+  }
   if (status.isError) {
     return (
       <ErrorState

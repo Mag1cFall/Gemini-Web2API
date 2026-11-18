@@ -1,6 +1,11 @@
 package gemini
 
-import "context"
+import (
+	"context"
+	"time"
+
+	http "github.com/bogdanfinn/fhttp"
+)
 
 // Cookie 表示可无损写回认证状态的 Cookie
 type Cookie struct {
@@ -21,8 +26,12 @@ type AccountSource struct {
 	Language string
 	// AuthUser 是目标账号在多账号 Cookie 中的序号，对应官网地址 /u/N，0 为默认账号
 	AuthUser int
-	Save     func([]Cookie) error
-	Refresh  func(context.Context) ([]Cookie, error)
+	// Chrome 是账号绑定的 Chrome 主版本，0 为版本池中最新的版本
+	Chrome  int
+	Save    func([]Cookie) error
+	Refresh func(context.Context) ([]Cookie, error)
+	// RotateBound 在设备绑定 Cookie 将到期时刷新设备绑定会话并返回距下次刷新的等待时间，cookies 返回账号当前的 Cookie，send 以账号的客户端发出请求并写回响应 Cookie
+	RotateBound func(ctx context.Context, cookies func() []Cookie, send func(*http.Request) (int, http.Header, error)) (time.Duration, error)
 	// Concurrency 是账号同时进行的上游请求数，零按 1 处理
 	Concurrency int
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
@@ -55,6 +56,9 @@ const envPath = ".env"
 
 // logFilePath 是开启日志文件时写入的轮转日志
 var logFilePath = filepath.Join(dataDir, "logs", "gemini-web2api.log")
+
+// crashFilePath 是未恢复的 panic 与运行时致命错误的输出文件
+var crashFilePath = filepath.Join(dataDir, "logs", "crash.log")
 
 // dotenvKeys 是启动时从 .env 写入进程环境的变量名，启动前已有的环境变量不在其中
 var dotenvKeys []string
@@ -202,6 +206,9 @@ func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, err
 	if err := logging.SetFile(logFilePath, cfg.LogFile, cfg.LogMaxTotalMB); err != nil {
 		return nil, fmt.Errorf("打开日志文件: %w", err)
 	}
+	if err := setCrashOutput(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据目录: %w", err)
 	}
@@ -232,6 +239,19 @@ func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, err
 	return &Instance{cfg: cfg, lock: lock, listener: listener, reserved: reserved, started: started, desktop: desktop}, nil
 }
 
+// setCrashOutput 让未恢复的 panic 与运行时致命错误连同全部 goroutine 的栈追加写入崩溃文件，桌面版没有可见的标准错误
+func setCrashOutput() error {
+	if err := os.MkdirAll(filepath.Dir(crashFilePath), 0o700); err != nil {
+		return fmt.Errorf("创建日志目录: %w", err)
+	}
+	crash, err := os.OpenFile(crashFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("打开崩溃文件: %w", err)
+	}
+	defer crash.Close()
+	return debug.SetCrashOutput(crash, debug.CrashOptions{})
+}
+
 // Address 返回实际监听地址
 func (instance *Instance) Address() string {
 	return instance.listener.Addr().String()
@@ -258,8 +278,9 @@ func listenAfter(address string) (net.Listener, error) {
 	return nil, fmt.Errorf("%s 之后没有可监听的端口", address)
 }
 
-// Serve 运行服务直到 ctx 结束，停机后释放端口与实例锁
+// Serve 运行服务直到 ctx 结束，停机后释放端口、实例锁与崩溃文件
 func (instance *Instance) Serve(ctx context.Context) error {
+	defer debug.SetCrashOutput(nil, debug.CrashOptions{})
 	defer instance.lock.Unlock()
 	defer instance.listener.Close()
 	cfg, listener, started := instance.cfg, instance.listener, instance.started
@@ -271,6 +292,10 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	}
 	defer store.Close()
 	store.SetBodyCapture(cfg.RequestBodyLog)
+	if err := gemini.LoadModelNames(store); err != nil {
+		return fmt.Errorf("读取模型改名记录: %w", err)
+	}
+	go recordLogs(ctx, store)
 
 	authDirectory := authDir(cfg.AuthStatePaths)
 	if err := os.MkdirAll(authDirectory, 0o700); err != nil {
@@ -299,6 +324,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	pool.SetModelAccounts(cfg.ModelAccounts)
 	adapter.SetFirstEventHedge(firstEventHedge(cfg))
 	adapter.SetResponseModes(cfg.NonstreamKeepalive, cfg.FakeStream)
+	adapter.SetContinueSession(cfg.ContinueSession)
 	settings := admin.NewSettings(envPath, cfg, func(next config.Config) {
 		config.SetModelMapping(next.ModelMapping)
 		pool.SetTimings(next.AccountCooldown, next.SessionTTL)
@@ -316,6 +342,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		pool.SetModelAccounts(next.ModelAccounts)
 		adapter.SetFirstEventHedge(firstEventHedge(next))
 		adapter.SetResponseModes(next.NonstreamKeepalive, next.FakeStream)
+		adapter.SetContinueSession(next.ContinueSession)
 		manager.SetSettings(accounts.Settings{
 			InitTimeout: next.InitTimeout, RetryInterval: next.AccountCooldown, Proxy: next.ProxyURL,
 			SaveHistory: next.SaveHistory, AuthDir: authDirectory, Concurrency: next.PerAccountConcurrency,
@@ -361,7 +388,7 @@ func (instance *Instance) Serve(ctx context.Context) error {
 		guest = status.Guest.State
 	}
 	logging.Info(logging.SourceService, "账号初始化完成",
-		"就绪", status.Available, "待认证", status.AuthRequired, "不可用", status.Unavailable,
+		"就绪", status.Available, "需重新登录", status.AuthRequired, "不可用", status.Unavailable,
 		"停用", status.Disabled, "访客会话", guest, "模型", len(pool.ModelAccounts()), "耗时", time.Since(initStarted), "启动耗时", time.Since(started))
 	unavailable := "接口返回 503"
 	if status.Ready() {
@@ -464,12 +491,7 @@ var flagKeys = map[string]string{"auth": "GEMINI_AUTH_STATES", "listen": "LISTEN
 // ParseFlags 用命令行参数覆盖最常用的启动配置，返回是否打开管理页，不带参数启动时默认打开
 func ParseFlags(args []string, cfg *config.Config) (bool, error) {
 	flags := flag.NewFlagSet("gemini-web2api", flag.ContinueOnError)
-	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "首次配置: gemini-web2api setup")
-		fmt.Fprintln(flags.Output(), "查看版本: gemini-web2api version")
-		fmt.Fprintln(flags.Output(), "日常启动: gemini-web2api [参数]")
-		flags.PrintDefaults()
-	}
+	flags.SetOutput(io.Discard)
 	authDefault := strings.Join(cfg.AuthStatePaths, ",")
 	if authDefault == "" {
 		authDefault = "auth"
@@ -477,11 +499,14 @@ func ParseFlags(args []string, cfg *config.Config) (bool, error) {
 	authPaths := flags.String("auth", authDefault, "认证文件、目录或逗号分隔的多个路径")
 	listenAddress := flags.String("listen", cfg.ListenAddress, "服务监听地址")
 	openUI := flags.Bool("open-ui", len(args) == 0, "启动后打开管理页")
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(args); errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintln(os.Stderr, usage(flags))
 		return false, err
+	} else if err != nil {
+		return false, fmt.Errorf("%w\n%s", flagError(err, args), usage(flags))
 	}
 	if flags.NArg() != 0 {
-		return false, fmt.Errorf("未知参数 %q", flags.Arg(0))
+		return false, fmt.Errorf("%w\n%s", fmt.Errorf("未知参数 %q", flags.Arg(0)), usage(flags))
 	}
 	flags.Visit(func(set *flag.Flag) {
 		if key := flagKeys[set.Name]; key != "" {
@@ -500,6 +525,24 @@ func ParseFlags(args []string, cfg *config.Config) (bool, error) {
 	return *openUI, nil
 }
 
+// flagError 把 flag 包的参数解析错误换成服务文案
+func flagError(err error, args []string) error {
+	if name, ok := strings.CutPrefix(err.Error(), "flag provided but not defined: "); ok {
+		return fmt.Errorf("未知参数 %q", name)
+	}
+	if name, ok := strings.CutPrefix(err.Error(), "flag needs an argument: "); ok {
+		return fmt.Errorf("缺少参数 %q 的取值", name)
+	}
+	return fmt.Errorf("启动参数 %q 无效", strings.Join(args, " "))
+}
+
+// usage 返回启动参数的用法说明
+func usage(flags *flag.FlagSet) string {
+	lines := []string{"首次配置: gemini-web2api setup", "查看版本: gemini-web2api version", "日常启动: gemini-web2api [参数]"}
+	flags.VisitAll(func(item *flag.Flag) { lines = append(lines, fmt.Sprintf("--%s：%s", item.Name, item.Usage)) })
+	return strings.Join(lines, "\n")
+}
+
 func splitFlagList(value string) []string {
 	parts := strings.Split(value, ",")
 	result := make([]string, 0, len(parts))
@@ -510,4 +553,23 @@ func splitFlagList(value string) []string {
 		}
 	}
 	return result
+}
+
+// recordLogs 把 WARN 以上的日志写入账本，订阅因跟不上被关闭时重新订阅，直到 ctx 结束
+func recordLogs(ctx context.Context, store *requestdb.Store) {
+	for {
+		_, events, cancel := logging.Subscribe(0)
+		for open := true; open; {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return
+			case event, ok := <-events:
+				open = ok
+				if ok && (event.Level == "WARN" || event.Level == "ERROR") {
+					store.RecordLog(event)
+				}
+			}
+		}
+	}
 }

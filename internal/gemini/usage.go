@@ -15,7 +15,7 @@ import (
 
 const usageRPC = "jSf9Qc"
 
-var errUsageNotSignedIn = errors.New("usage response is not signed in")
+var errUsageNotSignedIn = errors.New("读取用量时官网显示未登录")
 
 // UsageWindow 表示官网展示的一段用量窗口
 type UsageWindow struct {
@@ -65,19 +65,19 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	}
 	req.URL.RawQuery = c.batchQuery(bootstrap, usageRPC, "/usage", bootstrap.Language)
 	c.applyXHRHeaders(req)
-	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), bootstrap.Language, c.clientID, bootstrap.BL, 0, "", 0, c.pageTiming()))
+	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), bootstrap.Language, c.clientID, bootstrap.BL, 0, "", 0))
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return UsageInfo{}, transportProtocolError("usage request", err)
+		return UsageInfo{}, transportProtocolError("读取用量", err)
 	}
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
 		return UsageInfo{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		protocolErr := responseStatusError(resp, "usage")
+		protocolErr := responseStatusError(resp, "读取用量")
 		resp.Body.Close()
 		if allowRefresh && renewable(protocolErr) && c.refresh != nil {
 			if err := c.refreshCookies(ctx, version); err != nil {
@@ -93,7 +93,7 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
-		return UsageInfo{}, transportProtocolError("read usage response", err)
+		return UsageInfo{}, transportProtocolError("读取用量", err)
 	}
 	if bytes.Contains(body, []byte("accounts.google.com")) {
 		if allowRefresh && c.refresh != nil {
@@ -135,7 +135,7 @@ func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
 		}
 		var payload []any
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("decode usage payload: %w", err)
+			return fmt.Errorf("解析官网用量数据: %w", err)
 		}
 		parsed, err := parseUsageInfo(payload)
 		if err != nil {
@@ -149,7 +149,7 @@ func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
 		return UsageInfo{}, err
 	}
 	if !found {
-		return UsageInfo{}, fmt.Errorf("%w: response has no %s payload", errUsageNotSignedIn, usageRPC)
+		return UsageInfo{}, errUsageNotSignedIn
 	}
 	return usage, nil
 }
@@ -157,22 +157,22 @@ func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
 func parseUsageInfo(payload []any) (UsageInfo, error) {
 	tierCode, ok := intAt(payload, 0)
 	if !ok {
-		return UsageInfo{}, fmt.Errorf("usage payload has no tier")
+		return UsageInfo{}, fmt.Errorf("官网用量数据缺少套餐")
 	}
 	rows, ok := arrayAt(payload, 1)
 	if !ok {
-		return UsageInfo{}, fmt.Errorf("usage payload has no windows")
+		return UsageInfo{}, fmt.Errorf("官网用量数据缺少用量窗口")
 	}
 	usage := UsageInfo{Tier: usageTier(tierCode), TierCode: tierCode, FetchedAt: time.Now().UTC()}
 	usage.UseOverageAICredits, _ = boolAt(payload, 2)
 	for _, rawRow := range rows {
 		row, ok := rawRow.([]any)
 		if !ok {
-			return UsageInfo{}, fmt.Errorf("usage window is invalid")
+			return UsageInfo{}, fmt.Errorf("官网用量窗口格式无法识别")
 		}
 		kind, ok := intAt(row, 2)
 		if !ok {
-			return UsageInfo{}, fmt.Errorf("usage window has no kind")
+			return UsageInfo{}, fmt.Errorf("官网用量窗口缺少类型")
 		}
 		switch kind {
 		case 1:
@@ -190,13 +190,13 @@ func parseUsageInfo(payload []any) (UsageInfo, error) {
 		case 3:
 			remaining, ok := numberAt(row, 0)
 			if !ok {
-				return UsageInfo{}, fmt.Errorf("usage credits have no remaining value")
+				return UsageInfo{}, fmt.Errorf("官网 AI 额度缺少剩余值")
 			}
 			usage.RemainingCredits = &remaining
 		}
 	}
 	if usage.Current == nil || usage.Weekly == nil {
-		return UsageInfo{}, fmt.Errorf("usage payload has no current or weekly window")
+		return UsageInfo{}, fmt.Errorf("官网用量数据缺少五小时与每周窗口")
 	}
 	return usage, nil
 }
@@ -204,20 +204,20 @@ func parseUsageInfo(payload []any) (UsageInfo, error) {
 func parseUsageWindow(row []any) (*UsageWindow, error) {
 	ratio, ok := numberAt(row, 1)
 	if !ok {
-		return nil, fmt.Errorf("usage window has no ratio")
+		return nil, fmt.Errorf("官网用量窗口缺少已用比例")
 	}
 	resetOuter, ok := arrayAt(row, 3)
 	if !ok || len(resetOuter) != 1 {
-		return nil, fmt.Errorf("usage window has no reset time")
+		return nil, fmt.Errorf("官网用量窗口缺少重置时间")
 	}
 	reset, ok := resetOuter[0].([]any)
 	if !ok {
-		return nil, fmt.Errorf("usage reset time is invalid")
+		return nil, fmt.Errorf("官网用量重置时间无法识别")
 	}
 	seconds, secondsOK := numberAt(reset, 0)
 	nanos, nanosOK := numberAt(reset, 1)
 	if !secondsOK || !nanosOK {
-		return nil, fmt.Errorf("usage reset time is incomplete")
+		return nil, fmt.Errorf("官网用量重置时间不完整")
 	}
 	return &UsageWindow{UsedRatio: ratio, ResetAt: time.Unix(int64(seconds), int64(nanos)).UTC()}, nil
 }
@@ -246,7 +246,7 @@ func usageContextWindow(tier string) (int, error) {
 	case "pro", "ultra":
 		return 1024 * 1024, nil
 	default:
-		return 0, fmt.Errorf("unknown Gemini Web tier %q", tier)
+		return 0, fmt.Errorf("无法识别的 Gemini 套餐 %q", tier)
 	}
 }
 

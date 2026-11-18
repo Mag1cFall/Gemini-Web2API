@@ -239,9 +239,9 @@ export function RankingTable({
                         ) : (
                           <span aria-hidden className="w-6 shrink-0" />
                         )}
-                        <span title={label} className="truncate">
-                          {label}
-                        </span>
+                        <Tooltip overflow label={label}>
+                          <span className="truncate">{label}</span>
+                        </Tooltip>
                       </div>
                       <div className="mt-1 ml-[28px]">
                         <Meter value={row.requests / total} tone="info" label={label} />
@@ -274,9 +274,9 @@ export function RankingTable({
                           className="bg-panel text-xs text-foreground-muted"
                         >
                           <Td className="max-w-[288px] first:pl-[44px]">
-                            <span title={child.label} className="block truncate">
-                              {child.label}
-                            </span>
+                            <Tooltip overflow label={child.label}>
+                              <span className="block truncate">{child.label}</span>
+                            </Tooltip>
                           </Td>
                           {statCells(child.stats, false)}
                           <Td />

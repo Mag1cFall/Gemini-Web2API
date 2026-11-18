@@ -17,7 +17,7 @@ const keepaliveInterval = 10 * time.Second
 var (
 	openAIKeepalive    = []byte(": ping\n\n")
 	anthropicKeepalive = []byte("event: ping\ndata: {\"type\": \"ping\"}\n\n")
-	geminiKeepalive    = []byte("\n")
+	geminiKeepalive    = []byte("\n\n")
 )
 
 // nonstreamKeepalive 与 fakeStream 是设置页的非流式保活与假流式开关
@@ -38,17 +38,19 @@ type keepaliveWriter struct {
 	lastWrite time.Time
 	started   time.Time
 	frame     []byte
-	held      bool
-	buffer    []byte
-	stop      chan struct{}
-	done      chan struct{}
+	// pulse 非空时代替保活帧在静默时调用，经 Write 写出
+	pulse  func()
+	held   bool
+	buffer []byte
+	stop   chan struct{}
+	done   chan struct{}
 }
 
-// setFrame 替换之后写出的保活帧
-func (w *keepaliveWriter) setFrame(frame []byte) {
+// setPulse 让之后的静默改为调用 pulse 写出带序号的事件
+func (w *keepaliveWriter) setPulse(pulse func()) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.frame = frame
+	w.pulse = pulse
 }
 
 // startKeepalive 替换 c.Writer 并开始发送保活帧，返回的函数停止发送并等待后台写入结束
@@ -122,7 +124,7 @@ func (w *keepaliveWriter) reject() bool {
 	if !w.held {
 		return false
 	}
-	w.held, w.buffer, w.frame = false, nil, nil
+	w.held, w.buffer, w.frame, w.pulse = false, nil, nil, nil
 	for _, name := range []string{"Content-Type", "Cache-Control", "Connection", "X-Accel-Buffering"} {
 		w.Header().Del(name)
 	}
@@ -142,13 +144,21 @@ func (w *keepaliveWriter) run() {
 			if w.held && now.Sub(w.started) >= keepaliveInterval {
 				w.releaseLocked()
 			}
-			if !w.held && w.frame != nil && now.Sub(w.lastWrite) >= keepaliveInterval {
-				w.lastWrite = now
-				if _, err := w.ResponseWriter.Write(w.frame); err == nil {
-					_ = http.NewResponseController(w.ResponseWriter).Flush()
+			var pulse func()
+			if !w.held && now.Sub(w.lastWrite) >= keepaliveInterval {
+				if w.pulse != nil {
+					pulse = w.pulse
+				} else if w.frame != nil {
+					w.lastWrite = now
+					if _, err := w.ResponseWriter.Write(w.frame); err == nil {
+						_ = http.NewResponseController(w.ResponseWriter).Flush()
+					}
 				}
 			}
 			w.mu.Unlock()
+			if pulse != nil {
+				pulse()
+			}
 		}
 	}
 }

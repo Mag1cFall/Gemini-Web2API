@@ -10,6 +10,56 @@ export interface SnippetInput {
 // Shell 是环境变量写法对应的终端
 export type Shell = 'unix' | 'windows'
 
+// ClientProtocol 是客户端连接本服务使用的接入协议
+export type ClientProtocol = 'chat' | 'responses' | 'anthropic' | 'gemini'
+
+// clientProtocolNames 是各接入协议的显示名称
+export const clientProtocolNames: Record<ClientProtocol, string> = {
+  chat: 'OpenAI Chat Completions',
+  responses: 'OpenAI Responses',
+  anthropic: 'Anthropic Messages',
+  gemini: 'Gemini API',
+}
+
+// providerApis 是 pi、omp、dsh 与 OpenClaw 配置的 api 字段在各协议下的取值
+const providerApis: Record<ClientProtocol, string> = {
+  chat: 'openai-completions',
+  responses: 'openai-responses',
+  anthropic: 'anthropic-messages',
+  gemini: 'google-generative-ai',
+}
+
+// openCodePackages 是 OpenCode 各协议使用的 AI SDK 包
+const openCodePackages: Record<ClientProtocol, string> = {
+  chat: '@ai-sdk/openai-compatible',
+  responses: '@ai-sdk/openai',
+  anthropic: '@ai-sdk/anthropic',
+  gemini: '@ai-sdk/google',
+}
+
+// cherryTypes 是 Cherry Studio 各协议的提供商类型名称
+export const cherryTypes: Record<ClientProtocol, string> = {
+  chat: 'OpenAI',
+  responses: 'OpenAI-Response',
+  anthropic: 'Anthropic',
+  gemini: 'Gemini',
+}
+
+// protocolURL 是各协议的 API 地址：OpenAI 两种协议带 /v1，Gemini 带 /v1beta，Anthropic 为服务地址
+export function protocolURL(origin: string, protocol: ClientProtocol) {
+  return {
+    chat: origin + '/v1',
+    responses: origin + '/v1',
+    anthropic: origin,
+    gemini: origin + '/v1beta',
+  }[protocol]
+}
+
+// cherryHost 是 Cherry Studio 各提供商类型的 API 地址：OpenAI 两种类型带 /v1，Gemini 与 Anthropic 为服务地址
+export function cherryHost(origin: string, protocol: ClientProtocol) {
+  return protocol === 'chat' || protocol === 'responses' ? origin + '/v1' : origin
+}
+
 // posixQuote 返回 POSIX shell 的单引号字面量
 function posixQuote(value: string) {
   return "'" + value.replaceAll("'", "'\\''") + "'"
@@ -68,16 +118,20 @@ export function codexEnv(input: SnippetInput, shell: Shell) {
   return envBlock(shell, [['GEMINI_WEB2API_KEY', input.key]], 'codex')
 }
 
-// opencodeConfig 是 ~/.config/opencode/opencode.json 中的自定义提供商
-export function opencodeConfig(input: SnippetInput) {
+// opencodeConfig 是 ~/.config/opencode/opencode.json 中的自定义提供商，AI SDK 的 Anthropic 提供商在 baseURL 后直接拼 /messages
+export function opencodeConfig(input: SnippetInput, protocol: ClientProtocol) {
   return JSON.stringify(
     {
       $schema: 'https://opencode.ai/config.json',
       provider: {
         'gemini-web2api': {
-          npm: '@ai-sdk/openai-compatible',
+          npm: openCodePackages[protocol],
           name: 'Gemini-Web2API',
-          options: { baseURL: input.origin + '/v1', apiKey: input.key },
+          options: {
+            baseURL:
+              protocol === 'anthropic' ? input.origin + '/v1' : protocolURL(input.origin, protocol),
+            apiKey: input.key,
+          },
           models: Object.fromEntries(input.models.map((model) => [model.id, { name: model.name }])),
         },
       },
@@ -89,16 +143,16 @@ export function opencodeConfig(input: SnippetInput) {
 }
 
 // openclawConfig 是 OpenClaw 的配置文件，默认模型为所选模型
-export function openclawConfig(input: SnippetInput) {
+export function openclawConfig(input: SnippetInput, protocol: ClientProtocol) {
   return JSON.stringify(
     {
       agents: { defaults: { model: { primary: 'gemini-web2api/' + input.model } } },
       models: {
         providers: {
           'gemini-web2api': {
-            baseUrl: input.origin + '/v1',
+            baseUrl: protocolURL(input.origin, protocol),
             apiKey: input.key,
-            api: 'openai-completions',
+            api: providerApis[protocol],
             models: input.models,
           },
         },
@@ -109,13 +163,13 @@ export function openclawConfig(input: SnippetInput) {
   )
 }
 
-// ompModels 是 omp 的模型配置文件，经 Gemini 协议接入
-export function ompModels(input: SnippetInput) {
+// ompModels 是 omp 的模型配置文件，按所选协议接入
+export function ompModels(input: SnippetInput, protocol: ClientProtocol) {
   return [
     'providers:',
     '  gemini-web2api:',
-    `    baseUrl: ${input.origin}/v1beta`,
-    '    api: google-generative-ai',
+    `    baseUrl: ${protocolURL(input.origin, protocol)}`,
+    `    api: ${providerApis[protocol]}`,
     '    apiKey: GEMINI_WEB2API_KEY',
     '    models:',
     ...input.models.map((model) => `      - id: ${model.id}`),
@@ -128,6 +182,86 @@ export function ompEnv(input: SnippetInput, shell: Shell) {
     shell,
     [['GEMINI_WEB2API_KEY', input.key]],
     `omp --provider gemini-web2api --model ${input.model}`,
+  )
+}
+
+// piConfig 是 pi 的 ~/.pi/agent/models.json，key 取自环境变量
+export function piConfig(input: SnippetInput, protocol: ClientProtocol) {
+  return JSON.stringify(
+    {
+      providers: {
+        'gemini-web2api': {
+          baseUrl: protocolURL(input.origin, protocol),
+          api: providerApis[protocol],
+          apiKey: 'GEMINI_WEB2API_KEY',
+          models: input.models.map((model) => ({
+            id: model.id,
+            name: model.name,
+            reasoning: true,
+            input: ['text', 'image'],
+          })),
+        },
+      },
+    },
+    null,
+    2,
+  )
+}
+
+// piEnv 是设置 key 后启动 pi 的终端命令
+export function piEnv(input: SnippetInput, shell: Shell) {
+  return envBlock(
+    shell,
+    [['GEMINI_WEB2API_KEY', input.key]],
+    `pi --provider gemini-web2api --model ${input.model}`,
+  )
+}
+
+// dshProtocols 是 dsh 支持的接入协议
+export const dshProtocols: ClientProtocol[] = ['chat', 'responses', 'anthropic']
+
+// dshPatch 是 dsh 的补丁文件，登记提供商并设为默认模型
+export function dshPatch(input: SnippetInput, protocol: ClientProtocol) {
+  return [
+    '- id: llm-pi-ai',
+    '  config:',
+    '    providers:',
+    '      gemini-web2api:',
+    `        api: ${providerApis[protocol]}`,
+    `        baseURL: ${protocolURL(input.origin, protocol)}`,
+    '        apiKeyEnv: GEMINI_WEB2API_KEY',
+    '        models:',
+    ...input.models.map((model) => `          - id: ${model.id}`),
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: gemini-web2api',
+    `    model: ${input.model}`,
+  ].join('\n')
+}
+
+// dshEnv 是设置 key 后以补丁文件启动 dsh 的终端命令
+export function dshEnv(input: SnippetInput, shell: Shell) {
+  return envBlock(
+    shell,
+    [['GEMINI_WEB2API_KEY', input.key]],
+    'dsh --patch gemini-web2api.patch.yml',
+  )
+}
+
+// agyConfig 是 ~/.gemini/antigravity-cli/settings.json，让 agy 使用 Gemini 接口
+export function agyConfig() {
+  return JSON.stringify({ modelProvider: 'gemini' }, null, 2)
+}
+
+// agyEnv 是设置 Gemini key 与基地址后启动 agy 的终端命令
+export function agyEnv(input: SnippetInput, shell: Shell) {
+  return envBlock(
+    shell,
+    [
+      ['GEMINI_API_KEY', input.key],
+      ['GOOGLE_GEMINI_BASE_URL', input.origin],
+    ],
+    'agy',
   )
 }
 

@@ -2,7 +2,9 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -48,6 +50,14 @@ var conversations = conversationRegistry{
 	locks:     make(map[string]*conversationLock),
 	ttl:       30 * time.Minute,
 	temporary: make(map[string]temporaryChat),
+}
+
+// continueSession 是设置页的续接官网会话开关，关闭时每个请求新建网页会话
+var continueSession atomic.Bool
+
+// SetContinueSession 设置续接官网会话开关
+func SetContinueSession(enabled bool) {
+	continueSession.Store(enabled)
 }
 
 // ConfigureSessionTTL 设置显式会话状态的有效期
@@ -218,6 +228,9 @@ func configureSessionStore(pool *balancer.AccountPool, store *requestdb.Store) {
 	}
 	conversations.store = store
 	conversations.mu.Unlock()
+	if !continueSession.Load() {
+		return
+	}
 	sessions, err := store.Sessions(context.Background(), time.Now())
 	if err != nil {
 		logging.Warn(logging.SourceService, "读取会话失败", "错误", err)
@@ -314,7 +327,24 @@ func (r *conversationRegistry) cleanupLocked(now time.Time) {
 	}
 }
 
+// continuationInputError 返回续接官网会话开关关闭时请求所带扩展续接输入的错误，fields 依次为输入名称与值，开关打开或输入都为空时为 nil
+func continuationInputError(fields ...string) error {
+	if continueSession.Load() {
+		return nil
+	}
+	for index := 0; index+1 < len(fields); index += 2 {
+		if fields[index+1] != "" {
+			return fmt.Errorf("%s 需要续接官网会话：在设置中打开“续接官网会话”（GEMINI_CONTINUE_SESSION=true），或每轮发送完整对话", fields[index])
+		}
+	}
+	return nil
+}
+
+// conversationKey 返回请求续接的网页会话键，续接官网会话开关关闭时为空
 func conversationKey(previousResponseID string, conversationID string, headerValue string) string {
+	if !continueSession.Load() {
+		return ""
+	}
 	if previousResponseID != "" {
 		return previousResponseID
 	}

@@ -20,7 +20,7 @@ const MinLogTotalMB = 20
 // Defaults 是 .env 全部配置项的默认值写法，与默认值相同的项不写入 .env
 var Defaults = map[string]string{
 	"LISTEN_ADDR": "127.0.0.1:8007", "GEMINI_AUTH_STATES": "auth", "PROXY_API_KEY": "", "PROXY": "",
-	"ACCOUNT_COOLDOWN": "2m", "SESSION_TTL": "30m", "INIT_TIMEOUT": "20s", "MODEL_MAPPING": "", "GEMINI_SAVE_HISTORY": "false",
+	"ACCOUNT_COOLDOWN": "2m", "SESSION_TTL": "30m", "INIT_TIMEOUT": "20s", "MODEL_MAPPING": "", "GEMINI_SAVE_HISTORY": "false", "GEMINI_CONTINUE_SESSION": "false",
 	"LOG_LEVEL": "info", "LOG_FORMAT": "text", "REQUEST_BODY_LOG": "false", "LOG_FILE": "true", "LOG_MAX_TOTAL_MB": "500",
 	"PER_ACCOUNT_CONCURRENCY": "1", "ROUTING_STRATEGY": "round-robin", "ADMIN_AUTH_ENABLED": "false", "ADMIN_USERNAME": "admin",
 	"ADMIN_PASSWORD": "", "API_KEY_ACCOUNTS": "", "FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-carbon,gemini-4-argon",
@@ -46,6 +46,8 @@ type Config struct {
 	InitTimeout     time.Duration
 	ModelMapping    map[string]string
 	SaveHistory     bool
+	// ContinueSession 为真时后续请求续接已登记的网页会话，为假时每个请求新建网页会话
+	ContinueSession bool
 	// NonstreamKeepalive 为真时非流式请求等待结果期间每 10 秒写出一个换行
 	NonstreamKeepalive bool
 	// FakeStream 为真时流式请求收齐完整结果后再按流式输出
@@ -113,7 +115,7 @@ func Load() Config {
 		cfg.ListenAddress = Defaults["LISTEN_ADDR"]
 	}
 	for key, target := range map[string]*bool{
-		"GEMINI_SAVE_HISTORY": &cfg.SaveHistory, "REQUEST_BODY_LOG": &cfg.RequestBodyLog,
+		"GEMINI_SAVE_HISTORY": &cfg.SaveHistory, "GEMINI_CONTINUE_SESSION": &cfg.ContinueSession, "REQUEST_BODY_LOG": &cfg.RequestBodyLog,
 		"ADMIN_AUTH_ENABLED": &cfg.AdminAuthEnabled, "LOG_FILE": &cfg.LogFile,
 		"NONSTREAM_KEEPALIVE": &cfg.NonstreamKeepalive, "FAKE_STREAM": &cfg.FakeStream,
 	} {
@@ -216,8 +218,9 @@ func ModelAliases() map[string]string {
 	return aliases
 }
 
-// MapModel 返回别名对应的真实模型标识
+// MapModel 去掉首尾空白与 models/、google/ 前缀后返回别名对应的真实模型标识
 func MapModel(model string) string {
+	model = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(model), "models/"), "google/")
 	mappingMu.RLock()
 	defer mappingMu.RUnlock()
 

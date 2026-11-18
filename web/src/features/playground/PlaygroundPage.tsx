@@ -1,5 +1,5 @@
 import { ChevronRight, MessageSquare, Paperclip, Send, Square, X } from 'lucide-react'
-import { type ReactNode, useEffect, useId, useRef, useState } from 'react'
+import { memo, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { appMessages } from '@/app/messages'
@@ -13,9 +13,10 @@ import { Textarea } from '@/components/ui/input'
 import { Card, CardEmpty, CardHeader, PageHeader } from '@/components/ui/page'
 import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
-import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
+import { EmptyState, ErrorState, PagePlaceholder } from '@/components/ui/states'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { DisabledHint } from '@/components/ui/tooltip'
 import { useModels } from '@/features/models/queries'
 import { renderMarkdown } from '@/features/playground/markdown'
 import { playgroundMessages } from '@/features/playground/messages'
@@ -38,10 +39,12 @@ import {
   videoAspectRatios,
 } from '@/features/playground/protocols'
 import { execute, type Run } from '@/features/playground/run'
+import { useInputTokens } from '@/features/playground/tokens'
 import { firstApiKey } from '@/features/settings/apiKeys'
 import { useConfig } from '@/features/settings/queries'
+import { useKeepPage } from '@/lib/desktop'
 import { formatBytes, formatDuration, formatNumber } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 
 // Text 是 Playground 当前语言的文案
 type Text = (typeof playgroundMessages)['zh-CN']
@@ -270,8 +273,8 @@ function MediaList({ run }: { run: Run }) {
   )
 }
 
-// Output 是右侧的输出卡片：标题行显示状态、耗时与 token，内容为回复、原始响应与请求
-function Output({ run }: { run: Run | undefined }) {
+// Output 是右侧的输出卡片：标题行显示状态、耗时与 token，内容为回复、原始响应与请求；run 不变时不重新渲染
+const Output = memo(function Output({ run }: { run: Run | undefined }) {
   const m = useMessages(playgroundMessages)
   const { locale } = useI18n()
   if (!run) {
@@ -337,7 +340,7 @@ function Output({ run }: { run: Run | undefined }) {
         {result.error && (
           <Callout tone="error" role="alert">
             <p className="font-mono text-xs break-words whitespace-pre-wrap select-text">
-              {result.error}
+              {serverText(result.error)}
             </p>
           </Callout>
         )}
@@ -411,7 +414,7 @@ function Output({ run }: { run: Run | undefined }) {
       </div>
     </Card>
   )
-}
+})
 
 // SwitchRow 是卡片中的一行开关：左侧名称，右侧开关
 function SwitchRow({
@@ -429,6 +432,41 @@ function SwitchRow({
       <Switch checked={checked} onCheckedChange={onChange} />
     </label>
   )
+}
+
+// appTitle 是管理端页面的标签页标题
+const appTitle = 'Gemini-Web2API'
+
+// useTabTitle 让标签页标题显示生成状态：生成中始终显示，标签页隐藏期间结束的生成显示完成或出错，回到标签页后清除；返回值在生成结束时调用
+function useTabTitle(run: Run | undefined, text: { running: string; done: string; error: string }) {
+  const [unseen, setUnseen] = useState(false)
+  useEffect(() => {
+    const clear = () => {
+      if (document.visibilityState === 'visible') setUnseen(false)
+    }
+    document.addEventListener('visibilitychange', clear)
+    return () => {
+      document.removeEventListener('visibilitychange', clear)
+    }
+  }, [])
+  const failed = run !== undefined && (run.result.error !== undefined || (run.status ?? 0) >= 400)
+  const status =
+    run?.phase === 'running'
+      ? text.running
+      : unseen && run?.phase === 'done'
+        ? failed
+          ? text.error
+          : text.done
+        : ''
+  useEffect(() => {
+    document.title = status ? status + ' · ' + appTitle : appTitle
+    return () => {
+      document.title = appTitle
+    }
+  }, [status])
+  return () => {
+    if (document.visibilityState === 'hidden') setUnseen(true)
+  }
 }
 
 // PlaygroundPage 向公开接口发送单轮请求，输出类型、协议与模型保存在 URL
@@ -467,6 +505,8 @@ export function PlaygroundPage() {
   const available = protocolSettings(mode, protocol)
   const apiKey = firstApiKey(config.data?.proxy_api_key ?? '')
   const running = run?.phase === 'running'
+  useKeepPage(running)
+  const finished = useTabTitle(run, { running: m.tabRunning, done: m.tabDone, error: m.tabError })
   const levels = available.has('reasoning') ? (selected?.thinking_levels ?? []) : []
   const reasoning = levels.includes(form.reasoning) ? form.reasoning : 'off'
   const ratios = mode === 'video' ? videoAspectRatios : imageAspectRatios
@@ -476,6 +516,14 @@ export function PlaygroundPage() {
     available.has('stream') &&
     (!transcribing || streamableTranscriptFormats.includes(form.transcriptFormat))
   const rule = available.has('attachments') ? attachRules[mode] : undefined
+  const tokens = useInputTokens({
+    model,
+    prompt: form.prompt,
+    system: available.has('system') ? form.system : '',
+    attachments: rule ? attachments : [],
+    apiKey,
+    enabled: !transcribing,
+  })
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
@@ -564,7 +612,9 @@ export function PlaygroundPage() {
       for (const item of change.result?.media ?? []) {
         if (item.url.startsWith('blob:')) blobs.current.push(item.url)
       }
-      if (!abort.signal.aborted) setRun((current) => current && { ...current, ...change })
+      if (abort.signal.aborted) return
+      setRun((current) => current && { ...current, ...change })
+      if (change.phase === 'done') finished()
     }
     void execute(request, protocol, apiKey, abort.signal, update, (message) =>
       fill(m.networkError, { message }),
@@ -576,7 +626,9 @@ export function PlaygroundPage() {
     setRun((current) => current && { ...current, phase: 'cancelled' })
   }
 
-  if (models.isPending) return <Loading label={app.loading} />
+  if (models.isPending) {
+    return <PagePlaceholder title={m.title} description={m.description} label={app.loading} />
+  }
   if (models.isError) {
     return (
       <ErrorState
@@ -923,10 +975,20 @@ export function PlaygroundPage() {
                       {m.stop}
                     </Button>
                   ) : (
-                    <Button type="submit" variant="primary" size="lg" disabled={!model}>
-                      <Send size={16} aria-hidden />
-                      {m.send}
-                    </Button>
+                    <DisabledHint reason={model ? '' : m.noModel}>
+                      <Button type="submit" variant="primary" size="lg" disabled={!model}>
+                        <Send size={16} aria-hidden />
+                        {m.send}
+                      </Button>
+                    </DisabledHint>
+                  )}
+                  {tokens.data !== undefined && form.prompt.trim() !== '' && (
+                    <span
+                      aria-live="polite"
+                      className="self-center text-sm text-foreground-muted tabular-nums"
+                    >
+                      {fill(m.inputTokens, { count: formatNumber(tokens.data, locale) })}
+                    </span>
                   )}
                 </div>
               </form>

@@ -1,5 +1,5 @@
 import { Tooltip as Primitive } from 'radix-ui'
-import type { ReactNode } from 'react'
+import { type ReactNode, useRef, useState } from 'react'
 
 // TooltipProvider 统一提示的出现延迟
 export function TooltipProvider({ children }: { children: ReactNode }) {
@@ -10,21 +10,33 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
   )
 }
 
-// Tooltip 在悬停与键盘聚焦时显示说明，shortcut 显示对应快捷键
+// Tooltip 在悬停与键盘聚焦时显示说明，shortcut 显示对应快捷键；overflow 为真时只在子元素的文字被截断时显示
 export function Tooltip({
   label,
   shortcut,
   side = 'bottom',
+  overflow = false,
   children,
 }: {
   label: ReactNode
   shortcut?: string
   side?: 'top' | 'bottom' | 'left' | 'right'
+  overflow?: boolean
   children: ReactNode
 }) {
+  const trigger = useRef<HTMLButtonElement>(null)
+  const [open, setOpen] = useState(false)
   return (
-    <Primitive.Root>
-      <Primitive.Trigger asChild>{children}</Primitive.Trigger>
+    <Primitive.Root
+      open={open}
+      onOpenChange={(next) => {
+        const node = trigger.current
+        setOpen(next && (!overflow || (node !== null && node.scrollWidth > node.clientWidth)))
+      }}
+    >
+      <Primitive.Trigger ref={trigger} asChild>
+        {children}
+      </Primitive.Trigger>
       <Primitive.Portal>
         <Primitive.Content
           side={side}
@@ -42,5 +54,15 @@ export function Tooltip({
         </Primitive.Content>
       </Primitive.Portal>
     </Primitive.Root>
+  )
+}
+
+// DisabledHint 在 reason 非空时把子元素包在可悬停的外层中，悬停显示不可用的原因；不可用的按钮自身不响应悬停
+export function DisabledHint({ reason, children }: { reason: string; children: ReactNode }) {
+  if (!reason) return children
+  return (
+    <Tooltip label={reason}>
+      <span className="inline-flex">{children}</span>
+    </Tooltip>
   )
 }

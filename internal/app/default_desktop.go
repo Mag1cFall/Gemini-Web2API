@@ -44,7 +44,7 @@ func desktopDataDir() (string, error) {
 	return filepath.Join(base, appName), nil
 }
 
-// runDefault 以桌面窗口与托盘运行服务
+// runDefault 以桌面窗口与托盘运行服务，Windows 的 WebView2 数据写入 %LocalAppData%\Gemini-Web2API\WebView2
 func runDefault(args []string) error {
 	hidden := slices.Contains(args, "--"+desktop.HiddenFlag)
 	args = slices.DeleteFunc(slices.Clone(args), func(arg string) bool { return arg == "--"+desktop.HiddenFlag })
@@ -52,17 +52,17 @@ func runDefault(args []string) error {
 	if err != nil {
 		return err
 	}
-	workDir, err := os.Getwd()
-	if err != nil {
-		return err
-	}
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("定位可执行文件: %w", err)
 	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return fmt.Errorf("定位用户缓存目录: %w", err)
+	}
 	return desktop.Run(desktop.Options{
 		Title:   appName,
-		DataDir: filepath.Join(workDir, dataDir, "webview"),
+		DataDir: filepath.Join(cache, appName, "WebView2"),
 		Hidden:  hidden,
 		Serve: func(ctx context.Context, ready func(string)) error {
 			instance, err := Start(cfg, nil, true)

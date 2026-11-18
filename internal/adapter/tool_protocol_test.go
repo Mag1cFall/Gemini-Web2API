@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestToolBridgeParsesCallBlocks 验证调用块的参数取代码块原文：引号、反斜杠与换行不转义，外层代码块更长或过短、上游以反斜杠转义方括号、工具名带空格或下划线前缀、缺少参数结尾与参数不在代码块中时都还原为声明的工具调用
+// TestToolBridgeParsesCallBlocks 验证调用块的参数取代码块原文：引号、反斜杠与换行不转义，外层代码块更长或过短、上游以反斜杠转义方括号、工具名带空格或下划线前缀、缺少参数结尾、参数不在代码块中与漏写开头围栏时都还原为声明的工具调用
 func TestToolBridgeParsesCallBlocks(t *testing.T) {
 	bridge := ToolBridge{Choice: "auto", Definitions: []ToolDefinition{{Name: "bash", Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)}}}
 	raw := "printf 'name=\"torrents\"'\ntype C:\\new\\table.txt \\d+"
@@ -25,6 +25,7 @@ func TestToolBridgeParsesCallBlocks(t *testing.T) {
 		{"name spacing", "[Call: _bash ]\n[Arg: command ]\n```\nls\n```\n[/Arg]\n[/Call]", "ls"},
 		{"missing arg end", "[Call:bash]\n[Arg:command]\n```\nls\n```\n[/Call]", "ls"},
 		{"unfenced", "[Call:bash]\n[Arg:command]\nls -la\n[/Arg]\n[/Call]", "ls -la"},
+		{"missing opening fence", "[Call:bash]\n[Arg:command]\nconfig.ini\n```\n[/Arg]\n[/Call]", "config.ini"},
 	}
 	for _, tc := range cases {
 		content, calls, err := bridge.Parse(tc.reply)

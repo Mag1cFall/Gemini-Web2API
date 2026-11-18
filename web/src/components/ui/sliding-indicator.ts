@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from 'react'
 
-// useSlidingIndicator 返回容器与指示条的 ref，用 transform 把指示条平移到容器内选中项下方；fit 为真时宽度与选中项相同，否则保持自身宽度居中；首次定位不播放过渡
+// useSlidingIndicator 返回容器与指示条的 ref，用 transform 把指示条平移到容器内选中项，底边与选中项底边对齐；fit 为真时宽度与选中项相同，否则保持自身宽度居中；首次定位不播放过渡
 export function useSlidingIndicator<C extends HTMLElement, I extends HTMLElement>(
   selector: string,
   fit: boolean,
@@ -21,7 +21,7 @@ export function useSlidingIndicator<C extends HTMLElement, I extends HTMLElement
       const left = fit
         ? item.offsetLeft
         : item.offsetLeft + (item.offsetWidth - bar.offsetWidth) / 2
-      const top = item.offsetTop + item.offsetHeight - root.clientHeight
+      const top = item.offsetTop + item.offsetHeight - bar.offsetTop - bar.offsetHeight
       bar.style.transform = `translate(${String(left)}px, ${String(top)}px)`
       bar.style.opacity = '1'
     }

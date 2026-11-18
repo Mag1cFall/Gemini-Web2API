@@ -6,7 +6,8 @@
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@server-messages/*": ["../internal/i18n/messages/*"]
     },
     "strict": true,
     "noUncheckedIndexedAccess": true,

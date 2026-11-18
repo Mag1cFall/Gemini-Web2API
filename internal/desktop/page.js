@@ -19,9 +19,24 @@
     event.dataTransfer.dropEffect = "none";
   });
   window.addEventListener("drop", (event) => event.preventDefault());
-  const locale = () => invoke("desktop:locale:" + document.documentElement.lang);
-  new MutationObserver(locale).observe(document.documentElement, { attributeFilter: ["lang"] });
-  locale();
+  const root = document.documentElement;
+  const appearance = () => {
+    invoke("desktop:locale:" + root.lang);
+    invoke("desktop:theme:" + (root.dataset.theme === "dark" ? "dark" : "light"));
+  };
+  new MutationObserver(appearance).observe(root, { attributeFilter: ["lang", "data-theme"] });
+  appearance();
+  const route = () => invoke("desktop:route:" + location.pathname + location.search);
+  for (const name of ["pushState", "replaceState"]) {
+    const original = history[name];
+    history[name] = function (...args) {
+      const result = original.apply(this, args);
+      route();
+      return result;
+    };
+  }
+  window.addEventListener("popstate", route);
+  route();
 
   const os = window._wails.environment.OS;
   const property = (element, name) => getComputedStyle(element).getPropertyValue(name).trim();

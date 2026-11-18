@@ -6,6 +6,8 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/gin-gonic/gin"
 )
 
@@ -14,6 +16,8 @@ type accountView struct {
 	balancer.AccountStatus
 	// Email 是首页 oPEP7c 给出的登录邮箱，账号尚未初始化时为空
 	Email string `json:"email,omitempty"`
+	// Abuse 是最近一次初始化读取的账号异常状态，尚未读取时为空
+	Abuse *gemini.AbuseStatus `json:"abuse,omitempty"`
 }
 
 // accountViews 返回全部账号的管理端状态
@@ -24,6 +28,7 @@ func (h *handler) accountViews() []accountView {
 		views[index].AccountStatus = account
 		if client := h.Pool.Client(account.AccountID); client != nil {
 			views[index].Email = client.Email()
+			views[index].Abuse = client.AbuseStatus()
 		}
 	}
 	return views
@@ -96,6 +101,26 @@ func (h *handler) verifyAccount(c *gin.Context) {
 		return
 	}
 	h.respondAccount(c, id, h.Accounts.Verify(id))
+}
+
+// refreshUsage 重新读取一个账号的官网用量，账号停用或尚未登录时返回 409
+func (h *handler) refreshUsage(c *gin.Context) {
+	id := c.Param("id")
+	if _, ok := h.account(id); !ok {
+		writeError(c, http.StatusNotFound, "account_not_found", "账号不存在")
+		return
+	}
+	client := h.Pool.Client(id)
+	if client == nil {
+		writeError(c, http.StatusConflict, "account_not_ready", "账号未就绪")
+		return
+	}
+	usage, err := client.FetchUsage(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusBadGateway, "usage_failed", logging.SanitizeError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"usage": usage})
 }
 
 // chromeProfile 是本机 Chrome 中可导入的账号

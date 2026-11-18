@@ -5,11 +5,12 @@ import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/page'
 import { Table, Td, Th } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
+import { Tooltip } from '@/components/ui/tooltip'
 import { settingsMessages } from '@/features/settings/messages'
 import { proxiesKey, useProxies } from '@/features/settings/queries'
 import type { ProxyStatus } from '@/features/settings/types'
 import { api } from '@/lib/api'
-import { fill, useMessages } from '@/lib/i18n'
+import { fill, serverText, useMessages } from '@/lib/i18n'
 
 // ProxyPoolCard 列出代理池中每个代理的检测结果、延迟与绑定的账号，可立即检测，代理池为空时不显示
 export function ProxyPoolCard() {
@@ -57,9 +58,11 @@ export function ProxyPoolCard() {
               <Td>
                 <div className="font-mono whitespace-nowrap">{proxy.url}</div>
                 {proxy.error && (
-                  <div className="max-w-cell truncate text-xs text-error-text" title={proxy.error}>
-                    {proxy.error}
-                  </div>
+                  <Tooltip overflow label={serverText(proxy.error)}>
+                    <div className="max-w-cell truncate text-xs text-error-text">
+                      {serverText(proxy.error)}
+                    </div>
+                  </Tooltip>
                 )}
               </Td>
               <Td>

@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -12,10 +13,8 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/claude"
-	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
-	"github.com/Mag1cFall/Gemini-Web2API/internal/tokencount"
 	"github.com/gin-gonic/gin"
 )
 
@@ -43,8 +42,18 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "messages 与 system 不能同时为空")
 			return
 		}
+		if err := continuationInputError("previous_response_id", request.PreviousResponseID, "conversation_id", request.ConversationID, "X-Conversation-ID", c.GetHeader("X-Conversation-ID")); err != nil {
+			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
 		if err := awaitModel(c, pool, request.Model); err != nil {
 			writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
+			return
+		}
+		request.Messages = compactedClaudeMessages(request.Messages)
+		contextResult, err := applyClaudeContextEdits(c, pool, &request)
+		if err != nil {
+			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
 		thinkingLevel, includeThoughts, err := claudeThinkingSettings(request)
@@ -60,6 +69,17 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 		setUnsupportedParameters(c, unsupportedClaudeParameters(request))
+		responseID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+		if contextResult.compacting {
+			if contextResult.compaction, err = compactClaude(c, pool, &request, responseID, thinkingLevel); err != nil {
+				writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
+				return
+			}
+			if contextResult.compaction != nil && contextResult.compaction.pause {
+				writeClaudeCompactionPause(c, pool, request, responseID, contextResult)
+				return
+			}
+		}
 		sessionKey := conversationKey(request.PreviousResponseID, request.ConversationID, c.GetHeader("X-Conversation-ID"))
 		var system string
 		var turns []historyTurn
@@ -68,16 +88,36 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			turns = claudeHistoryTurns(request.Messages)
 			sessionKey = continuedHistoryKey(system, bridge, turns)
 		}
-		responseID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 
 		if request.Stream {
 			setSSEHeaders(c)
 			stream, stop := holdStream(c, anthropicKeepalive)
 			defer stop()
-			processor := claude.NewStreamProcessor(config.MapModel(request.Model), c.Writer, responseID)
+			processor := claude.NewStreamProcessor(publicModelID(pool, request.Model), c.Writer, responseID)
 			projection := newStreamProjection(bridge, includeThoughts)
 			thinkingOpen := false
 			thinkingBlock := 0
+			fetchesSent := false
+			compactionSent := false
+			// emitFetches 在正文之前输出服务读取网页的内容块
+			emitFetches := func() error {
+				if fetchesSent {
+					return nil
+				}
+				fetchesSent = true
+				for _, block := range anthropicFetchBlocks(responseID, requestPages(c)) {
+					if block["type"] == "server_tool_use" {
+						if err := processor.EmitServerToolUse(block["id"].(string), "web_fetch", block["input"]); err != nil {
+							return err
+						}
+						continue
+					}
+					if err := processor.EmitBlock(block); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
 			result, accountID, err := runGeneration(
 				c.Request.Context(), pool, sessionKey, previousResponsePolicy(request.PreviousResponseID), request.Model, responseID, generationMedia{}, thinkingLevel, bridge,
 				func(client *gemini.Client, continuation bool) (string, []gemini.FileData, error) {
@@ -87,7 +127,11 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 						stream.release()
 					}
 					if event.Kind == gemini.EventMetadata && event.Usage != nil {
-						return processor.ProcessEvent(event)
+						if err := processor.ProcessEvent(event); err != nil || compactionSent || contextResult.compaction == nil {
+							return err
+						}
+						compactionSent = true
+						return processor.EmitCompaction(contextResult.compaction.summary)
 					}
 					return projection.project(event, func(event gemini.Event) error {
 						if event.Kind == gemini.EventText && thinkingOpen {
@@ -96,6 +140,11 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 							}
 							thinkingOpen = false
 							thinkingBlock++
+						}
+						if event.Kind == gemini.EventText {
+							if err := emitFetches(); err != nil {
+								return err
+							}
 						}
 						if event.Kind == gemini.EventThought {
 							thinkingOpen = true
@@ -115,6 +164,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				return
 			}
 			processor.SetModel(result.Model)
+			processor.SetProviderModel(result.ProviderModel)
 			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
 				_ = processor.EmitError(streamFailure(c, err))
 				return
@@ -125,7 +175,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				return
 			}
 			rememberHistory(pool, result, system, bridge, turns)
-			content, calls, err := bridge.Parse(primary.Text)
+			content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 			if err != nil {
 				_ = processor.EmitError(streamFailure(c, err))
 				return
@@ -146,6 +196,9 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				if err := processor.EmitThinking(primary.Thought, thinkingSignature(responseID, 0)); err != nil {
 					return
 				}
+			}
+			if err := emitFetches(); err != nil {
+				return
 			}
 			if bridge.WebSearch && len(primary.Citations) > 0 && projection.bufferText && projection.textRunes == 0 {
 				content = renderCandidateMarkdown(content, primary, 0)
@@ -179,6 +232,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					return
 				}
 			}
+			processor.SetContextManagement(contextResult.management(), contextResult.iterations(result.Accumulator.Usage))
 			if result.StopSequence != "" && len(calls) == 0 {
 				_ = processor.FinishStopSequence(result.StopSequence)
 				return
@@ -186,6 +240,8 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			stopReason := "end_turn"
 			if len(calls) > 0 {
 				stopReason = "tool_use"
+			} else if result.Truncated {
+				stopReason = "max_tokens"
 			}
 			_ = processor.Finish(stopReason)
 			return
@@ -214,7 +270,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			return
 		}
 		rememberHistory(pool, result, system, bridge, turns)
-		content, calls, err := bridge.Parse(primary.Text)
+		content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
 			return
@@ -224,8 +280,21 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		searched := bridge.WebSearch && len(primary.Citations) > 0
 
 		blocks := make([]claude.ContentBlock, 0)
+		if compaction := contextResult.compaction; compaction != nil {
+			blocks = append(blocks, compaction.contentBlock())
+		}
 		if includeThoughts && primary.Thought != "" {
 			blocks = append(blocks, claude.ContentBlock{Type: "thinking", Thinking: primary.Thought, Signature: thinkingSignature(responseID, 0)})
+		}
+		pages := requestPages(c)
+		for _, block := range anthropicFetchBlocks(responseID, pages) {
+			if block["type"] == "server_tool_use" {
+				input := map[string]interface{}(block["input"].(gin.H))
+				blocks = append(blocks, claude.ContentBlock{Type: "server_tool_use", ID: block["id"].(string), Name: "web_fetch", Input: &input})
+				continue
+			}
+			content, _ := json.Marshal(block["content"])
+			blocks = append(blocks, claude.ContentBlock{Type: "web_fetch_tool_result", ToolUseID: block["tool_use_id"].(string), Content: content})
 		}
 		if searched {
 			search := anthropicSearchBlocks(responseID, primary.Citations)
@@ -251,18 +320,25 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			stopReason = "tool_use"
 		} else if result.StopSequence != "" {
 			stopReason, stopSequence = "stop_sequence", &result.StopSequence
+		} else if result.Truncated {
+			stopReason = "max_tokens"
 		}
 		response := claude.ClaudeResponse{
 			ID: responseID, Type: "message", Role: "assistant", Model: result.Model, Content: blocks,
-			StopReason: stopReason, StopSequence: stopSequence, ConversationID: result.ConversationID, Usage: &claude.Usage{},
+			StopReason: stopReason, StopSequence: stopSequence, ConversationID: result.ConversationID, Usage: &claude.Usage{}, ProviderModel: result.ProviderModel,
 		}
 		if result.Accumulator.Usage != nil {
 			usage := result.Accumulator.Usage
 			response.Usage = &claude.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens()}
 		}
-		if searched {
-			response.Usage.ServerToolUse = &claude.ServerToolUse{WebSearchRequests: 1}
+		if searched || len(pages) > 0 {
+			response.Usage.ServerToolUse = &claude.ServerToolUse{WebFetchRequests: len(pages)}
+			if searched {
+				response.Usage.ServerToolUse.WebSearchRequests = 1
+			}
 		}
+		response.Usage.Iterations = contextResult.iterations(result.Accumulator.Usage)
+		response.ContextManagement = contextResult.management()
 		c.Header("X-Response-ID", responseID)
 		c.Header("X-Conversation-ID", result.ConversationID)
 		c.Header("X-Provider-Model", result.ProviderModel)
@@ -291,17 +367,28 @@ func ClaudeCountTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
 			return
 		}
-		bridge, err := claudeToolBridge(request)
+		request.Messages = compactedClaudeMessages(request.Messages)
+		original := request
+		contextResult, err := applyClaudeContextEdits(c, pool, &request)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-		prompt, files, err := buildClaudePrompt(c, countClient(pool), request, false, bridge)
+		inputTokens, err := claudeInputTokens(c, pool, request)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"input_tokens": tokencount.Content(prompt) + mediaTokens(files)})
+		response := gin.H{"input_tokens": inputTokens}
+		if contextResult.requested {
+			tokens, err := claudeInputTokens(c, pool, original)
+			if err != nil {
+				writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+				return
+			}
+			response["context_management"] = gin.H{"original_input_tokens": tokens}
+		}
+		c.JSON(http.StatusOK, response)
 	}
 }
 
@@ -337,7 +424,42 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 	if err != nil {
 		return "", nil, err
 	}
+	if bridge.URLContext && len(request.Messages) > 0 {
+		last := request.Messages[len(request.Messages)-1]
+		if last.Role == "user" {
+			fetch := claudeFetchTool(request.Tools)
+			section, pageFiles := pagePrompt(urlContextPages(c, client, claudeMessageText(last.Content), cmp.Or(fetch.MaxUses, urlContextLimit), fetch.AllowedDomains, fetch.BlockedDomains))
+			if section != "" {
+				suffix += "\n\n" + section
+				files = append(files, pageFiles...)
+			}
+		}
+	}
 	return renderTranscript(turns, suffix), files, nil
+}
+
+// claudeMessageText 返回消息内容中的文字
+func claudeMessageText(raw json.RawMessage) string {
+	blocks, text, err := claude.ParseMessageContent(raw)
+	if err != nil {
+		return ""
+	}
+	for _, block := range blocks {
+		if block.Type == "text" {
+			text += block.Text + "\n"
+		}
+	}
+	return text
+}
+
+// claudeFetchTool 返回请求中的 web_fetch 工具
+func claudeFetchTool(tools []claude.Tool) claude.Tool {
+	for _, tool := range tools {
+		if tool.Type != nil && strings.HasPrefix(strings.ToLower(*tool.Type), "web_fetch_") {
+			return tool
+		}
+	}
+	return claude.Tool{}
 }
 
 // claudeToolNames 返回消息中 tool_use 的调用 ID 到结果标签的映射
@@ -376,10 +498,13 @@ func claudeToolBridge(request claude.ClaudeRequest) (ToolBridge, error) {
 	}
 	_ = json.Unmarshal(request.ToolChoice, &parallel)
 	bridge := ToolBridge{Choice: claudeToolChoice(request.ToolChoice), Stop: request.StopSequences, SingleCall: parallel.Disable}
+	if request.MaxTokens != nil {
+		bridge.MaxTokens = *request.MaxTokens
+	}
 	webTool := false
 	for _, tool := range request.Tools {
 		if tool.IsWebSearch() {
-			bridge.WebSearch = true
+			bridge.WebSearch, bridge.SearchDomains, bridge.SearchBlocked, bridge.SearchLocation = true, tool.AllowedDomains, tool.BlockedDomains, searchLocation(tool.UserLocation)
 			webTool = true
 			continue
 		}
@@ -461,9 +586,6 @@ func claudeSystemEmpty(raw json.RawMessage) bool {
 
 func unsupportedClaudeParameters(request claude.ClaudeRequest) []string {
 	var fields []string
-	if request.MaxTokens != nil {
-		fields = append(fields, "max_tokens")
-	}
 	if request.Temperature != nil {
 		fields = append(fields, "temperature")
 	}

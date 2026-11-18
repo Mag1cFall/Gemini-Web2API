@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
-	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
@@ -42,10 +43,10 @@ type GeminiFunctionCall struct {
 
 // GeminiFunctionResponse 表示 Gemini 函数结果，parts 为结果中的图片与文件
 type GeminiFunctionResponse struct {
-	ID       string                 `json:"id,omitempty"`
-	Name     string                 `json:"name"`
-	Response map[string]interface{} `json:"response"`
-	Parts    []GeminiPart           `json:"parts,omitempty"`
+	ID       string          `json:"id,omitempty"`
+	Name     string          `json:"name"`
+	Response json.RawMessage `json:"response"`
+	Parts    []GeminiPart    `json:"parts,omitempty"`
 }
 
 // GeminiExecutableCode 表示 Gemini 已执行代码
@@ -90,6 +91,8 @@ type GeminiGenerateContentRequest struct {
 	ToolConfig         json.RawMessage `json:"toolConfig,omitempty"`
 	ConversationID     string          `json:"conversationId,omitempty"`
 	PreviousResponseID string          `json:"previousResponseId,omitempty"`
+	// CachedContent 为引用的显式缓存资源名
+	CachedContent string `json:"cachedContent,omitempty"`
 	// GenerateContentRequest 为 countTokens 请求包装的完整生成请求
 	GenerateContentRequest *GeminiGenerateContentRequest `json:"generateContentRequest,omitempty"`
 }
@@ -137,6 +140,10 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 		if method != "countTokens" {
 			logging.FromContext(c.Request.Context()).Begin("gemini", model, method == "streamGenerateContent", len(request.Contents), geminiToolCount(request.Tools))
 		}
+		cache, ok := applyGeminiCache(c, request.CachedContent, &request)
+		if !ok {
+			return
+		}
 		if len(request.Contents) == 0 {
 			if request.SystemInstruction == nil || len(request.SystemInstruction.Parts) == 0 {
 				writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "contents or systemInstruction is required")
@@ -150,7 +157,11 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			return
 		}
 		if method == "countTokens" {
-			countGeminiTokens(c, pool, model, request)
+			countGeminiTokens(c, pool, request, cache)
+			return
+		}
+		if err := continuationInputError("previousResponseId", request.PreviousResponseID, "conversationId", request.ConversationID, "X-Conversation-ID", c.GetHeader("X-Conversation-ID")); err != nil {
+			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 			return
 		}
 		if err := awaitModel(c, pool, model); err != nil {
@@ -206,7 +217,7 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			stream, stop := holdStream(c, geminiKeepalive)
 			defer stop()
 			writer.w = c.Writer
-			streamModel := config.MapModel(model)
+			streamModel := publicModelID(pool, model)
 			for index := range count {
 				projection := newStreamProjection(bridge, includeThoughts)
 				result, err := generate(index, func(event gemini.Event) error {
@@ -218,6 +229,10 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 					})
 				}, projection)
 				if err != nil {
+					if feedback, ok := geminiPromptFeedback(c, err, streamModel, responseID); ok {
+						_ = writer.write(feedback)
+						return
+					}
 					if stream.reject() {
 						writer.closed = true
 						writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
@@ -236,10 +251,13 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 					return
 				}
 				response["candidates"].([]gin.H)[0]["index"] = index
+				if pages := requestPages(c); len(pages) > 0 {
+					response["candidates"].([]gin.H)[0]["urlContextMetadata"] = geminiURLContextMetadata(pages)
+				}
 				usage = addUsage(usage, result.Accumulator.Usage)
 				delete(response, "usageMetadata")
 				if index == count-1 && usage != nil {
-					response["usageMetadata"] = geminiUsage(usage)
+					response["usageMetadata"] = cache.cacheUsage(geminiUsage(usage))
 				}
 				_ = writer.write(projectGeminiStreamTail(response, projection))
 			}
@@ -251,6 +269,10 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 		var response gin.H
 		for index := range count {
 			result, err := generate(index, nil, nil)
+			if feedback, ok := geminiPromptFeedback(c, err, publicModelID(pool, model), responseID); ok {
+				c.JSON(http.StatusOK, fieldorder.Official("gemini", feedback))
+				return
+			}
 			if err != nil {
 				writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
 				return
@@ -265,6 +287,12 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 				return
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
+			if index == 0 {
+				c.Header("X-Provider-Model", result.ProviderModel)
+			}
+			if pages := requestPages(c); len(pages) > 0 {
+				built["candidates"].([]gin.H)[0]["urlContextMetadata"] = geminiURLContextMetadata(pages)
+			}
 			if response == nil {
 				response = built
 				continue
@@ -275,10 +303,19 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 		}
 		recordChoiceUsage(c, count, usage)
 		if usage != nil {
-			response["usageMetadata"] = geminiUsage(usage)
+			response["usageMetadata"] = cache.cacheUsage(geminiUsage(usage))
 		}
-		c.JSON(http.StatusOK, response)
+		c.JSON(http.StatusOK, fieldorder.Official("gemini", response))
 	}
+}
+
+// geminiPromptFeedback 在上游按输入拦截时返回 Gemini API 的输入拒绝：不含候选，promptFeedback 的 blockReason 为 OTHER（Gemini Web 不给出拦截类别），blockReasonMessage 为官网的过滤提示，并把提示写入请求记录
+func geminiPromptFeedback(c *gin.Context, err error, model string, responseID string) (gin.H, bool) {
+	if !errors.Is(err, gemini.ErrInputBlocked) {
+		return nil, false
+	}
+	logging.FromContext(c.Request.Context()).Fail(http.StatusOK, err.Error())
+	return gin.H{"promptFeedback": gin.H{"blockReason": "OTHER", "blockReasonMessage": err.Error()}, "modelVersion": model, "responseId": responseID}, true
 }
 
 // geminiCandidateCount 返回 generationConfig.candidateCount 要求的候选数，缺省或小于 1 时为 1
@@ -313,26 +350,19 @@ func geminiMethodCapability(method string) string {
 	}
 }
 
-// countGeminiTokens 以生成时的提示词编码计算文本 token，附件按官方计数规则估算并按模态列出
-func countGeminiTokens(c *gin.Context, pool *balancer.AccountPool, model string, request GeminiGenerateContentRequest) {
+// countGeminiTokens 以生成时的提示词编码计算文本 token，附件按官方计数规则估算并按模态列出，引用显式缓存时另给出缓存的 token 数
+func countGeminiTokens(c *gin.Context, pool *balancer.AccountPool, request GeminiGenerateContentRequest, cache *geminiCache) {
 	bridge, unsupported, err := geminiToolBridge(request)
 	if err != nil {
 		writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
 	setUnsupportedParameters(c, unsupported)
-	prompt, files, err := buildGeminiPrompt(c, countClient(pool), request, false, bridge)
+	counts, err := geminiTokenCounts(c, pool, request, bridge)
 	if err != nil {
-		status := http.StatusBadRequest
-		var protocolErr *gemini.ProtocolError
-		if errors.As(err, &protocolErr) {
-			status = protocolErr.HTTPStatus
-		}
-		writeGeminiError(c, status, geminiStatusName(status), err.Error())
+		writeGeminiError(c, upstreamStatus(err), geminiUpstreamStatus(err), err.Error())
 		return
 	}
-	counts := mediaTokenCount(files)
-	counts[modalityText] += tokencount.Content(prompt)
 	total := 0
 	details := make([]gin.H, 0, len(counts))
 	for _, modality := range []mediaModality{modalityText, modalityImage, modalityAudio, modalityVideo, modalityDocument} {
@@ -341,7 +371,45 @@ func countGeminiTokens(c *gin.Context, pool *balancer.AccountPool, model string,
 			details = append(details, gin.H{"modality": string(modality), "tokenCount": tokens})
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"totalTokens": total, "promptTokensDetails": details})
+	response := gin.H{"totalTokens": total, "promptTokensDetails": details}
+	if cache != nil {
+		response["cachedContentTokenCount"] = cache.tokens
+	}
+	c.JSON(http.StatusOK, fieldorder.Official("gemini", response))
+}
+
+// geminiTokenCounts 以生成时的提示词编码返回请求各模态的输入 token 数，不读取网页，只有 systemInstruction 的请求按其作为首个 user 轮计算
+func geminiTokenCounts(c *gin.Context, pool *balancer.AccountPool, request GeminiGenerateContentRequest, bridge ToolBridge) (map[mediaModality]int, error) {
+	if len(request.Contents) == 0 && request.SystemInstruction != nil {
+		request.Contents = []GeminiContent{{Role: "user", Parts: request.SystemInstruction.Parts}}
+		request.SystemInstruction = nil
+	}
+	bridge.URLContext = false
+	prompt, files, err := buildGeminiPrompt(c, countClient(pool), request, false, bridge)
+	if err != nil {
+		var protocolErr *gemini.ProtocolError
+		if errors.As(err, &protocolErr) {
+			return nil, err
+		}
+		return nil, &gemini.ProtocolError{HTTPStatus: http.StatusBadRequest, Message: err.Error()}
+	}
+	counts := mediaTokenCount(files)
+	counts[modalityText] += tokencount.Content(prompt)
+	return counts, nil
+}
+
+// geminiPromptTokens 返回请求以生成时的提示词编码计算的输入 token 总数
+func geminiPromptTokens(c *gin.Context, pool *balancer.AccountPool, request GeminiGenerateContentRequest) (int, error) {
+	bridge, _, err := geminiToolBridge(request)
+	if err != nil {
+		return 0, &gemini.ProtocolError{HTTPStatus: http.StatusBadRequest, Message: err.Error()}
+	}
+	counts, err := geminiTokenCounts(c, pool, request, bridge)
+	total := 0
+	for _, tokens := range counts {
+		total += tokens
+	}
+	return total, err
 }
 
 // geminiToolNames 返回带 ID 的 functionCall 的调用 ID 到结果标签的映射
@@ -392,13 +460,26 @@ func buildGeminiPrompt(c *gin.Context, client *gemini.Client, request GeminiGene
 	if err != nil {
 		return "", nil, err
 	}
+	if last := request.Contents[len(request.Contents)-1]; bridge.URLContext && transcriptRole(last.Role) == "user" {
+		var text strings.Builder
+		for _, part := range last.Parts {
+			text.WriteString(part.Text + "\n")
+		}
+		section, pageFiles := pagePrompt(urlContextPages(c, client, text.String(), urlContextLimit, nil, nil))
+		if section != "" {
+			suffix += "\n\n" + section
+			files = append(files, pageFiles...)
+		}
+	}
 	return renderTranscript(turns, suffix), files, nil
 }
 
 // functionResponseText 按 Gemini 约定返回函数结果原文：output 与 error 字段分别是函数输出与错误详情，两者都没有时整个 response 是输出
-func functionResponseText(response map[string]interface{}) string {
-	output, hasOutput := response["output"]
-	failure, hasError := response["error"]
+func functionResponseText(response json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(response, &fields)
+	output, hasOutput := fields["output"]
+	failure, hasError := fields["error"]
 	if !hasOutput && !hasError {
 		return jsonValueText(response)
 	}
@@ -412,13 +493,17 @@ func functionResponseText(response map[string]interface{}) string {
 	return strings.Join(parts, "\n")
 }
 
-// jsonValueText 返回 JSON 值写入提示词的原文：字符串取原文，其余取 JSON
-func jsonValueText(value interface{}) string {
-	if text, ok := value.(string); ok {
+// jsonValueText 返回 JSON 值写入提示词的原文：字符串取原文，其余取去掉空白的 JSON 原文，对象保持客户端输入的键顺序
+func jsonValueText(value json.RawMessage) string {
+	var text string
+	if json.Unmarshal(value, &text) == nil {
 		return text
 	}
-	data, _ := json.Marshal(value)
-	return string(data)
+	var compact bytes.Buffer
+	if json.Compact(&compact, value) != nil {
+		return string(value)
+	}
+	return compact.String()
 }
 
 func decodeGeminiParts(c *gin.Context, client *gemini.Client, parts []GeminiPart, toolNames map[string]string) (string, []gemini.FileData, error) {
@@ -509,7 +594,7 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 			return bridge, nil, err
 		}
 		for field := range config {
-			if field == "responseMimeType" || field == "responseJsonSchema" || field == "responseSchema" || field == "responseFormat" || field == "thinkingConfig" || field == "imageConfig" || field == "candidateCount" || field == "stopSequences" {
+			if field == "responseMimeType" || field == "responseJsonSchema" || field == "responseSchema" || field == "responseFormat" || field == "thinkingConfig" || field == "imageConfig" || field == "candidateCount" || field == "stopSequences" || field == "maxOutputTokens" {
 				continue
 			}
 			unsupported = append(unsupported, "generationConfig."+field)
@@ -522,6 +607,11 @@ func geminiToolBridge(request GeminiGenerateContentRequest) (ToolBridge, []strin
 			}
 		}
 		_ = json.Unmarshal(imageConfig["aspectRatio"], &bridge.AspectRatio)
+		if raw, ok := config["maxOutputTokens"]; ok {
+			if err := json.Unmarshal(raw, &bridge.MaxTokens); err != nil {
+				return bridge, nil, fmt.Errorf("generationConfig.maxOutputTokens 必须是整数")
+			}
+		}
 		if raw, ok := config["stopSequences"]; ok {
 			if err := json.Unmarshal(raw, &bridge.Stop); err != nil {
 				return bridge, nil, fmt.Errorf("generationConfig.stopSequences 必须是字符串数组")
@@ -685,7 +775,7 @@ func buildGeminiResponse(result generationResult, bridge ToolBridge, includeThou
 	if err := validateHostedOutput(primary, bridge); err != nil {
 		return nil, err
 	}
-	content, calls, err := bridge.Parse(primary.Text)
+	content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -708,13 +798,19 @@ func buildGeminiResponse(result generationResult, bridge ToolBridge, includeThou
 		parts[len(parts)-1]["thoughtSignature"] = thinkingSignature(result.ResponseID, 0)
 	}
 	finish := "STOP"
+	if result.Truncated && len(calls) == 0 {
+		finish = "MAX_TOKENS"
+	}
 	candidate := gin.H{"content": gin.H{"role": "model", "parts": parts}, "finishReason": finish, "index": 0}
 	if len(primary.Citations) > 0 {
 		candidate["groundingMetadata"] = geminiGroundingMetadata(content, primary.Citations)
 	}
 	response := gin.H{
 		"candidates":   []gin.H{candidate},
-		"modelVersion": result.Model, "responseId": result.ResponseID, "conversationId": result.ConversationID,
+		"modelVersion": cmp.Or(result.ProviderModel, result.Model), "responseId": result.ResponseID,
+	}
+	if result.ConversationID != "" {
+		response["conversationId"] = result.ConversationID
 	}
 	if result.Accumulator.Usage != nil {
 		response["usageMetadata"] = geminiUsage(result.Accumulator.Usage)
@@ -788,6 +884,7 @@ func geminiCodePart(code CodeOutput) gin.H {
 
 // geminiStreamWriter 按 alt=sse 输出 SSE 事件，未指定时与官方一样输出逐个对象的 JSON 数组
 type geminiStreamWriter struct {
+	c       *gin.Context
 	w       http.ResponseWriter
 	sse     bool
 	written bool
@@ -802,11 +899,12 @@ func newGeminiStreamWriter(c *gin.Context, sse bool) *geminiStreamWriter {
 		c.Header("Content-Type", "application/json; charset=UTF-8")
 		c.Header("Cache-Control", "no-cache")
 	}
-	return &geminiStreamWriter{w: c.Writer, sse: sse}
+	return &geminiStreamWriter{c: c, w: c.Writer, sse: sse}
 }
 
 // write 输出一个 GenerateContentResponse
 func (w *geminiStreamWriter) write(payload interface{}) error {
+	payload = fieldorder.Official("gemini", payload)
 	if w.sse {
 		return writeSSEJSON(w.w, payload)
 	}
@@ -854,7 +952,7 @@ func (w *geminiStreamWriter) delta(responseID string, model string, index int, e
 
 // fail 输出 Google 错误对象
 func (w *geminiStreamWriter) fail(status int, statusName string, err error) error {
-	return w.write(gin.H{"error": gin.H{"code": status, "message": err.Error(), "status": statusName}})
+	return w.write(gin.H{"error": geminiErrorObject(status, statusName, err.Error(), retryAfterFor(w.c, status))})
 }
 
 func projectGeminiStreamTail(response gin.H, projection *streamProjection) gin.H {

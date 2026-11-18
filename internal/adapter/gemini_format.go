@@ -3,6 +3,7 @@ package adapter
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -136,60 +137,128 @@ var geminiOpaqueFields = map[string]bool{
 	"responseSchema": true, "responseJsonSchema": true, "partMetadata": true, "schema": true,
 }
 
-// geminiCamelKeys 按 proto3 JSON 规则把各层消息字段名转为 lowerCamelCase，同层两种写法并存时保留驼峰字段，自由 JSON 字段的取值原样保留
+// geminiCamelKeys 按 proto3 JSON 规则把各层消息字段名转为 lowerCamelCase，同层两种写法并存时保留驼峰字段，自由 JSON 字段的取值原样保留；只扫描一遍定位要改名的键，其余字节原样复制
 func geminiCamelKeys(raw []byte) ([]byte, bool, error) {
 	value := bytes.TrimSpace(raw)
 	if len(value) == 0 || value[0] != '{' && value[0] != '[' {
 		return raw, false, nil
 	}
-	changed := false
-	if value[0] == '[' {
-		var items []json.RawMessage
-		if err := json.Unmarshal(value, &items); err != nil {
-			return nil, false, err
-		}
-		for index, item := range items {
-			converted, itemChanged, err := geminiCamelKeys(item)
-			if err != nil {
-				return nil, false, err
-			}
-			items[index], changed = converted, changed || itemChanged
-		}
-		if !changed {
-			return raw, false, nil
-		}
-		encoded, err := json.Marshal(items)
-		return encoded, true, err
+	if !json.Valid(value) {
+		var invalid json.RawMessage
+		return nil, false, json.Unmarshal(value, &invalid)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(value, &fields); err != nil {
-		return nil, false, err
-	}
-	converted := make(map[string]json.RawMessage, len(fields))
-	for key, field := range fields {
-		name := geminiJSONName(key)
-		if name != key {
-			changed = true
-			if _, exists := fields[name]; exists {
-				continue
-			}
-		}
-		if !geminiOpaqueFields[name] {
-			var fieldChanged bool
-			var err error
-			field, fieldChanged, err = geminiCamelKeys(field)
-			if err != nil {
-				return nil, false, err
-			}
-			changed = changed || fieldChanged
-		}
-		converted[name] = field
-	}
-	if !changed {
+	scanner := camelScanner{data: value}
+	scanner.value(0, false)
+	if len(scanner.renames) == 0 {
 		return raw, false, nil
 	}
-	encoded, err := json.Marshal(converted)
-	return encoded, true, err
+	slices.SortFunc(scanner.renames, func(a, b keyRename) int { return a.start - b.start })
+	output := make([]byte, 0, len(value))
+	last := 0
+	for _, rename := range scanner.renames {
+		output = append(output, value[last:rename.start]...)
+		output = append(output, '"')
+		output = append(output, rename.name...)
+		output = append(output, '"')
+		last = rename.end
+	}
+	return append(output, value[last:]...), true, nil
+}
+
+// keyRename 是一个要改名的键：data[start:end] 是带引号的原键，name 是新键名
+type keyRename struct {
+	start, end int
+	name       string
+}
+
+// camelScanner 在合法 JSON 中定位需要改为驼峰写法的消息字段名
+type camelScanner struct {
+	data    []byte
+	renames []keyRename
+}
+
+// value 扫描从 i 开始的 JSON 值并返回其后的位置，opaque 为真时只跳过不记录
+func (s *camelScanner) value(i int, opaque bool) int {
+	i = s.space(i)
+	switch s.data[i] {
+	case '{':
+		return s.object(i, opaque)
+	case '[':
+		i = s.space(i + 1)
+		if s.data[i] == ']' {
+			return i + 1
+		}
+		for {
+			i = s.space(s.value(i, opaque))
+			if s.data[i] == ']' {
+				return i + 1
+			}
+			i++
+		}
+	case '"':
+		return s.text(i)
+	}
+	for i < len(s.data) && !strings.ContainsRune(",}] \t\r\n", rune(s.data[i])) {
+		i++
+	}
+	return i
+}
+
+// object 扫描从 i 开始的对象：成员名有下划线且同层没有驼峰写法时记为改名，自由 JSON 字段的取值不进入
+func (s *camelScanner) object(i int, opaque bool) int {
+	type member struct {
+		start, end int
+		name       string
+	}
+	var members []member
+	i = s.space(i + 1)
+	for s.data[i] != '}' {
+		start := i
+		i = s.text(i)
+		var name string
+		_ = json.Unmarshal(s.data[start:i], &name)
+		members = append(members, member{start, i, name})
+		i = s.space(i)
+		i = s.space(s.value(i+1, opaque || geminiOpaqueFields[geminiJSONName(name)]))
+		if s.data[i] == ',' {
+			i = s.space(i + 1)
+		}
+	}
+	if opaque {
+		return i + 1
+	}
+	for _, item := range members {
+		camel := geminiJSONName(item.name)
+		if camel == item.name || slices.ContainsFunc(members, func(other member) bool { return other.name == camel }) {
+			continue
+		}
+		s.renames = append(s.renames, keyRename{item.start, item.end, camel})
+	}
+	return i + 1
+}
+
+// text 返回从 i 的引号开始的字符串之后的位置
+func (s *camelScanner) text(i int) int {
+	j := i + 1
+	for {
+		quote := j + bytes.IndexByte(s.data[j:], '"')
+		escapes := 0
+		for k := quote - 1; s.data[k] == '\\'; k-- {
+			escapes++
+		}
+		if escapes%2 == 0 {
+			return quote + 1
+		}
+		j = quote + 1
+	}
+}
+
+// space 返回 i 起第一个非空白字符的位置
+func (s *camelScanner) space(i int) int {
+	for i < len(s.data) && (s.data[i] == ' ' || s.data[i] == '\t' || s.data[i] == '\r' || s.data[i] == '\n') {
+		i++
+	}
+	return i
 }
 
 // geminiJSONName 返回 proto 字段名对应的 JSON 名

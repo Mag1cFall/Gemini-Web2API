@@ -2,6 +2,7 @@ import { Check, ChevronDown } from 'lucide-react'
 import { Select as Primitive } from 'radix-ui'
 import { twMerge } from 'tailwind-merge'
 
+import { Tooltip } from '@/components/ui/tooltip'
 import { ignoreSecondaryRelease } from '@/lib/pointer'
 
 // SelectOption 是下拉框的一个选项
@@ -44,9 +45,11 @@ export function Select<T extends string>({
           className,
         )}
       >
-        <span className="truncate" title={options.find((option) => option.value === value)?.label}>
-          <Primitive.Value />
-        </span>
+        <Tooltip overflow label={options.find((option) => option.value === value)?.label}>
+          <span className="truncate">
+            <Primitive.Value />
+          </span>
+        </Tooltip>
         <Primitive.Icon className="shrink-0 text-foreground-muted">
           <ChevronDown size={16} aria-hidden />
         </Primitive.Icon>

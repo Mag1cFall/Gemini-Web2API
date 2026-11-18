@@ -5,33 +5,19 @@ import { Link } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Card, CardHeader, PageHeader } from '@/components/ui/page'
-import { Loading } from '@/components/ui/states'
+import { PagePlaceholder } from '@/components/ui/states'
 import { Tooltip } from '@/components/ui/tooltip'
 import { dashboardMessages } from '@/features/dashboard/messages'
 import { useModels } from '@/features/models/queries'
 import { useStatus } from '@/features/service/queries'
 import { firstApiKey } from '@/features/settings/apiKeys'
 import { useConfig } from '@/features/settings/queries'
-import { useUsage } from '@/features/usage/queries'
+import { useHadRequests, useUsage } from '@/features/usage/queries'
 import { serviceURL } from '@/lib/api'
 import { formatCompact, formatDuration, formatNumber, formatPercent, formatUsd } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { markEndpointCopied, readEndpointCopied } from '@/lib/onboarding'
 import { useNow } from '@/lib/time'
-
-// copiedKey 是本地存储中记录已复制接入地址或 API Key 的键
-const copiedKey = 'gemini-web2api.copied-endpoint'
-
-// ledgerSpan 是判断是否已有请求记录时查询的时间范围
-const ledgerSpan = 90 * 24 * 3_600_000
-
-// readCopied 读取本浏览器是否复制过接入地址或 API Key
-function readCopied() {
-  try {
-    return localStorage.getItem(copiedKey) === '1'
-  } catch {
-    return false
-  }
-}
 
 // Field 是卡片内的一项：上方灰色小标签，下方数值
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -105,25 +91,23 @@ export function DashboardPage() {
   const models = useModels()
   const config = useConfig()
   const usage = useUsage(3_600_000)
-  const ledger = useUsage(ledgerSpan)
-  const [copied, setCopied] = useState(readCopied)
+  const hadRequests = useHadRequests()
+  const [copied, setCopied] = useState(readEndpointCopied)
   const [revealed, setRevealed] = useState(false)
   const now = useNow(30_000)
-  if (status.isPending) return <Loading label={m.title} />
+  if (status.isPending) {
+    return <PagePlaceholder title={m.title} description={m.description} label={m.title} />
+  }
   const base = serviceURL
   const apiKey = firstApiKey(config.data?.proxy_api_key ?? '')
   const totals = usage.data?.totals
   const accounts = status.data?.accounts
   const markCopied = () => {
     setCopied(true)
-    try {
-      localStorage.setItem(copiedKey, '1')
-    } catch {
-      // 本地存储不可用时只在本次页面内记住
-    }
+    markEndpointCopied()
   }
   const imported = (accounts?.total ?? 0) > 0
-  const tried = (ledger.data?.totals.requests ?? 0) > 0
+  const tried = hadRequests.data === true || (totals?.requests ?? 0) > 0
   const showSteps = !imported || ((accounts?.available ?? 0) > 0 && !tried)
   const command =
     (navigator.userAgent.includes('Windows') ? '.\\gemini-web2api.exe' : './gemini-web2api') +

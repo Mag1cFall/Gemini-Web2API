@@ -18,7 +18,7 @@ import type { AccountsUsage } from '@/features/accounts/types'
 import { sessionKey, useSession, useStatus } from '@/features/service/queries'
 import { api, appURL } from '@/lib/api'
 import { isDesktop, maximisedEvent, nativeTitleBar, windowControl } from '@/lib/desktop'
-import { fill, type Language, languages, useI18n, useMessages } from '@/lib/i18n'
+import { fill, type Language, languages, serverText, useI18n, useMessages } from '@/lib/i18n'
 import { setTheme, useTheme } from '@/lib/theme'
 
 // BrandMark 是产品标志，Gemini Advanced 渐变四角星
@@ -153,7 +153,7 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
               tone: 'error',
               title: fill(m.refreshFailed, {
                 message: failures
-                  .map((account) => account.account_id + ': ' + String(account.error))
+                  .map((account) => account.account_id + ': ' + serverText(String(account.error)))
                   .join('; '),
               }),
             },
@@ -195,9 +195,9 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
         className="flex min-w-0 items-center gap-2 rounded-md text-md font-semibold no-drag"
       >
         <BrandMark />
-        <span className="truncate" title={m.product}>
-          {m.product}
-        </span>
+        <Tooltip overflow label={m.product}>
+          <span className="truncate">{m.product}</span>
+        </Tooltip>
       </Link>
       <div className="flex-1" />
       {!minimal && <ServiceChip />}
@@ -220,7 +220,7 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
             <DropdownMenuRadioGroup
               value={language}
               onValueChange={(value) => {
-                setLanguage(value as Language)
+                void setLanguage(value as Language)
               }}
             >
               {languages.map((item) => (

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/gin-gonic/gin"
@@ -39,7 +40,7 @@ func scopeOf(c *gin.Context) (requestScope, bool) {
 	return scope, ok && scope.pool != nil
 }
 
-// upstreamStatus 返回上游错误对应的 HTTP 状态，账号上下文窗口不足按请求过长返回 400
+// upstreamStatus 返回上游错误对应的 HTTP 状态，账号上下文窗口不足按请求过长返回 400，出口 IP 暂时受限（1060）按客户端会自动重试的 503 返回
 func upstreamStatus(err error) int {
 	if errors.Is(err, context.Canceled) {
 		return logging.StatusClientClosed
@@ -49,6 +50,9 @@ func upstreamStatus(err error) int {
 	}
 	var protocolErr *gemini.ProtocolError
 	if errors.As(err, &protocolErr) {
+		if protocolErr.Code == 1060 {
+			return http.StatusServiceUnavailable
+		}
 		if protocolErr.HTTPStatus >= 400 && protocolErr.HTTPStatus <= 599 {
 			return protocolErr.HTTPStatus
 		}
@@ -59,10 +63,13 @@ func upstreamStatus(err error) int {
 	return http.StatusBadGateway
 }
 
-// openAIUpstreamCode 返回上游错误的 OpenAI 错误码
+// openAIUpstreamCode 返回上游错误的 OpenAI 错误码，上游按输入拦截为 invalid_prompt
 func openAIUpstreamCode(err error) string {
 	if isAccountContextError(err) {
 		return "context_length_exceeded"
+	}
+	if errors.Is(err, gemini.ErrInputBlocked) {
+		return "invalid_prompt"
 	}
 	var mismatch *outputMismatchError
 	if errors.As(err, &mismatch) && mismatch.validation {
@@ -167,45 +174,75 @@ func openAIErrorType(status int) string {
 func writeOpenAIError(c *gin.Context, status int, code string, message string) {
 	message = publicMessage(c, message)
 	logging.FromContext(c.Request.Context()).Fail(status, message)
-	setRetryAfter(c, status)
-	c.JSON(status, gin.H{"error": openAIErrorObject(status, code, message)})
+	c.JSON(status, gin.H{"error": openAIErrorObject(status, code, retryMessage(message, setRetryAfter(c, status)))})
+}
+
+// openAIError 是 OpenAI 错误对象，字段按官方顺序
+type openAIError struct {
+	Message string  `json:"message"`
+	Type    string  `json:"type"`
+	Param   *string `json:"param"`
+	Code    string  `json:"code"`
 }
 
 // openAIErrorObject 返回 OpenAI 错误对象
-func openAIErrorObject(status int, code string, message string) gin.H {
-	return gin.H{"message": message, "type": openAIErrorType(status), "param": nil, "code": code}
+func openAIErrorObject(status int, code string, message string) openAIError {
+	return openAIError{Message: message, Type: openAIErrorType(status), Code: code}
 }
 
 func writeClaudeError(c *gin.Context, status int, errorType string, message string) {
 	message = publicMessage(c, message)
 	logging.FromContext(c.Request.Context()).Fail(status, message)
-	setRetryAfter(c, status)
-	c.JSON(status, gin.H{
+	c.JSON(status, fieldorder.Official("anthropic", gin.H{
 		"type":  "error",
-		"error": gin.H{"type": errorType, "message": message},
-	})
+		"error": gin.H{"type": errorType, "message": retryMessage(message, setRetryAfter(c, status))},
+	}))
 }
 
 func writeGeminiError(c *gin.Context, status int, statusName string, message string) {
 	message = publicMessage(c, message)
 	logging.FromContext(c.Request.Context()).Fail(status, message)
-	setRetryAfter(c, status)
-	c.JSON(status, gin.H{"error": gin.H{
-		"code": status, "message": message, "status": statusName,
-	}})
+	c.JSON(status, fieldorder.Official("gemini", gin.H{"error": geminiErrorObject(status, statusName, message, setRetryAfter(c, status))}))
 }
 
-// setRetryAfter 在 429、503 响应中写入请求模型最早结束冷却的秒数，没有冷却中的账号时不写
-func setRetryAfter(c *gin.Context, status int) {
-	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
-		return
+// geminiErrorObject 返回 Gemini 错误对象，seconds 大于 0 时 details 带该时长的 google.rpc.RetryInfo
+func geminiErrorObject(status int, statusName string, message string, seconds int) gin.H {
+	object := gin.H{"code": status, "message": message, "status": statusName}
+	if seconds > 0 {
+		object["details"] = []gin.H{{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": strconv.Itoa(seconds) + "s"}}
 	}
-	if seconds := retryAfterSeconds(c); seconds > 0 {
+	return object
+}
+
+// setRetryAfter 在 429、503 响应中写入 retryAfterSeconds 的秒数并返回它，没有冷却中的账号时不写并返回 0
+func setRetryAfter(c *gin.Context, status int) int {
+	seconds := retryAfterFor(c, status)
+	if seconds > 0 {
 		c.Header("Retry-After", strconv.Itoa(seconds))
 	}
+	return seconds
 }
 
-// retryAfterSeconds 返回请求模型最早结束冷却的秒数，没有冷却中的账号时为 0
+// retryAfterFor 返回 429、503 错误的重试秒数，其余状态为 0
+func retryAfterFor(c *gin.Context, status int) int {
+	if status != http.StatusTooManyRequests && status != http.StatusServiceUnavailable {
+		return 0
+	}
+	return retryAfterSeconds(c)
+}
+
+// retryMessage 在 seconds 大于 0 时于消息末尾按 OpenAI 限流消息的写法另起一句 Please try again in <seconds>s.
+func retryMessage(message string, seconds int) string {
+	if seconds <= 0 {
+		return message
+	}
+	if !strings.HasSuffix(message, ".") {
+		message += "."
+	}
+	return message + " Please try again in " + strconv.Itoa(seconds) + "s."
+}
+
+// retryAfterSeconds 返回重试的请求会被排队受理的秒数，即请求模型最早结束冷却的时刻减去 modelRecoveryWindow，至少 1 秒；没有冷却中的账号时为 0
 func retryAfterSeconds(c *gin.Context) int {
 	scope, ok := scopeOf(c)
 	if !ok {
@@ -215,24 +252,20 @@ func retryAfterSeconds(c *gin.Context) int {
 	if until.IsZero() {
 		return 0
 	}
-	return max(int(math.Ceil(time.Until(until).Seconds())), 1)
+	return max(int(math.Ceil((time.Until(until) - modelRecoveryWindow).Seconds())), 1)
 }
 
-// responsesErrorCode 返回 Responses 失败对象的错误码，限流与上下文超限按 OpenAI 错误码写出，其余为 server_error
+// responsesErrorCode 返回 Responses 失败对象的错误码，限流、上下文超限与输入拦截按 OpenAI 错误码写出，其余为 server_error
 func responsesErrorCode(err error) string {
-	if code := openAIUpstreamCode(err); code == "rate_limit_exceeded" || code == "context_length_exceeded" {
+	if code := openAIUpstreamCode(err); code == "rate_limit_exceeded" || code == "context_length_exceeded" || code == "invalid_prompt" {
 		return code
 	}
 	return "server_error"
 }
 
-// responsesFailure 记录流式响应头发出后的失败并返回 response.failed 的 error 对象，限流时正文按 OpenAI 措辞写明等待秒数
+// responsesFailure 记录流式响应头发出后的失败并返回 response.failed 的 error 对象
 func responsesFailure(c *gin.Context, err error) gin.H {
-	code, message := responsesErrorCode(err), streamFailure(c, err).Error()
-	if seconds := retryAfterSeconds(c); code == "rate_limit_exceeded" && seconds > 0 {
-		message = fmt.Sprintf("%s Please try again in %ds.", message, seconds)
-	}
-	return gin.H{"code": code, "message": message}
+	return gin.H{"code": responsesErrorCode(err), "message": streamFailure(c, err).Error()}
 }
 
 // upstreamURLPattern 匹配 Go HTTP 客户端错误中的请求方法与 URL 前缀
@@ -289,12 +322,13 @@ func publicError(c *gin.Context, err error) error {
 	return errors.New(serverErrorPrefix(upstreamStatus(err)) + publicMessage(c, err.Error()))
 }
 
-// streamFailure 记录流式响应头发出后的失败并返回去掉内部标识的错误
+// streamFailure 记录流式响应头发出后的失败并返回去掉内部标识的错误，429、503 错误在末尾写明重试秒数
 func streamFailure(c *gin.Context, err error) error {
-	if err != nil {
-		logging.FromContext(c.Request.Context()).Fail(upstreamStatus(err), err.Error())
+	if err == nil {
+		return nil
 	}
-	return publicError(c, err)
+	logging.FromContext(c.Request.Context()).Fail(upstreamStatus(err), err.Error())
+	return errors.New(retryMessage(publicError(c, err).Error(), retryAfterFor(c, upstreamStatus(err))))
 }
 
 // unavailableCapability 返回 Gemini Web 不提供某项能力的说明

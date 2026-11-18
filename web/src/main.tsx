@@ -12,7 +12,7 @@ import { Toaster } from '@/components/ui/toast'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { sessionKey } from '@/features/service/queries'
 import { ApiError } from '@/lib/api'
-import { I18nProvider, useMessages } from '@/lib/i18n'
+import { I18nProvider, loadInitialLanguage, useMessages } from '@/lib/i18n'
 import { applyTheme } from '@/lib/theme'
 
 applyTheme()
@@ -42,16 +42,18 @@ function AppToaster() {
 
 const root = document.getElementById('root')
 if (root) {
-  createRoot(root).render(
-    <StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <I18nProvider>
-          <TooltipProvider>
-            <RouterProvider router={router} />
-            <AppToaster />
-          </TooltipProvider>
-        </I18nProvider>
-      </QueryClientProvider>
-    </StrictMode>,
-  )
+  void loadInitialLanguage().then(() => {
+    createRoot(root).render(
+      <StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <I18nProvider>
+            <TooltipProvider>
+              <RouterProvider router={router} />
+              <AppToaster />
+            </TooltipProvider>
+          </I18nProvider>
+        </QueryClientProvider>
+      </StrictMode>,
+    )
+  })
 }

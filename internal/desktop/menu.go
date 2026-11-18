@@ -14,9 +14,6 @@ type menuText struct {
 	Window, Minimise, Zoom, BringAllToFront                              string
 }
 
-// defaultLocale 是页面报告界面语言之前菜单使用的语言
-const defaultLocale = "zh-CN"
-
 // menuTexts 为管理端各界面语言的菜单文字，macOS 菜单用词取自同语言 macOS 的系统菜单
 var menuTexts = map[string]menuText{
 	"zh-CN": {

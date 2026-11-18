@@ -3,6 +3,7 @@ export interface ServiceConfig {
   proxy_api_key: string
   proxy: string
   save_history: boolean
+  continue_session: boolean
   nonstream_keepalive: boolean
   fake_stream: boolean
   model_mapping: string
@@ -51,6 +52,7 @@ export type ConfigPatch = Partial<{
   proxy_api_key: string
   proxy: string
   save_history: boolean
+  continue_session: boolean
   nonstream_keepalive: boolean
   fake_stream: boolean
   model_mapping: string

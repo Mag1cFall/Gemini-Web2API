@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
@@ -95,6 +97,9 @@ func applyRequestFields(response gin.H, request ResponsesRequest) {
 	if request.TopP != nil {
 		response["top_p"] = *request.TopP
 	}
+	if request.Truncation != "" {
+		response["truncation"] = request.Truncation
+	}
 }
 
 // responsesInputItems 把请求输入整理为带 ID 的输入项：字符串输入与字符串内容转为内容数组，缺少 ID 的项按位置编号
@@ -152,14 +157,15 @@ func saveResponse(ctx context.Context, store *requestdb.Store, request Responses
 	if store == nil || !request.storesResponse() {
 		return
 	}
-	encoded, err := json.Marshal(response)
+	encoded, err := json.Marshal(fieldorder.Official("responses", response))
 	if err != nil {
 		return
 	}
 	status, _ := response["status"].(string)
+	conversation, _ := responsesConversationID(request.Conversation)
 	if err := store.SaveResponse(context.WithoutCancel(ctx), requestdb.StoredResponse{
 		ID: id, CreatedAt: time.Unix(created, 0), PreviousID: request.PreviousResponseID, Background: request.Background,
-		Status: status, Response: encoded, Input: responsesInputItems(request.Input, id),
+		Status: status, Response: encoded, Input: responsesInputItems(request.Input, id), Conversation: conversation,
 	}); err != nil {
 		logging.Warn(logging.SourceRequest, "保存响应失败", "响应", id, "错误", err)
 	}
@@ -178,7 +184,7 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 	background := c.Copy()
 	background.Request = c.Request.Clone(ctx)
 	c.Header("X-Response-ID", run.id)
-	c.JSON(http.StatusOK, shell)
+	c.JSON(http.StatusOK, fieldorder.Official("responses", shell))
 
 	go func() {
 		running := responseShell(run.id, config.MapModel(request.Model), run.created, "in_progress")
@@ -232,9 +238,15 @@ func failInterruptedResponses(store *requestdb.Store) {
 			continue
 		}
 		response["status"] = "failed"
-		response["error"] = gin.H{"code": "server_error", "message": interruptedMessage}
+		protocol := "responses"
+		if strings.HasPrefix(stored.ID, interactionIDPrefix) {
+			protocol = "interactions"
+			response["errors"] = []gin.H{{"code": "UNAVAILABLE", "message": interruptedMessage}}
+		} else {
+			response["error"] = gin.H{"code": "server_error", "message": interruptedMessage}
+		}
 		stored.Status = "failed"
-		stored.Response, _ = json.Marshal(response)
+		stored.Response, _ = json.Marshal(fieldorder.Official(protocol, response))
 		if err := store.SaveResponse(ctx, stored); err != nil {
 			logging.Warn(logging.SourceService, "保存响应失败", "响应", stored.ID, "错误", err)
 		}
@@ -351,14 +363,15 @@ func ResponseRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
 		setSSEHeaders(c)
 		stream, stop := startStreamWriter(c, openAIKeepalive, false)
 		defer stop()
-		if stored.Status == "queued" || stored.Status == "in_progress" {
-			w, _, err := replayOpening(c.Writer, stored, startingAfter)
-			if err != nil {
-				return
-			}
-			stream.setFrame(w.progressFrame())
-			startingAfter = max(startingAfter, 1)
+		if stored.Status != "queued" && stored.Status != "in_progress" {
+			_ = replayResponse(c.Writer, stored, startingAfter)
+			return
 		}
+		w, _, err := replayOpening(c.Writer, stored, startingAfter)
+		if err != nil {
+			return
+		}
+		stream.setPulse(w.progress)
 		for stored.Status == "queued" || stored.Status == "in_progress" {
 			select {
 			case <-c.Request.Context().Done():
@@ -371,7 +384,12 @@ func ResponseRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
 			}
 			stored = next
 		}
-		_ = replayResponse(c.Writer, stored, startingAfter)
+		var decoded map[string]any
+		if err := json.Unmarshal(stored.Response, &decoded); err != nil {
+			return
+		}
+		response, _ := ginValue(decoded).(gin.H)
+		_ = w.replayOutput(response)
 	}
 }
 
@@ -404,6 +422,11 @@ func replayResponse(writer http.ResponseWriter, stored requestdb.StoredResponse,
 	if err != nil {
 		return err
 	}
+	return w.replayOutput(response)
+}
+
+// replayOutput 接着开场事件输出保存的响应的各输出项事件与 completed 或 failed
+func (w *responseSequenceWriter) replayOutput(response gin.H) error {
 	if response["status"] == "failed" {
 		return w.emit("response.failed", gin.H{"response": response})
 	}
@@ -453,7 +476,7 @@ func ResponseDeleteHandler(store *requestdb.Store) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"id": id, "object": "response", "deleted": true})
+		c.JSON(http.StatusOK, fieldorder.Official("responses", gin.H{"id": id, "object": "response", "deleted": true}))
 	}
 }
 
@@ -481,7 +504,7 @@ func ResponseCancelHandler(store *requestdb.Store) gin.HandlerFunc {
 			return
 		}
 		response["status"] = "cancelled"
-		encoded, _ := json.Marshal(response)
+		encoded, _ := json.Marshal(fieldorder.Official("responses", response))
 		stored.Status, stored.Response = "cancelled", encoded
 		if err := store.SaveResponse(c.Request.Context(), stored); err != nil {
 			writeOpenAIError(c, http.StatusInternalServerError, "server_error", err.Error())
@@ -509,24 +532,43 @@ func itemID(raw json.RawMessage) string {
 	return head.ID
 }
 
-// rebuiltResponsesRequest 返回把 previous_response_id 的已保存响应链与本次输入合并为完整输入的请求，以及 instructions 是否与前序响应不同，前序响应没有保存时请求为 nil
-func rebuiltResponsesRequest(ctx context.Context, store *requestdb.Store, request ResponsesRequest) (*ResponsesRequest, bool) {
-	if store == nil || request.PreviousResponseID == "" {
+// rebuiltResponsesRequest 返回把已保存的前文与本次输入合并为完整输入的请求，以及 instructions 是否与最近一个前序响应不同；前文为 previous_response_id 的响应链，续接官网会话开关关闭时也可为 conversation 中保存的全部响应，没有保存时请求为 nil
+func rebuiltResponsesRequest(ctx context.Context, store *requestdb.Store, request ResponsesRequest, conversationID string) (*ResponsesRequest, bool) {
+	if store == nil {
 		return nil, false
 	}
-	previous, err := store.Response(ctx, request.PreviousResponseID)
-	if err != nil {
+	var history []json.RawMessage
+	var latest requestdb.StoredResponse
+	switch {
+	case request.PreviousResponseID != "":
+		previous, err := store.Response(ctx, request.PreviousResponseID)
+		if err != nil {
+			return nil, false
+		}
+		history, latest = slices.Concat(responseChainItems(ctx, store, previous), responseItems(previous)), previous
+	case conversationID != "" && !continueSession.Load():
+		turns, _ := store.ConversationResponses(ctx, conversationID)
+		if len(turns) == 0 {
+			return nil, false
+		}
+		for _, turn := range turns {
+			var input []json.RawMessage
+			_ = json.Unmarshal(turn.Input, &input)
+			history = append(append(history, input...), responseItems(turn)...)
+		}
+		latest = turns[len(turns)-1]
+	default:
 		return nil, false
 	}
 	var input []json.RawMessage
 	_ = json.Unmarshal(responsesInputItems(request.Input, ""), &input)
-	items, _ := json.Marshal(slices.Concat(responseChainItems(ctx, store, previous), responseItems(previous), input))
+	items, _ := json.Marshal(slices.Concat(history, input))
 	rebuilt := request
 	rebuilt.PreviousResponseID, rebuilt.Input = "", items
 	var stored struct {
 		Instructions string `json:"instructions"`
 	}
-	_ = json.Unmarshal(previous.Response, &stored)
+	_ = json.Unmarshal(latest.Response, &stored)
 	return &rebuilt, stored.Instructions != request.Instructions
 }
 
@@ -605,12 +647,12 @@ func ResponseInputItemsHandler(store *requestdb.Store) gin.HandlerFunc {
 		if len(page) > 0 {
 			list["first_id"], list["last_id"] = itemID(page[0]), itemID(page[len(page)-1])
 		}
-		c.JSON(http.StatusOK, list)
+		c.JSON(http.StatusOK, fieldorder.Official("responses", list))
 	}
 }
 
-// ResponsesInputTokensHandler 以与生成相同的提示词编码计算 Responses 请求的输入 token，续接时计入会话已有上下文
-func ResponsesInputTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
+// ResponsesInputTokensHandler 以与生成相同的提示词编码计算 Responses 请求的输入 token，续接时计入会话已有上下文，不续接会话时计入已保存的前文
+func ResponsesInputTokensHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var request ResponsesRequest
 		if err := decodeRequest(c, &request); err != nil {
@@ -638,10 +680,22 @@ func ResponsesInputTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
+		if err := continuationInputError("X-Conversation-ID", c.GetHeader("X-Conversation-ID")); err != nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
 		contextTokens, continuation := 0, false
 		if key := conversationKey(request.PreviousResponseID, conversationID, c.GetHeader("X-Conversation-ID")); key != "" {
 			if _, _, tokens, ok := conversations.get(key); ok {
 				contextTokens, continuation = tokens, true
+			} else if request.PreviousResponseID != "" {
+				writeResponseNotFound(c, request.PreviousResponseID)
+				return
+			}
+		} else if request.PreviousResponseID != "" || conversationID != "" {
+			rebuilt, _ := rebuiltResponsesRequest(c.Request.Context(), store, request, conversationID)
+			if rebuilt != nil {
+				request = *rebuilt
 			} else if request.PreviousResponseID != "" {
 				writeResponseNotFound(c, request.PreviousResponseID)
 				return
@@ -655,6 +709,6 @@ func ResponsesInputTokensHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"object": "response.input_tokens", "input_tokens": contextTokens + tokencount.Content(prompt) + mediaTokens(files)})
+		c.JSON(http.StatusOK, fieldorder.Official("responses", gin.H{"object": "response.input_tokens", "input_tokens": contextTokens + tokencount.Content(prompt) + mediaTokens(files)}))
 	}
 }

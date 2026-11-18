@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { LoaderCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
+import { appMessages } from '@/app/messages'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
@@ -11,6 +12,7 @@ import { Input, Textarea } from '@/components/ui/input'
 import { PageHeader, Section } from '@/components/ui/page'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { toast } from '@/components/ui/toast'
+import { DisabledHint, Tooltip } from '@/components/ui/tooltip'
 import { AccountTasks } from '@/features/accounts/AccountTasks'
 import { importMessages } from '@/features/accounts/messages'
 import { chromeProfilesKey, tasksKey } from '@/features/accounts/queries'
@@ -18,10 +20,12 @@ import type { ChromeProfiles, CookieAccount, PairingToken } from '@/features/acc
 import { api, serviceURL } from '@/lib/api'
 import { formatDateTime } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { useNow } from '@/lib/time'
 
-// ChromeImport 是从本机 Chrome Profile 导入
+// ChromeImport 是从本机 Chrome Profile 导入，已导入的 Profile 可再次导入以更新登录
 function ChromeImport() {
   const m = useMessages(importMessages)
+  const app = useMessages(appMessages)
   const client = useQueryClient()
   const [selected, setSelected] = useState<string[]>([])
   const [proxy, setProxy] = useState('')
@@ -47,12 +51,14 @@ function ChromeImport() {
       <ErrorState
         title={m.chromeTitle}
         error={profiles.error}
-        retryLabel={m.chromeTitle}
+        retryLabel={app.retry}
         onRetry={() => void profiles.refetch()}
       />
     )
   }
   const items = profiles.data.profiles
+  const importable = items.filter((profile) => profile.importable).map((profile) => profile.email)
+  const allSelected = importable.length > 0 && importable.every((email) => selected.includes(email))
   const toggle = (email: string) => {
     setSelected((current) =>
       current.includes(email) ? current.filter((item) => item !== email) : [...current, email],
@@ -63,48 +69,69 @@ function ChromeImport() {
       {items.length === 0 ? (
         <p className="text-sm text-foreground-muted">{m.noProfiles}</p>
       ) : (
-        <ul className="-mx-5 -mt-4 flex flex-col divide-y divide-border border-b border-border">
-          {items.map((profile) => (
-            <li key={profile.profile + '/' + profile.email}>
-              <label className="flex cursor-pointer items-center gap-3 px-5 py-3 hover:bg-hover has-disabled:cursor-default has-disabled:opacity-70">
-                <input
-                  type="checkbox"
-                  className="size-4 accent-primary"
-                  checked={selected.includes(profile.email)}
-                  disabled={profile.imported || !profile.importable}
-                  onChange={() => {
-                    toggle(profile.email)
-                  }}
-                />
-                <span className="flex min-w-0 flex-1 flex-col">
-                  <span
-                    className="truncate text-base font-medium"
-                    title={profile.email || profile.display_name || profile.profile}
-                  >
-                    {profile.email || profile.display_name || profile.profile}
+        <div className="-mx-5 -mt-4 border-b border-border">
+          <label className="flex cursor-pointer items-center gap-3 border-b border-border px-5 py-3 text-sm text-foreground-muted hover:bg-hover has-disabled:cursor-default has-disabled:opacity-70">
+            <input
+              type="checkbox"
+              className="size-4 accent-primary"
+              checked={allSelected}
+              disabled={importable.length === 0}
+              ref={(node) => {
+                if (node) node.indeterminate = selected.length > 0 && !allSelected
+              }}
+              onChange={() => {
+                setSelected(allSelected ? [] : importable)
+              }}
+            />
+            {m.selectAllProfiles}
+          </label>
+          <ul className="flex max-h-[360px] flex-col divide-y divide-border overflow-y-auto">
+            {items.map((profile) => (
+              <li key={profile.profile + '/' + profile.email}>
+                <label className="flex cursor-pointer items-center gap-3 px-5 py-3 hover:bg-hover has-disabled:cursor-default has-disabled:opacity-70">
+                  <input
+                    type="checkbox"
+                    className="size-4 accent-primary"
+                    checked={selected.includes(profile.email)}
+                    disabled={!profile.importable}
+                    onChange={() => {
+                      toggle(profile.email)
+                    }}
+                  />
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <Tooltip
+                      overflow
+                      label={profile.email || profile.display_name || profile.profile}
+                    >
+                      <span className="truncate text-base font-medium">
+                        {profile.email || profile.display_name || profile.profile}
+                      </span>
+                    </Tooltip>
+                    <Tooltip
+                      overflow
+                      label={[profile.display_name, profile.profile].filter(Boolean).join(' · ')}
+                    >
+                      <span className="truncate text-xs text-foreground-muted">
+                        {[profile.display_name, profile.profile].filter(Boolean).join(' · ')}
+                      </span>
+                    </Tooltip>
                   </span>
-                  <span
-                    className="truncate text-xs text-foreground-muted"
-                    title={[profile.display_name, profile.profile].filter(Boolean).join(' · ')}
-                  >
-                    {[profile.display_name, profile.profile].filter(Boolean).join(' · ')}
-                  </span>
-                </span>
-                {profile.imported ? (
-                  <Badge tone="neutral">{m.imported}</Badge>
-                ) : !profile.importable ? (
-                  <Badge tone="warning">
-                    {profile.reason === 'read_failed'
-                      ? m.readFailed
-                      : profile.reason === 'needs_reauth'
-                        ? m.needsReauth
-                        : m.notSignedIn}
-                  </Badge>
-                ) : null}
-              </label>
-            </li>
-          ))}
-        </ul>
+                  {!profile.importable ? (
+                    <Badge tone="warning">
+                      {profile.reason === 'read_failed'
+                        ? m.readFailed
+                        : profile.reason === 'needs_reauth'
+                          ? m.needsReauth
+                          : m.notSignedIn}
+                    </Badge>
+                  ) : profile.imported ? (
+                    <Badge tone="neutral">{m.imported}</Badge>
+                  ) : null}
+                </label>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       <Field id="chrome-proxy" label={m.proxy} description={m.proxyHint}>
         <Input
@@ -117,15 +144,17 @@ function ChromeImport() {
         />
       </Field>
       <div>
-        <Button
-          disabled={selected.length === 0}
-          loading={run.isPending}
-          onClick={() => {
-            run.mutate()
-          }}
-        >
-          {m.importSelected}
-        </Button>
+        <DisabledHint reason={selected.length === 0 ? m.selectFirst : ''}>
+          <Button
+            disabled={selected.length === 0}
+            loading={run.isPending}
+            onClick={() => {
+              run.mutate()
+            }}
+          >
+            {m.importSelected}
+          </Button>
+        </DisabledHint>
       </div>
     </Section>
   )
@@ -230,9 +259,9 @@ function CookieImport() {
                       setFlipped(next)
                     }}
                   />
-                  <span className="min-w-0 flex-1 truncate text-base" title={account.email}>
-                    {account.email}
-                  </span>
+                  <Tooltip overflow label={account.email}>
+                    <span className="min-w-0 flex-1 truncate text-base">{account.email}</span>
+                  </Tooltip>
                   {account.imported && <Badge tone="neutral">{m.imported}</Badge>}
                 </label>
               </li>
@@ -251,15 +280,17 @@ function CookieImport() {
         />
       </Field>
       <div>
-        <Button
-          disabled={selected.length === 0}
-          loading={run.isPending}
-          onClick={() => {
-            run.mutate()
-          }}
-        >
-          {m.importSelected}
-        </Button>
+        <DisabledHint reason={selected.length === 0 ? m.selectFirst : ''}>
+          <Button
+            disabled={selected.length === 0}
+            loading={run.isPending}
+            onClick={() => {
+              run.mutate()
+            }}
+          >
+            {m.importSelected}
+          </Button>
+        </DisabledHint>
       </div>
     </Section>
   )
@@ -277,21 +308,51 @@ const pairingInsecure =
   !['localhost', '[::1]'].includes(window.location.hostname) &&
   !/^127\.\d+\.\d+\.\d+$/.test(window.location.hostname)
 
-// RemotePairing 生成配对令牌并给出 setup --remote 命令
+// countdown 把剩余毫秒显示为 分:秒
+function countdown(ms: number) {
+  const seconds = Math.ceil(ms / 1000)
+  return String(Math.floor(seconds / 60)) + ':' + String(seconds % 60).padStart(2, '0')
+}
+
+// pairingKey 是本标签页保存最近生成的配对令牌的键，刷新页面后令牌与剩余有效时间仍显示
+const pairingKey = 'gemini-web2api.pairing'
+
+// savedPairing 读取本标签页保存的配对令牌
+function savedPairing(): PairingToken | undefined {
+  try {
+    const saved = sessionStorage.getItem(pairingKey)
+    return saved ? (JSON.parse(saved) as PairingToken) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// RemotePairing 生成配对令牌并给出 setup --remote 命令，令牌保存在本标签页直到过期
 function RemotePairing() {
   const m = useMessages(importMessages)
   const { locale } = useI18n()
+  const now = useNow(1000)
+  const [pairing, setPairing] = useState(savedPairing)
   const create = useMutation({
     mutationFn: () => api<PairingToken>('/api/pairing', { method: 'POST' }),
+    onSuccess: (token) => {
+      setPairing(token)
+      try {
+        sessionStorage.setItem(pairingKey, JSON.stringify(token))
+      } catch {
+        // 会话存储不可用时只在本次页面显示
+      }
+    },
     onError: (error) => {
       toast({ tone: 'error', title: error.message })
     },
   })
-  const pairing = create.data
+  const remaining = pairing ? new Date(pairing.expires_at).getTime() - now.getTime() : 0
   return (
     <Section title={m.pairingTitle} description={m.pairingHint}>
       {pairingInsecure && <Callout tone="warning">{m.pairingInsecure}</Callout>}
-      {pairing && (
+      {pairing && remaining <= 0 && <Callout tone="warning">{m.pairingExpired}</Callout>}
+      {pairing && remaining > 0 && (
         <div className="flex flex-col gap-3">
           {[
             { label: m.pairingCommand, value: pairingCommand },
@@ -309,14 +370,15 @@ function RemotePairing() {
           ))}
           <p className="text-xs text-foreground-muted">
             {fill(m.pairingExpires, {
-              time: formatDateTime(new Date(pairing.expires_at), new Date(), locale),
+              time: formatDateTime(new Date(pairing.expires_at), now, locale),
+              remaining: countdown(remaining),
             })}
           </p>
         </div>
       )}
       <div>
         <Button
-          variant={pairing ? 'secondary' : 'primary'}
+          variant={pairing && remaining > 0 ? 'secondary' : 'primary'}
           loading={create.isPending}
           onClick={() => {
             create.mutate()

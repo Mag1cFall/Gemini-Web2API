@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Table, Td, Th } from '@/components/ui/table'
+import { DisabledHint, Tooltip } from '@/components/ui/tooltip'
 import {
   accountsMessages,
   accountStateMessages,
@@ -18,7 +19,7 @@ import { stateTone } from '@/features/accounts/usage'
 import { useModels } from '@/features/models/queries'
 import { api } from '@/lib/api'
 import { formatDuration, formatPercent } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 
 // Run 是一个账号与模型组合的预热进度，result 在完成后出现
 interface Run {
@@ -40,53 +41,65 @@ function Picker({
   legend: string
   selectAll: string
   empty: string
-  options: { value: string; label: string; badge?: ReactNode }[]
+  options: { value: string; label: string; badge?: ReactNode; disabledReason?: string }[]
   picked: ReadonlySet<string>
   onChange: (next: ReadonlySet<string>) => void
 }) {
-  const chosen = options.filter((option) => picked.has(option.value)).length
+  const enabled = options.filter((option) => option.disabledReason === undefined)
+  const chosen = enabled.filter((option) => picked.has(option.value)).length
   return (
     <fieldset className="flex min-w-0 flex-col">
       <legend className="mb-2 text-sm font-medium">{legend}</legend>
       {options.length === 0 ? (
         <p className="text-sm text-foreground-muted">{empty}</p>
       ) : (
-        <div className="max-h-72 flex flex-col overflow-y-auto rounded-md border border-border">
+        <div className="flex max-h-[288px] flex-col overflow-y-auto rounded-md border border-border">
           <label className="flex items-center gap-2 border-b border-border bg-muted px-3 py-2 text-sm">
             <input
               type="checkbox"
               className="size-4 accent-primary"
-              checked={chosen === options.length}
+              checked={enabled.length > 0 && chosen === enabled.length}
+              disabled={enabled.length === 0}
               ref={(node) => {
-                if (node) node.indeterminate = chosen > 0 && chosen < options.length
+                if (node) node.indeterminate = chosen > 0 && chosen < enabled.length
               }}
               onChange={() => {
                 onChange(
-                  new Set(chosen === options.length ? [] : options.map((option) => option.value)),
+                  new Set(chosen === enabled.length ? [] : enabled.map((option) => option.value)),
                 )
               }}
             />
             {selectAll}
           </label>
-          {options.map((option) => (
-            <label
-              key={option.value}
-              className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-hover"
-            >
-              <input
-                type="checkbox"
-                className="size-4 accent-primary"
-                checked={picked.has(option.value)}
-                onChange={() => {
-                  const next = new Set(picked)
-                  if (!next.delete(option.value)) next.add(option.value)
-                  onChange(next)
-                }}
-              />
-              <span className="min-w-0 flex-1 wrap-anywhere">{option.label}</span>
-              {option.badge}
-            </label>
-          ))}
+          {options.map((option) => {
+            const row = (
+              <label
+                key={option.value}
+                className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-hover has-disabled:cursor-not-allowed has-disabled:text-foreground-muted"
+              >
+                <input
+                  type="checkbox"
+                  className="size-4 accent-primary"
+                  disabled={option.disabledReason !== undefined}
+                  checked={option.disabledReason === undefined && picked.has(option.value)}
+                  onChange={() => {
+                    const next = new Set(picked)
+                    if (!next.delete(option.value)) next.add(option.value)
+                    onChange(next)
+                  }}
+                />
+                <span className="min-w-0 flex-1 wrap-anywhere">{option.label}</span>
+                {option.badge}
+              </label>
+            )
+            return option.disabledReason === undefined ? (
+              row
+            ) : (
+              <Tooltip key={option.value} label={option.disabledReason} side="left">
+                {row}
+              </Tooltip>
+            )
+          })}
         </div>
       )}
     </fieldset>
@@ -113,7 +126,13 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
       setPickedAccounts(
         new Set(
           selected.length > 0
-            ? selected
+            ? selected.filter((id) =>
+                accounts.some(
+                  (account) =>
+                    account.account_id === id &&
+                    (account.state === 'ready' || account.state === 'disabled'),
+                ),
+              )
             : accounts
                 .filter((account) => account.state === 'ready')
                 .map((account) => account.account_id),
@@ -168,12 +187,14 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogTrigger asChild>
-        <Button variant="secondary" disabled={accounts.length === 0}>
-          <Flame size={16} aria-hidden />
-          {m.open}
-        </Button>
-      </DialogTrigger>
+      <DisabledHint reason={accounts.length === 0 ? m.noAccountsHint : ''}>
+        <DialogTrigger asChild>
+          <Button variant="secondary" disabled={accounts.length === 0}>
+            <Flame size={16} aria-hidden />
+            {m.open}
+          </Button>
+        </DialogTrigger>
+      </DisabledHint>
       <DialogContent
         title={m.open}
         description={m.description}
@@ -210,14 +231,16 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
               >
                 {m.cancel}
               </Button>
-              <Button
-                disabled={total === 0}
-                onClick={() => {
-                  void start()
-                }}
-              >
-                {fill(m.start, { count: total })}
-              </Button>
+              <DisabledHint reason={total === 0 ? m.pickFirst : ''}>
+                <Button
+                  disabled={total === 0}
+                  onClick={() => {
+                    void start()
+                  }}
+                >
+                  {fill(m.start, { count: total })}
+                </Button>
+              </DisabledHint>
             </>
           )
         }
@@ -256,8 +279,8 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                               </span>
                             </span>
                             {run.result.error && (
-                              <p className="max-w-80 text-xs break-words text-error-text">
-                                {run.result.error}
+                              <p className="max-w-[320px] text-xs break-words text-error-text">
+                                {serverText(run.result.error)}
                               </p>
                             )}
                             {run.result.usage?.current && (
@@ -309,6 +332,9 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                 value: account.account_id,
                 label: account.email ?? account.account_id,
                 badge: <Badge tone={stateTone(account.state)}>{sm[account.state]}</Badge>,
+                ...(account.state === 'ready' || account.state === 'disabled'
+                  ? {}
+                  : { disabledReason: m.notReady }),
               }))}
               picked={pickedAccounts}
               onChange={setPickedAccounts}

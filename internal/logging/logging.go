@@ -34,14 +34,21 @@ const (
 	EventRequestFinished = "request.finished"
 )
 
-// Event 是一条运行日志事件
+// Event 是一条运行日志事件，Message 为事件名称，Fields 为按顺序排列的字段
 type Event struct {
 	Time    time.Time    `json:"time"`
 	Level   string       `json:"level"`
 	Source  string       `json:"source"`
 	Message string       `json:"message"`
+	Fields  []Field      `json:"fields,omitempty"`
 	Event   string       `json:"event"`
 	Request *RequestInfo `json:"request,omitempty"`
+}
+
+// Field 是日志事件的一个字段，Key 为空时只有取值
+type Field struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 // Options 是日志输出配置
@@ -91,7 +98,7 @@ func Setup(options Options) error {
 	format := strings.ToLower(strings.TrimSpace(options.Format))
 	switch format {
 	case "", "text":
-		console = newTextConsole(writer).write
+		console = newTextConsole(writer, consoleTimeLayout).write
 	case "json":
 		console = newJSONConsole(writer)
 	default:
@@ -219,21 +226,32 @@ func log(level slog.Level, source string, stage string, fields []any) {
 	if !Enabled(level) {
 		return
 	}
-	Publish(Event{Level: levelName(level), Source: source, Message: Message(stage, fields...)})
+	Publish(Event{Level: levelName(level), Source: source, Message: stage, Fields: Fields(fields...)})
 }
 
-// Message 把阶段名与键值对拼成“阶段 | 键=值”，键为空字符串时只写值
-func Message(stage string, fields ...any) string {
+// Fields 把键值对转为有序字段，键为空字符串时只有取值
+func Fields(pairs ...any) []Field {
+	if len(pairs) < 2 {
+		return nil
+	}
+	fields := make([]Field, 0, len(pairs)/2)
+	for index := 0; index+1 < len(pairs); index += 2 {
+		fields = append(fields, Field{Key: fmt.Sprint(pairs[index]), Value: FormatValue(pairs[index+1])})
+	}
+	return fields
+}
+
+// Text 返回事件的单行文字“名称 | 键=值”，键为空的字段只写值
+func (e Event) Text() string {
 	var builder strings.Builder
-	builder.WriteString(stage)
-	for index := 0; index+1 < len(fields); index += 2 {
-		key := fmt.Sprint(fields[index])
+	builder.WriteString(e.Message)
+	for _, field := range e.Fields {
 		builder.WriteString(" | ")
-		if key != "" {
-			builder.WriteString(key)
+		if field.Key != "" {
+			builder.WriteString(field.Key)
 			builder.WriteByte('=')
 		}
-		builder.WriteString(FormatValue(fields[index+1]))
+		builder.WriteString(field.Value)
 	}
 	return builder.String()
 }
@@ -274,11 +292,4 @@ func levelName(level slog.Level) string {
 		return "INFO"
 	}
 	return "DEBUG"
-}
-
-// History 返回保留的最近事件
-func History() []Event {
-	std.mu.Lock()
-	defer std.mu.Unlock()
-	return append([]Event(nil), std.history[max(0, len(std.history)-historyLimit):]...)
 }

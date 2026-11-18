@@ -36,7 +36,7 @@ func (c *Client) acceptTaskTerms(ctx context.Context, bootstrap Bootstrap, model
 		return err
 	}
 	_, err = c.batchExecute(ctx, bootstrap, batchRequest{
-		rpcID: "UVb0T", payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: model.Mode, variant: model.Variant, level: level, untimed: true,
+		rpcID: "UVb0T", payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: model.Mode, variant: model.Variant, level: level,
 	})
 	return err
 }

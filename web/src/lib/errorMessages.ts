@@ -1,4 +1,4 @@
-import { defineMessages, fill, languages } from '@/lib/i18n'
+import { defineMessages, fill, languages, serverText } from '@/lib/i18n'
 
 // errorMessages 是管理 API 错误 code 在各语言的文案，{detail} 为后端返回的具体原因
 const errorMessages = defineMessages({
@@ -25,8 +25,8 @@ const errorMessages = defineMessages({
     pairing_token_invalid: '配对令牌无效或已过期',
     usage_failed: '无法读取用量：{detail}',
     usage_records_failed: '无法读取请求记录：{detail}',
-    request_body_not_found: '没有这次请求的内文：{detail}',
-    request_body_failed: '无法读取请求内文：{detail}',
+    request_body_not_found: '没有这次请求的正文：{detail}',
+    request_body_failed: '无法读取请求正文：{detail}',
   },
   'zh-TW': {
     network: '無法連線到服務',
@@ -187,11 +187,13 @@ const errorMessages = defineMessages({
   },
 })
 
-// localizeError 返回 code 在当前界面语言的文案，未知 code 或界面语言未确定时返回后端原文
+// localizeError 返回 code 在当前界面语言的文案，后端原因与未知 code 的原文按服务文案翻译
 export function localizeError(code: string, message: string): string {
   const language = languages.find((item) => item.code === document.documentElement.lang)?.code
   if (!language) return message
   const table: Record<string, string> = errorMessages[language]
   const template = Object.hasOwn(table, code) ? table[code] : undefined
-  return template === undefined ? message : fill(template, { detail: message })
+  return template === undefined
+    ? serverText(message)
+    : fill(template, { detail: serverText(message) })
 }

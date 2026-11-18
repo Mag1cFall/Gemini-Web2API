@@ -89,7 +89,7 @@ export function DurationInput({
           value: item,
           label: units[item],
         }))}
-        className="w-[112px] shrink-0"
+        className="min-w-[112px] shrink-0"
       />
     </div>
   )

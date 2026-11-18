@@ -2,11 +2,13 @@ import { Boxes } from 'lucide-react'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 
+import { appMessages } from '@/app/messages'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardEmpty, CardHeader, CountBadge, PageHeader } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
-import { ErrorState, Loading } from '@/components/ui/states'
+import { ErrorState, PagePlaceholder } from '@/components/ui/states'
 import { Table, Td, Th } from '@/components/ui/table'
+import { Tooltip } from '@/components/ui/tooltip'
 import { modelsMessages } from '@/features/models/messages'
 import { ModelDetailSheet } from '@/features/models/ModelDetailSheet'
 import { useModels } from '@/features/models/queries'
@@ -16,18 +18,21 @@ import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 // ModelsPage 列出公开模型目录，搜索词写入地址的 q 参数，点模型名称打开详情
 export function ModelsPage() {
   const m = useMessages(modelsMessages)
+  const app = useMessages(appMessages)
   const { locale } = useI18n()
   const [params, setParams] = useSearchParams()
   const q = params.get('q') ?? ''
   const models = useModels()
   const [selected, setSelected] = useState<string | null>(null)
-  if (models.isPending) return <Loading label={m.title} />
+  if (models.isPending) {
+    return <PagePlaceholder title={m.title} description={m.description} label={m.title} />
+  }
   if (models.isError) {
     return (
       <ErrorState
         title={m.title}
         error={models.error}
-        retryLabel={m.title}
+        retryLabel={app.retry}
         onRetry={() => void models.refetch()}
       />
     )
@@ -108,12 +113,11 @@ export function ModelsPage() {
                       </div>
                     </Td>
                     <Td className="max-w-0">
-                      <div
-                        title={capabilities}
-                        className="truncate font-mono text-foreground-muted"
-                      >
-                        {capabilities}
-                      </div>
+                      <Tooltip overflow label={capabilities}>
+                        <div className="truncate font-mono text-foreground-muted">
+                          {capabilities}
+                        </div>
+                      </Tooltip>
                     </Td>
                     <Td className="font-mono whitespace-nowrap text-foreground-muted @max-[860px]:hidden">
                       {model.thinking_levels.join(' · ') || m.none}

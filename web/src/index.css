@@ -115,7 +115,6 @@
   --container-cell: 160px;
   --container-dialog: 440px;
   --container-dialog-wide: 640px;
-  --container-sheet: 720px;
   --container-sidebar: 240px;
   --container-field: 360px;
   --container-prose: 640px;
@@ -147,12 +146,10 @@
   --animate-fade-out: fade-out var(--duration-fast) var(--ease-standard);
   --animate-pop-in: pop-in var(--duration-base) var(--ease-standard);
   --animate-pop-out: pop-out var(--duration-fast) var(--ease-standard);
-  --animate-sheet-in: sheet-in var(--duration-base) var(--ease-standard);
-  --animate-sheet-out: sheet-out var(--duration-fast) var(--ease-standard);
   --animate-drawer-in: drawer-in var(--duration-base) var(--ease-standard);
   --animate-drawer-out: drawer-out var(--duration-fast) var(--ease-standard);
-  --animate-page-in: pop-in var(--duration-fast) var(--ease-standard);
   --animate-spin: spin 900ms linear infinite;
+  --animate-pulse: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 
   @keyframes fade-in {
     from {
@@ -176,18 +173,6 @@
       transform: translateY(-4px);
     }
   }
-  @keyframes sheet-in {
-    from {
-      transform: translateX(4px);
-      opacity: 0;
-    }
-  }
-  @keyframes sheet-out {
-    to {
-      transform: translateX(4px);
-      opacity: 0;
-    }
-  }
   @keyframes drawer-in {
     from {
       transform: translateX(-16px);
@@ -203,6 +188,11 @@
   @keyframes spin {
     to {
       transform: rotate(360deg);
+    }
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.5;
     }
   }
 }
@@ -380,6 +370,61 @@
   .animate-spin {
     animation-duration: 1800ms !important;
     animation-iteration-count: infinite !important;
+  }
+}
+
+/* 切换配色的这一帧关闭过渡，全部元素同时换色 */
+[data-theme-switching] *,
+[data-theme-switching] *::before,
+[data-theme-switching] *::after {
+  transition: none !important;
+}
+
+/* 表格容器窄于 480px 时每行排成一张卡片，单元格前显示所在列的表头；单元格的宽高、边框与内边距改为卡片样式，显示方式仍以 hidden 等工具类优先 */
+@layer components {
+  @container data-table (width < 480px) {
+    .data-table thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .data-table,
+    .data-table tbody,
+    .data-table tr {
+      display: block;
+    }
+    .data-table tr {
+      border-top: 1px solid var(--color-border);
+      padding-block: 8px;
+    }
+    .data-table td {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      width: auto !important;
+      height: auto !important;
+      max-width: none !important;
+      border-top: 0 !important;
+      padding: 4px 20px !important;
+      min-width: 0;
+      white-space: normal !important;
+      overflow-wrap: anywhere;
+      text-align: right;
+    }
+    .data-table td > * {
+      min-width: 0;
+    }
+    .data-table td[data-label]:not([data-label=''])::before {
+      content: attr(data-label);
+      flex-shrink: 0;
+      color: var(--color-foreground-muted);
+      font-size: var(--text-xs);
+      text-align: left;
+    }
   }
 }
 

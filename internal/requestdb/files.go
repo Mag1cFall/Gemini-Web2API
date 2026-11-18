@@ -123,6 +123,7 @@ func (store *Store) CreateFile(ctx context.Context, file StoredFile, content io.
 		_, _ = store.db.ExecContext(ctx, `DELETE FROM files WHERE id=?`, file.ID)
 		return StoredFile{}, err
 	}
+	store.purgeFiles(ctx)
 	return file, nil
 }
 
@@ -138,7 +139,7 @@ func (store *Store) UpdateFile(ctx context.Context, file StoredFile) error {
 
 // File 返回未过期文件的元数据，不存在时返回 ErrNotFound
 func (store *Store) File(ctx context.Context, id string) (StoredFile, error) {
-	store.purgeExpiredFiles(ctx)
+	store.purgeFiles(ctx)
 	rows, err := store.reads.QueryContext(ctx, `SELECT `+fileColumns+` FROM files WHERE id=?`, id)
 	if err != nil {
 		return StoredFile{}, err
@@ -183,7 +184,7 @@ func (store *Store) ReadFile(ctx context.Context, id string) (StoredFile, []byte
 
 // Files 按查询返回一页未过期文件与是否还有下一页
 func (store *Store) Files(ctx context.Context, query FileQuery) ([]StoredFile, bool, error) {
-	store.purgeExpiredFiles(ctx)
+	store.purgeFiles(ctx)
 	where, args := []string{"1=1"}, []any{}
 	if query.Purpose != "" {
 		where, args = append(where, "purpose=?"), append(args, query.Purpose)
@@ -269,22 +270,32 @@ func scanFiles(rows *sql.Rows) ([]StoredFile, error) {
 	return files, rows.Err()
 }
 
-// purgeExpiredFiles 删除已过期的文件与生成超过 GeneratedRetention 的生成文件
-func (store *Store) purgeExpiredFiles(ctx context.Context) {
+// purgeFiles 删除已过期的文件、生成超过 GeneratedRetention 的生成文件，以及未过期文件总量超过 FilesLimit 时从最早起超出的文件
+func (store *Store) purgeFiles(ctx context.Context) {
 	now := time.Now()
-	rows, err := store.reads.QueryContext(ctx, `SELECT id FROM files WHERE expires_at > 0 AND expires_at < ? OR source = 'generated' AND created_at < ?`,
-		now.UnixMilli(), now.Add(-GeneratedRetention).UnixMilli())
+	rows, err := store.reads.QueryContext(ctx, `SELECT id, expired FROM (SELECT id, expired,
+ SUM(bytes) FILTER (WHERE NOT expired) OVER (ORDER BY created_at DESC, id DESC) AS total FROM (SELECT id, created_at, bytes,
+ expires_at > 0 AND expires_at < ? OR source = 'generated' AND created_at < ? AS expired FROM files)) WHERE expired OR total > ?`,
+		now.UnixMilli(), now.Add(-GeneratedRetention).UnixMilli(), FilesLimit)
 	if err != nil {
 		return
 	}
 	var ids []string
+	overflow := 0
 	for rows.Next() {
 		var id string
-		if rows.Scan(&id) == nil {
+		var expired bool
+		if rows.Scan(&id, &expired) == nil {
 			ids = append(ids, id)
+			if !expired {
+				overflow++
+			}
 		}
 	}
 	_ = rows.Close()
+	if overflow > 0 {
+		logging.Info(logging.SourceService, "文件总量超过上限，删除最早的文件", "上限", "4 GiB", "删除", overflow)
+	}
 	for _, id := range ids {
 		_, _ = store.DeleteFile(ctx, id)
 	}

@@ -1,0 +1,16 @@
+name: 问题反馈 / Bug report
+description: 用的时候出错了 / Something went wrong
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 / What happened
+      description: 做了什么，看到了什么报错，截图可以直接粘贴进来 / What you did and what error you saw. Paste screenshots here
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: 管理端“关于”页显示的版本号 / Shown on the About page of the admin console
+      placeholder: v0.2.0

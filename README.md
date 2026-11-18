@@ -4,19 +4,32 @@
 
 将 Google Gemini Web 网页版转换为 OpenAI、Claude 和 Gemini 兼容 API。
 
+<table>
+  <tr>
+    <td width="33%" valign="top"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.webp"><img src="docs/images/dashboard-light.webp" alt="概览"></picture><br><b>概览</b><br>服务状态与接入</td>
+    <td width="33%" valign="top"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/logs-dark.webp"><img src="docs/images/logs-light.webp" alt="日志"></picture><br><b>日志</b><br>请求与速度</td>
+    <td width="33%" valign="top"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.webp"><img src="docs/images/usage-light.webp" alt="用量"></picture><br><b>用量</b><br>请求与费用</td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/accounts-dark.webp"><img src="docs/images/accounts-light.webp" alt="账号"></picture><br><b>账号</b><br>状态与用量</td>
+    <td width="33%" valign="top"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-dark.webp"><img src="docs/images/settings-light.webp" alt="设置"></picture><br><b>设置</b><br>页面改配置</td>
+    <td width="33%" valign="top"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/playground-dark.webp"><img src="docs/images/playground-light.webp" alt="API 试用"></picture><br><b>API 试用</b><br>四种协议发请求</td>
+  </tr>
+</table>
+
 ## 特性
 
 - **OpenAI 兼容**：`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/files`、`/v1/audio/*`、`/v1/videos`、`/v1/models`
 - **Claude 兼容**：`/v1/messages`、Files API
 - **Gemini 兼容**：`/v1beta/models/{model}:generateContent`、`:streamGenerateContent`、`:predictLongRunning`、Files API
-- **流式输出**：文本与思考内容实时增量返回，各协议的思考强度映射到官网 Low、Medium、High，模型名也可带 `(high)`、`(low)`、`(-1)` 等后缀指定思考强度
+- **流式输出**：文本与思考内容实时增量返回，各协议的思考强度映射到官网 Low、Medium、High，模型名也可带 `(high)`、`(low)`、`(-1)` 等后缀或 `@think=high` 指定思考强度
 - **结构化输出**：OpenAI `response_format`、Anthropic `output_format`、Gemini `responseSchema` 与 `responseFormat`（含 `text/x.enum` 枚举）按 JSON Schema 约束回答
 - **函数工具**：四种协议的函数工具经网页提示词桥接，模型在调用前写的说明随调用一起返回，调用无法解析时在首个可见输出前换账号重试
 - **图片能力**：支持多模态输入、图片生成和图片编辑，生成图返回官网“下载原图”的原尺寸图片
 - **官网工具**：Create video、Create music、Canvas、Deep Research、Guided Learning 与 Task 模式以独立模型 ID 提供
 - **多账户负载均衡**：按模型可用性调度多个 Google 账户，用量上限只冷却对应模型，频率限制冷却整个账号，并发数与调度策略可配置
 - **访客会话**：没有可用账号时以 Gemini 网页的未登录会话提供官网未登录可用的模型（当前为 `gemini-3.5-flash-lite`，不含官网工具与附件上传），账号就绪后优先使用账号
-- **管理端与桌面版**：网页管理端提供各客户端的接入配置、实时日志、活动请求、用量与费用统计、账号导入与管理、模型目录、设置与 Playground；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
+- **管理端与桌面版**：网页管理端提供各客户端的接入配置、实时日志、活动请求、用量与费用统计、账号导入与管理、模型目录、设置与 API 试用；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
 - **运行日志**：彩色分列控制台日志，逐请求记录开始、选号、上传、首个输出、换号、等待与结束
 - **请求账本**：SQLite 保存每个请求的用量，按模型、账号与协议统计并按 Gemini API 单价估算费用
 - **Gems**：账号自建的 Gem 与 Google 预置 Gem 以 `gem-<Gem ID>` 模型 ID 提供
@@ -28,12 +41,13 @@
 
 | 模型 ID | 名称 | 官网说明 / 能力 | 输入窗口 | 默认 |
 | --- | --- | --- | ---: | --- |
-| `gemini-3.8-flash` | 3.8 Flash | All-around help | 32,768–1,048,576 | 是 |
+| `gemini-4-hydrogen` | 4 Hydrogen | All-around help | 32,768–1,048,576 | 是 |
 | `gemini-3.5-flash-lite` | 3.5 Flash-Lite | Quick answers | 32,768–1,048,576 |  |
 | `gemini-4-carbon` | 4 Carbon | Most complex work | 32,768–1,048,576 |  |
 | `gemini-4-argon` | 4 Argon | Code & analysis | 32,768–1,048,576 |  |
 | `gemini-auto` | Auto | Adapts to your needs（免费账号） | 32,768 |  |
-| `gemini-3.8-flash-task`、`gemini-4-carbon-task`、`gemini-4-argon-task` | Task | 代为执行任务 |  |  |
+| `gemini-4-hydrogen-task`、`gemini-4-carbon-task`、`gemini-4-argon-task` | Task | 代为执行任务 |  |  |
+| `gemini-default` | Default | 各账号的官方默认模型 |  |  |
 | `gemini-3.1-flash-image` | Nano Banana 2 | 图片生成与编辑 |  |  |
 | `gemini-video` | Video | 视频生成 |  |  |
 | `gemini-music` | Music | 音乐生成 |  |  |
@@ -41,7 +55,9 @@
 | `gemini-deep-research` | Deep Research | 研究报告 |  |  |
 | `gemini-guided-learning` | Guided Learning | 引导式学习 |  |  |
 
-- **模型目录**：服务启动时读取各账号的 Gemini Web 模型目录与官网工具，运行后以 `/v1/models` 为准；模型 ID 由官网菜单的型号名生成，官网的用途说明作为 `description`，账号收到新模型后自动公开
+- **模型目录**：服务启动时读取各账号的 Gemini Web 模型目录与官网工具，运行后以 `/v1/models` 为准；模型 ID 由官网菜单的型号名生成，官网的用途说明作为 `description`，账号收到新模型后自动公开；模型 ID 可带 `models/` 或 `google/` 前缀
+- **模型改名**：官网给同一位置的模型改名或改版后，旧 ID 继续可用并解析到改名后的模型，`/v1/models` 以 `alias_of` 写明旧 ID 的去向；改名记录保存在 `data/requests.db`，重启后仍然有效，`MODEL_MAPPING`、`MODEL_ACCOUNTS` 与 `FIRST_EVENT_HEDGE_MODELS` 中的旧 ID 同样生效
+- **订阅层级**：只有更高订阅层级才有的模型返回 403，写明所需层级与当前账号的层级
 - **目录字段**：`available_account_count` 是可用账号数，`default` 标出默认模型，`thinking_levels` 列出可选思考强度
 - **工具模型**：工具 ID 只在账号具备对应官网工具时出现，由该账号的官网默认模型执行
 - **图片**：图片 ID 用于对话生图和 `/v1/images/*`，`size` 与 `imageConfig.aspectRatio` 支持 1:1、9:16、3:4、4:3、16:9、2:3、21:9、1:8、8:1
@@ -52,6 +68,14 @@
 - **token usage**：文本输入、可见输出和思考摘要按 Gemini tokenizer 计算；计数接口中的图片、音频、视频与 PDF 按 Gemini API 计数规则估算
 
 ## 快速开始
+
+### 系统要求
+
+- **Windows 桌面版**：Windows 10 或更高版本（64 位）；窗口使用系统的 WebView2 运行时，没有 WebView2 时服务照常运行、管理端在默认浏览器中打开
+- **macOS 桌面版**：macOS 13 或更高版本，Apple 芯片与 Intel 通用
+- **Linux 桌面版**：x86_64 或 arm64，需要 GTK 3 与 WebKitGTK 4.1：Ubuntu 22.04 先执行 `sudo apt install libwebkit2gtk-4.1-0`，Ubuntu 24.04、Debian 12 及更新的桌面系统自带
+- **命令行版与 Docker**：没有额外依赖
+- **源码运行**：Go 1.27、Node.js 22 或更新版本与 pnpm
 
 ### Windows 一键启动
 
@@ -78,7 +102,8 @@ cmd /c start /wait gemini-web2api.exe setup --email "name@example.com"
 | macOS | `desktop-…-darwin-universal.tar.gz` | `~/Library/Application Support/Gemini-Web2API` |
 | Linux | `desktop-…-linux-amd64.tar.gz` 或 `desktop-…-linux-arm64.tar.gz` | `~/.config/Gemini-Web2API` |
 
-- 桌面版都是便携包：macOS 解压后打开 `Gemini-Web2API.app`；Linux 解压后运行 `gemini-web2api`，需要系统的 GTK 3 与 WebKitGTK 4.1（Ubuntu 22.04、Debian 12 及更新的桌面系统自带）
+- 桌面版都是便携包：macOS 解压后打开 `Gemini-Web2API.app`；Linux 解压后运行 `gemini-web2api`，Ubuntu 22.04 先安装 `libwebkit2gtk-4.1-0`
+- macOS 应用使用 ad-hoc 签名，首次打开被系统拦截时，在“系统设置 → 隐私与安全性”中点击“仍要打开”，或在终端执行 `xattr -dr com.apple.quarantine Gemini-Web2API.app` 后再打开
 - 桌面版在窗口中打开管理端；macOS 关闭窗口后只留菜单栏图标，Dock 图标随之隐藏，菜单栏图标或再次打开应用唤回窗口；Linux 关闭窗口即退出
 - 托盘与菜单栏菜单可复制 API 地址、设置开机启动，菜单文字随管理端的界面语言切换
 - 账号在管理端的“导入账号”页从本机 Chrome、Cookie 或远程配对导入
@@ -126,21 +151,21 @@ Cookie 来自登录了多个 Google 账号的浏览器时，用 `--authuser` 指
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name --authuser 1
 ```
 
-服务部署在没有 Chrome 的服务器上时，在管理端“导入账号”页生成配对令牌，然后在登录了 Chrome 的电脑上把账号上传到服务器；令牌从标准输入读取，非本机地址需要 HTTPS，可经 SSH 隧道 `ssh -L 8007:127.0.0.1:8007 <服务器>` 使用 `http://127.0.0.1:8007`：
+服务部署在没有 Chrome 的服务器上时，在管理端“导入账号”页生成配对令牌，然后在登录了 Chrome 的电脑上把账号上传到服务器；令牌从标准输入读取，非本机地址需要 HTTPS，可经 SSH 隧道 `ssh -L 8007:127.0.0.1:8007 <服务器>` 使用 `http://127.0.0.1:8007`。Chrome 导入的账号上传后，`setup --remote` 留在源电脑按时续签并上传新会话，关闭窗口后可用 `setup --remote <地址> --renew` 恢复续签：
 
 ```powershell
 .\gemini-web2api.exe setup --email "name@example.com" --remote https://example.com
 ```
 
-`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。Chrome 导入还会保存浏览器退出后续签所需的 OAuth 续签材料。服务已在运行时，账号从管理端“导入账号”页导入；`setup` 要写入的 `auth` 目录正被运行中的服务使用时，`setup` 退出并给出提示。日常启动只需运行：
+`setup` 会生成 `auth/<账号>/storage-state.json` 并验证模型目录。Chrome 导入还会保存浏览器退出后续签所需的 OAuth 续签材料与设备绑定会话参数。服务已在运行时，账号从管理端“导入账号”页导入；`setup` 要写入的 `auth` 目录正被运行中的服务使用时，`setup` 退出并给出提示。日常启动只需运行：
 
 ```powershell
 .\gemini-web2api.exe
 ```
 
-默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以使用已经生成的 `auth` 目录：`storage-state.json` 带 `wrappedBindingKey`（续签材料绑定在原设备上）的账号在现有 Cookie 有效期内使用，续签在原 Windows 设备执行；其余 Chrome 导入的账号在任何系统上自动续签。
+默认读取 `auth` 目录并监听 `127.0.0.1:8007`。Linux 和 macOS 可以使用已经生成的 `auth` 目录：`storage-state.json` 带 `wrappedBindingKey`（续签材料绑定在原设备上）的账号在现有 Cookie 有效期内使用，可由原 Windows 设备经 `setup --remote` 持续续签；其余 Chrome 导入的账号在任何系统上自动续签。
 
-服务运行期间每 10 分钟为每个账号轮换一次登录 Cookie，与 Gemini 网页相同；响应中变化的 Cookie 写回 `auth/<账号>/storage-state.json`，重启后直接沿用。Chrome 导入的账号在登录态失效时自动续签。
+服务运行期间每 10 分钟为每个账号轮换一次登录 Cookie，与 Gemini 网页相同，并在设备绑定 Cookie 到期前用本机设备密钥刷新 Chrome 导入账号的设备绑定会话；响应中变化的 Cookie 写回 `auth/<账号>/storage-state.json`，重启后直接沿用。Chrome 导入的账号在登录态失效时自动续签。
 
 ### 可选配置
 
@@ -167,6 +192,7 @@ docker compose up -d
 - 端口对外开放时设置 `PROXY_API_KEY`；从容器外打开管理端需要 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`
 - 账号用管理端的 Cookie 导入、远程配对，或把其他电脑上的 `auth/<账号>/` 复制到 `data/auth/`
 - 修改 `data/.env` 后执行 `docker compose restart`；写在 `docker-compose.yml` 的 `environment` 中的配置项由容器环境决定，设置页中对应的项不可修改
+- 容器时区默认为 UTC，日志时间与用量的按日汇总都按容器时区；需要本地时区时在 `docker-compose.yml` 的 `environment` 中加 `TZ: Asia/Shanghai` 这样的时区名
 
 ### 代理
 
@@ -221,8 +247,8 @@ GET    /v1/models
 ```
 
 - **Responses**：默认保存到 `data/requests.db` 30 天，可读取、列出输入与删除，`store: false` 不保存；`background: true` 立即返回 `queued`，之后轮询或取消
-- **续接**：`previous_response_id` 与会话 ID 在服务重启后的 `SESSION_TTL` 内仍可续接；每轮发送完整历史的客户端在历史与上一轮回答一致时续接同一网页会话，只发送新消息
-- **文件**：上传的文件保存在 `data/files/`，生成请求以 `file_id` 引用；`expires_after` 按 OpenAI 规则设置到期时间，`purpose=batch` 的文件默认 30 天后删除
+- **续接**：每个请求默认新建网页会话并发送完整对话；Responses 的 `previous_response_id` 由已保存的响应链补全前文，指向的响应没有保存时返回 404，`conversation` 由该 ID 已保存的响应补全前文，没有已保存的响应时开始新对话；其余续接字段（Chat、Anthropic 与 Gemini 的 `previous_response_id` 与会话 ID、`X-Conversation-ID` 请求头）返回 400。`GEMINI_CONTINUE_SESSION=true`（实验性）时多轮对话续接上一轮所在的网页会话，只发送新消息，响应带会话 ID：`previous_response_id` 与会话 ID 在服务重启后的 `SESSION_TTL` 内仍可续接，每轮发送完整历史的客户端在历史与上一轮回答一致时续接同一网页会话
+- **文件**：上传的文件保存在 `data/files/`，生成请求以 `file_id` 引用；`expires_after` 按 OpenAI 规则设置到期时间，`purpose=batch` 的文件默认 30 天后删除；文件总量超过 4 GiB 时从最早的文件起删除
 - **朗读**：`/v1/audio/speech` 使用官网回答的朗读功能，输出 mp3、opus、wav、flac 或 pcm，`voice` 与 `speed` 不生效
 - **转写与翻译**：由所选对话模型完成
 - **视频**：`/v1/videos` 使用 `gemini-video`，JSON 请求的 `input_reference`（`image_url` 或 `file_id`）作为首帧；生成的视频与缩略图保存 48 小时，视频对象的 `expires_at` 为到期时间；`remix` 与 `extensions` 在本服务生成的已完成视频的网页会话中继续生成，`extensions` 的成品是拼接后的完整视频，`seconds` 为实际时长
@@ -242,6 +268,8 @@ GET    /v1/models
 
 带 `anthropic-version` 或 `anthropic-beta` 请求头的 `/v1/files` 请求按 Anthropic Files API 返回，消息中以 `source.file_id` 引用。
 
+`/v1/messages` 支持 `context_management` 的 `clear_tool_uses_20250919`、`clear_thinking_20251015` 与 `compact_20260112`；压缩时由同一模型生成摘要并替换全部历史。
+
 ### Gemini 兼容
 
 ```text
@@ -250,6 +278,15 @@ POST   /v1beta/models/{model}:streamGenerateContent?alt=sse
 POST   /v1beta/models/{model}:countTokens
 POST   /v1beta/models/{model}:predictLongRunning
 GET    /v1beta/operations/{id}
+POST   /v1beta/interactions
+GET    /v1beta/interactions/{id}
+DELETE /v1beta/interactions/{id}
+POST   /v1beta/interactions/{id}/cancel
+POST   /v1beta/cachedContents
+GET    /v1beta/cachedContents
+GET    /v1beta/cachedContents/{name}
+PATCH  /v1beta/cachedContents/{name}
+DELETE /v1beta/cachedContents/{name}
 POST   /upload/v1beta/files
 GET    /v1beta/files
 GET    /v1beta/files/{name}
@@ -259,7 +296,17 @@ GET    /v1beta/models
 
 `/v1/models/{model}:generateContent` 等路径与 `/v1beta` 相同（google-genai 3.x 的默认路径），`GET /v1/models` 与 `/v1/files` 带 `x-goog-api-key` 时按 Gemini 形状返回。
 
+Interactions 与 Responses 一样保存到 `data/requests.db` 30 天，`background: true` 在后台运行，可流式取回、取消与删除。`cachedContents` 保存在服务内存中，默认 1 小时到期，服务重启后清空；生成与计数请求以 `cachedContent` 引用。
+
 `streamGenerateContent` 不带 `alt=sse` 时返回 JSON 数组。上传的文件以 `fileData.fileUri` 引用，YouTube 链接按官网读取视频内容。`predictLongRunning` 使用 `gemini-video`。
+
+[Antigravity CLI](https://antigravity.google/docs/install?tab=cli)（`agy`）使用 Gemini 接口。在 `~/.gemini/antigravity-cli/settings.json` 中写入 `{"modelProvider": "gemini"}`，设置以下环境变量后运行 `agy`，模型在 agy 中用 `/model` 选择：
+
+```powershell
+$env:GEMINI_API_KEY = "<PROXY_API_KEY>"
+$env:GOOGLE_GEMINI_BASE_URL = "http://127.0.0.1:8007"
+agy
+```
 
 ### MCP
 
@@ -277,13 +324,15 @@ GET  /readyz
 
 认证支持 `Authorization: Bearer xxx`、`?key=xxx`、`x-goog-api-key` 和 `x-api-key`。未设置 `PROXY_API_KEY` 时，浏览器中只有本机地址打开的网页可以调用接口，其他网站的网页需要服务设置 key 并在请求中携带。
 
+请求头 `X-Gemini-Web2API-Account: <账号 ID>` 指定只由这个账号处理本次请求，账号 ID 即管理端“全部账号”页显示的 ID，与 API key 可用的账号取交集：账号不存在返回 400，不在 API key 可用范围内返回 403，账号冷却或不可用时返回说明原因的错误。
+
 ### 管理端
 
 浏览器打开 `http://127.0.0.1:8007/` 进入管理端，页面使用 `/api/*` 接口。
 
 - **接入**：“接入”页列出三种协议的 base URL，并按所选模型给出 Claude Code、Codex、OpenCode、OpenClaw、omp、Magpie、Cherry Studio、SillyTavern 与 curl 的现成配置；“连通测试”用所选 API key 读取模型列表并向所选模型发一条最短的请求，逐条显示结果、耗时与错误原因
 - **导入账号**：粘贴 Cookie 后自动识别其中登录的账号，勾选后导入；导入在服务端后台运行，离开页面后继续，页面显示每个账号的进度与失败原因；已导入的账号重新导入时沿用停用状态，代理一栏留空时沿用原有固定代理
-- **预热**：“全部账号”页的“预热”对选中的账号与模型各发一条最小生成请求，逐行显示结果、耗时与失败原因，请求计入请求记录
+- **预热**：“全部账号”页的“预热”对选中的账号与模型各发一条最小生成请求，逐行显示结果、耗时与失败原因，请求计入请求记录；停用的账号也可预热，预热后仍为停用
 - **监听端口**：配置的端口落在 Windows 的系统保留端口段（Hyper-V、WSL2、Docker）时，服务改用其后第一个可用端口，管理端顶部显示实际地址
 - **远程访问**：默认只接受本机访问；设置 `ADMIN_AUTH_ENABLED=true` 与 `ADMIN_PASSWORD`，并让 `LISTEN_ADDR` 监听对外地址后，可从其他设备登录；同一客户端登录连续失败 5 次后，60 秒内它的登录返回 429 并带 `Retry-After`
 - **反向代理**：代理需把浏览器请求的原始 `Host` 头透传给服务，并以 `X-Forwarded-For` 转发客户端地址，nginx 写 `proxy_set_header Host $http_host;` 与 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`；本机反向代理转发的客户端地址用于本机访问判定、登录限流与请求记录；也可挂在子路径下，例如 nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_buffering off; }`，管理端从 `/gemini/` 打开，客户端的 Base URL 带上同一前缀
@@ -338,6 +387,7 @@ build/               # 桌面版图标与打包配置
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `GEMINI_SAVE_HISTORY` | 是否写入 Gemini 官网历史记录 | `false` |
+| `GEMINI_CONTINUE_SESSION` | 多轮对话续接上一轮所在的 Gemini 官网会话，只发送新消息（实验性） | `false` |
 | `NONSTREAM_KEEPALIVE` | 非流式请求等待结果期间每 10 秒写出一个换行 | `true` |
 | `FAKE_STREAM` | 流式请求收齐完整结果后再按流式输出 | `false` |
 | `GEMINI_AUTH_STATES` | 认证文件或目录，多个路径用逗号分隔 | `auth` |
@@ -361,10 +411,10 @@ build/               # 桌面版图标与打包配置
 | `API_KEY_ACCOUNTS` | API key 可用的账号，每项 `key:账号\|账号`，多项用逗号分隔 | 空 |
 | `ACCOUNT_ORDER` | `fill-first` 在上下文窗口相同的账号中依次使用的账号 ID，多个用逗号分隔 | 空 |
 | `MODEL_ACCOUNTS` | 模型可用的账号，每项 `模型 ID:账号\|账号`，多项用逗号分隔 | 空 |
-| `FIRST_EVENT_HEDGE` | 首事件备用请求：`auto`、等待秒数或 `off` | `auto` |
-| `FIRST_EVENT_HEDGE_MODELS` | 发起首事件备用请求的模型 ID，多个用逗号分隔 | `gemini-4-carbon,gemini-4-argon` |
+| `FIRST_EVENT_HEDGE` | 首个输出备用请求：`auto`、等待秒数或 `off` | `auto` |
+| `FIRST_EVENT_HEDGE_MODELS` | 发起首个输出备用请求的模型 ID，多个用逗号分隔 | `gemini-4-carbon,gemini-4-argon` |
 
-`MODEL_MAPPING` 的格式为 `别名:模型 ID`，多项用逗号分隔。启动初始化失败的账号按 `ACCOUNT_COOLDOWN` 间隔重试。`ROUTING_STRATEGY` 为 `round-robin` 时从随机位置开始在账号间轮流分配，为 `fill-first` 时优先使用排在前面的空闲账号：先用上下文窗口最大的账号，窗口相同的账号按 `ACCOUNT_ORDER` 的顺序使用，未列出的账号按导入顺序排在后面。`API_KEY_ACCOUNTS` 未列出的 key 可用全部账号，列出的 key 只用指定账号且不使用访客会话。`MODEL_ACCOUNTS` 未列出的模型可用全部账号，列出的模型只在指定账号中选号，与 `API_KEY_ACCOUNTS` 同时生效；也可在管理端“模型”页的模型详情中勾选。`FIRST_EVENT_HEDGE` 在原请求迟迟没有首个事件时用另一个空闲账号发出同一请求，采用先返回的一个；`auto` 按各模型近 24 小时首事件等待的 p95 发起。
+`MODEL_MAPPING` 的格式为 `别名:模型 ID`，多项用逗号分隔。启动初始化失败的账号按 `ACCOUNT_COOLDOWN` 间隔重试。`ROUTING_STRATEGY` 为 `round-robin` 时从随机位置开始在账号间轮流分配，为 `fill-first` 时优先使用排在前面的空闲账号：先用上下文窗口最大的账号，窗口相同的账号按 `ACCOUNT_ORDER` 的顺序使用，未列出的账号按导入顺序排在后面。`API_KEY_ACCOUNTS` 未列出的 key 可用全部账号，列出的 key 只用指定账号且不使用访客会话。`MODEL_ACCOUNTS` 未列出的模型可用全部账号，列出的模型只在指定账号中选号，与 `API_KEY_ACCOUNTS` 同时生效；也可在管理端“模型”页的模型详情中勾选。`FIRST_EVENT_HEDGE` 在原请求迟迟没有首个输出时用另一个空闲账号发出同一请求，采用先返回的一个；`auto` 按各模型近 24 小时首个输出等待的 p95 发起。
 
 命令行 `--auth` 和 `--listen` 可以覆盖认证路径与监听地址；`--open-ui` 控制启动后是否在浏览器中打开管理端，不带参数启动时默认打开。
 
@@ -372,4 +422,4 @@ build/               # 桌面版图标与打包配置
 
 Gemini Web 内部协议可能随官网更新，模型 ID 以服务启动后返回的动态目录为准。欢迎提 Issue 和 PR。
 
-开发与贡献见 [docs/development.md](docs/development.md)，认证、请求载荷和流式解码原理见 [docs/protocol.md](docs/protocol.md)，日志与请求账本见 [docs/logging.md](docs/logging.md)。
+开发与贡献见 [docs/development.md](docs/development.md)，认证、请求载荷和流式解码原理见 [docs/protocol.md](docs/protocol.md)，官网变化后的采集与对齐步骤见 [docs/upstream.md](docs/upstream.md)，日志与请求账本见 [docs/logging.md](docs/logging.md)。
