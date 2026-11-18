@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -210,7 +211,7 @@ func domainsPermit(rawURL string, allowed, blocked []string) bool {
 	return (len(allowed) == 0 || domainAllowed(rawURL, allowed)) && !domainAllowed(rawURL, blocked)
 }
 
-// Parse 解析工具调用并验证结构化输出，调用块组之前的文字作为正文与调用一起返回，调用块组之后的内容丢弃
+// Parse 解析工具调用并验证结构化输出，调用块组之前的文字作为正文与调用一起返回，调用块组之后的内容丢弃；请求没有强制工具调用时，未写完或全部未声明的调用块按正文结束处理
 func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	if len(b.Definitions) > 0 {
 		before, blocks, found, err := splitCallBlocks(text)
@@ -218,8 +219,14 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 			if strings.EqualFold(strings.TrimSpace(b.Choice), "none") {
 				return "", nil, fmt.Errorf("模型在 tool_choice=none 时返回了工具调用")
 			}
+			empty := strings.TrimSpace(before) == ""
 			if err != nil {
-				return "", nil, err
+				if empty || b.requiresTool() || b.explicitTool() != "" {
+					return "", nil, err
+				}
+				// 模型把调用块写坏了，但调用块之前的文字是完整回答：按正文结束，不因此让整条回答失败
+				logging.Warn(logging.SourceRequest, "模型写出的调用块不完整，按正文结束", "原因", err.Error())
+				return before, nil, nil
 			}
 			if b.SingleCall {
 				blocks = blocks[:1]
@@ -227,6 +234,13 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 			calls, err := b.resolveCalls(blocks)
 			if err != nil {
 				return "", nil, err
+			}
+			if len(calls) == 0 {
+				// 模型只写出了未声明的工具调用：请求没有强制工具调用时按正文回答
+				if empty {
+					return "", nil, fmt.Errorf("模型返回了未声明的工具 %q", blocks[0].Name)
+				}
+				return before, nil, nil
 			}
 			return before, calls, nil
 		}

@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 )
 
 // callStartPattern 匹配调用块的开头，上游以 Markdown 转义方括号时前面带反斜杠
@@ -210,7 +211,7 @@ func structureFollows(after string) bool {
 	return location != nil && location[0] == 0
 }
 
-// resolveCalls 按声明把调用块转为工具调用：工具名去掉前导下划线后匹配，参数按 Schema 还原类型后校验
+// resolveCalls 按声明把调用块转为工具调用：工具名去掉前导下划线后匹配，参数按 Schema 还原类型后校验；请求没有强制工具调用时丢弃未声明的工具调用
 func (b ToolBridge) resolveCalls(blocks []callBlock) ([]ToolCall, error) {
 	if len(blocks) == 0 {
 		return nil, fmt.Errorf("模型返回的工具调用为空")
@@ -222,7 +223,12 @@ func (b ToolBridge) resolveCalls(blocks []callBlock) ([]ToolCall, error) {
 			name = strings.TrimLeft(name, "_")
 		}
 		if !b.hasTool(name) {
-			return nil, fmt.Errorf("模型返回了未声明的工具 %q", block.Name)
+			if b.requiresTool() || b.explicitTool() != "" {
+				return nil, fmt.Errorf("模型返回了未声明的工具 %q", block.Name)
+			}
+			// 模型写出了未声明的工具调用，例如它自己写出了官网内置工具的调用：请求没有强制工具调用时丢弃该调用，不因此让整条回答失败
+			logging.Warn(logging.SourceRequest, "丢弃模型返回的未声明工具调用", "工具", block.Name)
+			continue
 		}
 		if b.explicitTool() != "" && name != b.explicitTool() {
 			return nil, fmt.Errorf("模型返回工具 %q，预期工具 %q", name, b.explicitTool())

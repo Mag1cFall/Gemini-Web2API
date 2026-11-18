@@ -189,3 +189,38 @@ func TestSplitCallGateWaitsForLineAfterUnclosedBacktick(t *testing.T) {
 		}
 	}
 }
+
+// TestToolBridgeToleratesInvalidCalls 验证请求没有强制工具调用时，未声明的工具调用与写坏的调用块按正文结束处理，强制工具调用或没有正文时仍返回错误，合法的调用块照常解析
+func TestToolBridgeToleratesInvalidCalls(t *testing.T) {
+	definitions := []ToolDefinition{{Name: "echo", Parameters: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}}}`)}}
+	undeclared := "这是回答。[Call:google:search]\n[Arg:query]\n```\nx\n```\n[/Arg]\n[/Call]"
+	incomplete := "这是回答。[Call:echo]\n[Arg:text]\n```\n还没写完"
+	for _, tc := range []struct{ name, choice, reply string }{
+		{"未声明的工具", "auto", undeclared},
+		{"写坏的调用块", "auto", incomplete},
+		{"客户端恢复历史时的未声明工具", "", undeclared},
+	} {
+		bridge := ToolBridge{Choice: tc.choice, Definitions: definitions}
+		text, calls, err := bridge.Parse(tc.reply)
+		if err != nil || len(calls) != 0 || text != "这是回答。" {
+			t.Fatalf("%s：正文 %q 调用 %+v 错误 %v", tc.name, text, calls, err)
+		}
+	}
+	for _, tc := range []struct{ name, choice, reply string }{
+		{"required 时未声明的工具", "required", undeclared},
+		{"指定工具时写坏的调用块", "function:echo", incomplete},
+	} {
+		bridge := ToolBridge{Choice: tc.choice, Definitions: definitions}
+		if _, _, err := bridge.Parse(tc.reply); err == nil {
+			t.Fatalf("%s：强制工具调用时应返回错误", tc.name)
+		}
+	}
+	if _, _, err := (ToolBridge{Choice: "auto", Definitions: definitions}).Parse(undeclared[len("这是回答。"):]); err == nil {
+		t.Fatal("调用块之前没有正文时，未声明的工具调用应返回错误")
+	}
+	bridge := ToolBridge{Choice: "auto", Definitions: definitions}
+	text, calls, err := bridge.Parse("好的。[Call:echo]\n[Arg:text]\n```\nhi\n```\n[/Arg]\n[/Call]")
+	if err != nil || text != "好的。" || len(calls) != 1 || calls[0].Name != "echo" {
+		t.Fatalf("合法调用：正文 %q 调用 %+v 错误 %v", text, calls, err)
+	}
+}
