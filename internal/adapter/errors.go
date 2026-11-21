@@ -93,6 +93,14 @@ func claudeUpstreamType(err error) string {
 	return claudeErrorType(upstreamStatus(err))
 }
 
+// claudeStreamErrorType 返回已开始的 Anthropic 流中错误事件的类型：5xx 写为 overloaded_error，与 Anthropic 流内过载错误相同，Claude Code 等客户端据此重试；其余按状态码
+func claudeStreamErrorType(err error) string {
+	if upstreamStatus(err) >= http.StatusInternalServerError {
+		return "overloaded_error"
+	}
+	return claudeUpstreamType(err)
+}
+
 // claudeErrorType 返回 HTTP 状态对应的 Anthropic 错误类型
 func claudeErrorType(status int) string {
 	switch status {
@@ -314,21 +322,11 @@ func serverErrorPrefix(status int) string {
 	return ""
 }
 
-// publicError 返回去掉上游 URL、查询串与账号 ID 的错误，5xx 错误以官方 API 的英文说明开头
-func publicError(c *gin.Context, err error) error {
-	if err == nil {
-		return nil
-	}
-	return errors.New(serverErrorPrefix(upstreamStatus(err)) + publicMessage(c, err.Error()))
-}
-
-// streamFailure 记录流式响应头发出后的失败并返回去掉内部标识的错误，429、503 错误在末尾写明重试秒数
+// streamFailure 记录流式响应头发出后的失败并返回去掉上游 URL、查询串与账号 ID 的错误，5xx 错误以官方 API 的英文说明开头，429、503 错误在末尾写明重试秒数
 func streamFailure(c *gin.Context, err error) error {
-	if err == nil {
-		return nil
-	}
-	logging.FromContext(c.Request.Context()).Fail(upstreamStatus(err), err.Error())
-	return errors.New(retryMessage(publicError(c, err).Error(), retryAfterFor(c, upstreamStatus(err))))
+	status := upstreamStatus(err)
+	logging.FromContext(c.Request.Context()).Fail(status, err.Error())
+	return errors.New(retryMessage(serverErrorPrefix(status)+publicMessage(c, err.Error()), retryAfterFor(c, status)))
 }
 
 // unavailableCapability 返回 Gemini Web 不提供某项能力的说明

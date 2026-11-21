@@ -775,14 +775,19 @@ func failureScope(err error) (bool, string) {
 		return false, "captcha"
 	case errors.Is(err, gemini.ErrModelMismatch):
 		return true, "model_mismatch"
+	case errors.Is(err, gemini.ErrVideoQuota):
+		return true, "usage_limit"
 	case errors.As(err, &protocolErr) && protocolErr.HTTPStatus == 429:
 		return true, "rate_limited"
 	}
 	return false, "upstream_error"
 }
 
-// usageReset 对用量上限与模型降级返回官网已用满的用量窗口的重置时间
+// usageReset 返回用量上限与模型降级对应的冷却截止时刻：视频额度错误优先使用回答给出的重置时刻，其余用量上限与模型降级取官网已用满窗口的重置时刻
 func usageReset(client *gemini.Client, err error) time.Time {
+	if reset := gemini.VideoQuotaReset(err); reset.After(time.Now()) {
+		return reset
+	}
 	var protocolErr *gemini.ProtocolError
 	limited := errors.As(err, &protocolErr) && protocolErr.Code == 1037 || errors.Is(err, gemini.ErrModelMismatch)
 	if !limited {
@@ -1157,10 +1162,6 @@ func (p *AccountPool) nextAvailable(now time.Time, modelID string, excludedAccou
 
 // nextFrom 在账号或访客会话中选择：先取请求槽空闲的账号，都不空闲时取全部账号，其中上下文窗口最大的按调度策略选择
 func (p *AccountPool) nextFrom(now time.Time, modelID string, excludedAccountIDs map[string]struct{}, guest bool) *accountEntry {
-	if len(p.entries) == 0 {
-		return nil
-	}
-
 	eligible := func(entry *accountEntry) bool {
 		_, excluded := excludedAccountIDs[entry.AccountID]
 		return !excluded && entry.guest() == guest && p.schedulable(entry, now, modelID)

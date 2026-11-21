@@ -68,7 +68,7 @@ export const usageMessages = defineMessages({
     recentMinutes: '近 {minutes} 分钟',
     cost: '估算费用',
     costHelp:
-      '按 Gemini API 公布的文本单价估算：输入 token × 输入单价 +（思考 + 回复）token × 输出单价；没有单价的模型不计入',
+      '按 Gemini API 公布的单价估算：输入 token × 输入单价 +（思考 + 回复）token × 输出单价，图片与视频回复按对应媒体单价，音乐按首计价；没有单价的模型不计入',
     pricedRequests: '计价请求',
     input: '输入',
     reasoning: '思考',
@@ -197,7 +197,7 @@ export const usageMessages = defineMessages({
     recentMinutes: '近 {minutes} 分鐘',
     cost: '估算費用',
     costHelp:
-      '依 Gemini API 公布的文字單價估算：輸入 token × 輸入單價 +（思考 + 回覆）token × 輸出單價；沒有單價的模型不計入',
+      '依 Gemini API 公布的單價估算：輸入 token × 輸入單價 +（思考 + 回覆）token × 輸出單價，圖片與影片回覆依對應媒體單價，音樂按首計價；沒有單價的模型不計入',
     pricedRequests: '計價請求',
     input: '輸入',
     reasoning: '思考',
@@ -328,7 +328,7 @@ export const usageMessages = defineMessages({
     recentMinutes: 'Last {minutes} min',
     cost: 'Est. cost',
     costHelp:
-      'Estimated with published Gemini API text prices: input tokens × input price + (reasoning + reply) tokens × output price; models without a price are excluded',
+      'Estimated with published Gemini API prices: input tokens × input price + (reasoning + reply) tokens × output price, with image and video replies at their media prices and music priced per song; models without a price are excluded',
     pricedRequests: 'Priced requests',
     input: 'Input',
     reasoning: 'Reasoning',
@@ -460,7 +460,7 @@ export const usageMessages = defineMessages({
     recentMinutes: '過去 {minutes} 分',
     cost: '推定費用',
     costHelp:
-      'Gemini API 公開のテキスト単価で推定：入力トークン × 入力単価 +（思考 + 応答）トークン × 出力単価。単価のないモデルは含みません',
+      'Gemini API 公開の単価で推定：入力トークン × 入力単価 +（思考 + 応答）トークン × 出力単価、画像・動画の応答はそれぞれのメディア単価、音楽は 1 曲あたりで計算します。単価のないモデルは含みません',
     pricedRequests: '課金対象リクエスト',
     input: '入力',
     reasoning: '思考',
@@ -591,7 +591,7 @@ export const usageMessages = defineMessages({
     recentMinutes: '최근 {minutes}분',
     cost: '예상 비용',
     costHelp:
-      'Gemini API에 공개된 텍스트 단가로 추정: 입력 토큰 × 입력 단가 + (사고 + 응답) 토큰 × 출력 단가. 단가가 없는 모델은 제외합니다',
+      'Gemini API에 공개된 단가로 추정: 입력 토큰 × 입력 단가 + (사고 + 응답) 토큰 × 출력 단가, 이미지·동영상 응답은 해당 미디어 단가, 음악은 곡당 단가로 계산합니다. 단가가 없는 모델은 제외합니다',
     pricedRequests: '과금 대상 요청',
     input: '입력',
     reasoning: '사고',
@@ -727,7 +727,7 @@ export const usageMessages = defineMessages({
     recentMinutes: '{minutes} dernières min',
     cost: 'Coût estimé',
     costHelp:
-      'Estimé avec les tarifs texte publiés de l’API Gemini : jetons d’entrée × prix d’entrée + jetons (raisonnement + réponse) × prix de sortie ; les modèles sans tarif sont exclus',
+      'Estimé avec les tarifs publiés de l’API Gemini : jetons d’entrée × prix d’entrée + jetons (raisonnement + réponse) × prix de sortie, les réponses image et vidéo utilisant leur tarif média et la musique étant tarifée par morceau ; les modèles sans tarif sont exclus',
     pricedRequests: 'Requêtes tarifées',
     input: 'Entrée',
     reasoning: 'Réflexion',
@@ -863,7 +863,7 @@ export const usageMessages = defineMessages({
     recentMinutes: 'Letzte {minutes} Min.',
     cost: 'Geschätzte Kosten',
     costHelp:
-      'Geschätzt mit den veröffentlichten Textpreisen der Gemini API: Eingabe-Tokens × Eingabepreis + (Denk- + Antwort-)Tokens × Ausgabepreis; Modelle ohne Preis werden nicht berücksichtigt',
+      'Geschätzt mit den veröffentlichten Preisen der Gemini API: Eingabe-Tokens × Eingabepreis + (Denk- + Antwort-)Tokens × Ausgabepreis, Bild- und Videoantworten zum jeweiligen Medienpreis und Musik pro Song; Modelle ohne Preis werden nicht berücksichtigt',
     pricedRequests: 'Bepreiste Anfragen',
     input: 'Eingabe',
     reasoning: 'Denken',

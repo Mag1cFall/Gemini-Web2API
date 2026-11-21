@@ -1,3 +1,5 @@
+import { splitPairs } from '@/features/settings/validate'
+
 // firstApiKey 返回以逗号分隔的 PROXY_API_KEY 中的第一个 key，未设置时为空串
 export function firstApiKey(value: string): string {
   return (
@@ -15,15 +17,7 @@ export function maskKey(key: string) {
 
 // parseAccountBindings 解析 API_KEY_ACCOUNTS 与 MODEL_ACCOUNTS 的 名称:账号|账号 写法，返回各名称绑定的账号
 export function parseAccountBindings(value: string) {
-  return new Map(
-    value
-      .split(',')
-      .filter(Boolean)
-      .map((item) => {
-        const index = item.lastIndexOf(':')
-        return [item.slice(0, index), item.slice(index + 1).split('|')] as const
-      }),
-  )
+  return new Map(splitPairs(value).map(([name, ids]) => [name, ids.split('|')] as const))
 }
 
 // formatAccountBindings 把各名称绑定的账号写成 .env 的 名称:账号|账号 写法，按名称排序，没有账号的名称不写

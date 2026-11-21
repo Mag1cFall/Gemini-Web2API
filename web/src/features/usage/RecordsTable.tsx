@@ -72,7 +72,7 @@ export function RecordsTable({
   onSearch: (q: string) => void
 }) {
   const m = useMessages(usageMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const f = useUsageFormat()
   const id = useId()
   const [pageSize, setPageSize] = usePreference('pageSize', 20, isPageSize)
@@ -214,7 +214,7 @@ export function RecordsTable({
           </h2>
           {!status && !q && (
             <p className="text-xs text-foreground-muted">
-              {fill(plural(locale, total, m.recordsCountOne, m.recordsCount), {
+              {fill(plural(language, total, m.recordsCountOne, m.recordsCount), {
                 count: f.integer(total),
               })}
             </p>

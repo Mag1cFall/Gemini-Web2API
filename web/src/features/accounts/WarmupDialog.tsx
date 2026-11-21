@@ -14,6 +14,7 @@ import {
   warmupMessages,
 } from '@/features/accounts/messages'
 import { accountsKey } from '@/features/accounts/queries'
+import { SelectAllCheckbox } from '@/features/accounts/SelectAllCheckbox'
 import type { Account, WarmupResult } from '@/features/accounts/types'
 import { stateTone } from '@/features/accounts/usage'
 import { useModels } from '@/features/models/queries'
@@ -55,18 +56,11 @@ function Picker({
       ) : (
         <div className="flex max-h-[288px] flex-col overflow-y-auto rounded-md border border-border">
           <label className="flex items-center gap-2 border-b border-border bg-muted px-3 py-2 text-sm">
-            <input
-              type="checkbox"
-              className="size-4 accent-primary"
-              checked={enabled.length > 0 && chosen === enabled.length}
-              disabled={enabled.length === 0}
-              ref={(node) => {
-                if (node) node.indeterminate = chosen > 0 && chosen < enabled.length
-              }}
-              onChange={() => {
-                onChange(
-                  new Set(chosen === enabled.length ? [] : enabled.map((option) => option.value)),
-                )
+            <SelectAllCheckbox
+              selected={chosen}
+              total={enabled.length}
+              onToggle={(checked) => {
+                onChange(new Set(checked ? enabled.map((option) => option.value) : []))
               }}
             />
             {selectAll}
@@ -111,7 +105,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
   const m = useMessages(warmupMessages)
   const am = useMessages(accountsMessages)
   const sm = useMessages(accountStateMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const client = useQueryClient()
   const models = (useModels().data?.models ?? []).filter((model) => !model.tool && !model.alias_of)
   const [open, setOpen] = useState(false)
@@ -275,7 +269,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                                 {run.result.ok ? m.succeeded : m.failed}
                               </Badge>
                               <span className="text-xs text-foreground-muted">
-                                {formatDuration(run.result.duration_ms, locale)}
+                                {formatDuration(run.result.duration_ms, language)}
                               </span>
                             </span>
                             {run.result.error && (
@@ -286,7 +280,10 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                             {run.result.usage?.current && (
                               <span className="text-xs text-foreground-muted">
                                 {fill(m.usage, {
-                                  used: formatPercent(run.result.usage.current.used_ratio, locale),
+                                  used: formatPercent(
+                                    run.result.usage.current.used_ratio,
+                                    language,
+                                  ),
                                 })}
                               </span>
                             )}

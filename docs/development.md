@@ -4,7 +4,7 @@ Gemini-Web2API 以纯 Go 进程连接 Gemini Web，再将一条规范事件流�
 
 ## 本地开发
 
-源码构建需要 Go 1.26.0 或更高版本，以及构建管理端前端的 Node.js 与 pnpm。发布版可执行文件可直接运行，开发时使用以下命令：
+源码构建需要 Go 1.27，以及构建管理端前端的 Node.js 与 pnpm。发布版可执行文件可直接运行，开发时使用以下命令：
 
 ```powershell
 pnpm -C web install
@@ -141,7 +141,7 @@ Windows 托盘图标的消息在 `internal/desktop/menu_windows.go` 处理：
 - **中间件顺序**：`router.go` 的公开接口组依次挂 `CORSMiddleware`、`RequestMiddleware`、`AuthMiddleware`，未匹配的路径按前缀返回各协议的 404 或回落到管理端页面
 - **生成执行**：处理函数调用 `runGeneration`，它经 `runGenerationAttempts` 用 `AccountPool.NextForModelExcluding` 取账号并调用 `gemini.Client.Stream`；成功时 `ReportSuccess`，可重试错误时 `ReportFailure` 后换下一个账号；换号只发生在首个可见输出之前
 - **账号顺序与模型绑定**：`AccountPool.scopeExcluded`（`internal/balancer/apikey.go`）把请求 API key 在 `API_KEY_ACCOUNTS` 中的账号与目标模型在 `MODEL_ACCOUNTS` 中的账号取交集，范围之外的账号与访客会话不参与选号；模型的可用性、恢复时间、首事件备用请求与不可用原因只计绑定账号，未列出的模型可用全部账号。`fill-first` 先取上下文窗口最大的空闲账号，窗口相同时按 `SetAccountOrder` 排好的顺序取第一个：`ACCOUNT_ORDER` 列出的账号在前，其余按导入顺序排在后面。两项在设置保存后经 `SetAccountOrder`、`SetModelAccounts` 立即生效；管理端“模型”页的模型详情勾选账号时改写 `MODEL_ACCOUNTS`
-- **请求槽**：`gemini.Client` 用 `requestSlot` 信号量实现 `PER_ACCOUNT_CONCURRENCY`，生成、用量读取与 Cookie 轮换共用；等待上游首事件满 `slotYieldAfter` 的生成请求经 `yieldingRelease` 让出，`yieldSlot` 限制同一账号同时一个
+- **请求槽**：由 `gemini.Client` 的 `requestSlot`、`yieldSlot` 与 `internal/adapter/hedge.go` 的 `yieldingRelease` 实现，调度与让出规则见 [protocol.md](protocol.md#1-架构)
 - **事件流**：`Client.Stream` 把 `decoder.go` 解出的 `gemini.Event` 交给回调，适配层用 `EventAccumulator.Apply` 累积；流式请求在回调中实时写出，非流式请求在结束后组装响应
 - **非生成端点**：Files、Responses 读取与删除、视频任务查询只读写 `internal/requestdb`，不经过调度
 
@@ -154,7 +154,7 @@ Windows 托盘图标的消息在 `internal/desktop/menu_windows.go` 处理：
 | 轮换 | `internal/accounts`、`gemini/rotate.go` | 按官网周期轮换 Cookie 并重读目录 |
 | 续签 | `internal/chromeauth` | Chrome 导入的账号在登录态失效时续签，带设备绑定密钥的材料在原 Windows 设备上签发，其余材料在任何系统上签发 |
 | 冷却 | `AccountPool.ReportFailure` | 按模型或整个账号移出调度 |
-| 运行期变更 | `Manager.Add`、`Remove`、`SetEnabled`、`SetProxy`、`Verify` | 导入、删除、停用、改代理、重新连接；账号每次启动都取认证文件当前的 Cookie、续签材料与设置 |
+| 运行期变更 | `Manager.ChromeImporter`、`ImportCookie`、`ImportState`、`Remove`、`SetEnabled`、`SetProxy`、`Verify` | 导入、删除、停用、改代理、重新连接；账号每次启动都取认证文件当前的 Cookie、续签材料与设置 |
 | 代理 | `internal/accounts/proxies.go`、`internal/proxypool` | 分配代理，定时检测，故障时改绑 |
 | 写回 | `internal/auth` | 变化的 Cookie 原子写回认证文件 |
 
@@ -212,8 +212,6 @@ Windows 托盘图标的消息在 `internal/desktop/menu_windows.go` 处理：
 
 ## 验收修改
 
-账户和显式会话的排队等待使用请求 context；服务关闭会取消活动请求。流式写入错误直接终止输出，Responses 的结构化正文和终态复用已验证的响应对象。
-
 代码格式和静态检查使用：
 
 ```powershell
@@ -222,7 +220,7 @@ go vet ./...
 go build ./cmd/gemini-web2api
 ```
 
-GitHub Actions 对 `main` 提交和 Pull Request 构建前端、运行前端检查，并用 `go.mod` 最低版本执行 Go 检查。推送 `v*` 版本标签或手动运行时先执行同一组检查，再用当前稳定版 Go 构建上文“桌面版”一节所述的 Windows 包、Linux 与 macOS 命令行包及桌面版便携包；标签运行自动创建 Release 并上传这些包，含 `-` 的标签发布为预发布版本。普通构建产物保留七天，Release 附件长期保留。
+GitHub Actions 对 `main` 提交和 Pull Request 构建前端、运行前端检查，并按 `go.mod` 指定的 Go 版本执行 Go 检查。推送 `v*` 版本标签或手动运行时先执行同一组检查，再用同一 Go 版本构建上文“桌面版”一节所述的 Windows 包、Linux 与 macOS 命令行包及桌面版便携包；标签运行自动创建 Release 并上传这些包，含 `-` 的标签发布为预发布版本。普通构建产物保留七天，Release 附件长期保留。
 
 提交前在本地运行与 CI 相同的检查：
 
@@ -241,7 +239,7 @@ CI 由两个工作流定义：`.github/workflows/checks.yml` 由 Pull Request �
 | --- | --- | --- | --- |
 | `web` | `checks.yml` | 全部 | 构建前端 |
 | `web-checks` | `checks.yml` | 全部 | 前端 lint、格式、类型检查与单元测试 |
-| `checks` | `checks.yml` | 全部 | 以 `go.mod` 最低版本并行运行 Go 测试与静态检查 |
+| `checks` | `checks.yml` | 全部 | 按 `go.mod` 指定的 Go 版本并行运行 Go 测试与静态检查 |
 | `headless` | `build.yml` | 标签与手动 | 按目标并行构建 Linux 与 macOS 命令行包 |
 | `desktop-windows` | `build.yml` | 标签与手动 | 在 Linux 上交叉构建 Windows 包 |
 | `desktop-macos` | `build.yml` | 标签与手动 | macOS 通用 `.app` 便携包 |

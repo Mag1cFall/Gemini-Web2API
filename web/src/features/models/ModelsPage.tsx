@@ -19,7 +19,7 @@ import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 export function ModelsPage() {
   const m = useMessages(modelsMessages)
   const app = useMessages(appMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const [params, setParams] = useSearchParams()
   const q = params.get('q') ?? ''
   const models = useModels()
@@ -52,7 +52,7 @@ export function ModelsPage() {
           title={m.catalog}
           actions={
             <>
-              <CountBadge>{formatNumber(rows.length, locale)}</CountBadge>
+              <CountBadge>{formatNumber(rows.length, language)}</CountBadge>
               <SearchInput
                 aria-label={m.search}
                 placeholder={m.search}
@@ -123,13 +123,13 @@ export function ModelsPage() {
                       {model.thinking_levels.join(' · ') || m.none}
                     </Td>
                     <Td className="text-right whitespace-nowrap text-foreground-muted @max-[640px]:hidden">
-                      {formatNumber(model.max_context_window, locale)}
+                      {formatNumber(model.max_context_window, language)}
                     </Td>
                     <Td className="whitespace-nowrap">
                       <div className="flex flex-nowrap gap-1">
                         <Badge tone="success">
                           {fill(
-                            plural(locale, model.accounts.length, m.availableOne, m.available),
+                            plural(language, model.accounts.length, m.availableOne, m.available),
                             { count: model.accounts.length },
                           )}
                         </Badge>

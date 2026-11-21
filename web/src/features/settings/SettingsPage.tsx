@@ -20,7 +20,7 @@ import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useAccountLabel, useAccounts } from '@/features/accounts/queries'
 import { useModels } from '@/features/models/queries'
-import { maskKey, parseAccountBindings } from '@/features/settings/apiKeys'
+import { formatAccountBindings, maskKey, parseAccountBindings } from '@/features/settings/apiKeys'
 import { DirectoryDialog } from '@/features/settings/DirectoryDialog'
 import { ListInput } from '@/features/settings/ListInput'
 import { settingsMessages } from '@/features/settings/messages'
@@ -28,7 +28,7 @@ import { OrderList } from '@/features/settings/OrderList'
 import { PairInput } from '@/features/settings/PairInput'
 import { ProxyPoolCard } from '@/features/settings/ProxyPoolCard'
 import { configKey, proxiesKey, useConfig } from '@/features/settings/queries'
-import type { ConfigPatch, ServiceConfig } from '@/features/settings/types'
+import { type ConfigPatch, editableKeys, type ServiceConfig } from '@/features/settings/types'
 import { type SettingErrors, validateSettings } from '@/features/settings/validate'
 import { FilterMenu } from '@/features/usage/FilterMenu'
 import { api } from '@/lib/api'
@@ -39,36 +39,6 @@ import { fill, useI18n, useMessages } from '@/lib/i18n'
 // tabs 是设置页的标签页，与 /settings/:section 对应
 const tabs = ['service', 'upstream', 'security', 'logging'] as const
 type Tab = (typeof tabs)[number]
-
-// editableKeys 是可写回 .env 的配置项
-const editableKeys = [
-  'proxy_api_key',
-  'proxy',
-  'save_history',
-  'continue_session',
-  'nonstream_keepalive',
-  'fake_stream',
-  'model_mapping',
-  'account_cooldown',
-  'session_ttl',
-  'init_timeout',
-  'per_account_concurrency',
-  'routing_strategy',
-  'log_level',
-  'request_body_log',
-  'log_file',
-  'log_max_total_mb',
-  'admin_auth_enabled',
-  'admin_username',
-  'listen_addr',
-  'auth_states',
-  'log_format',
-  'api_key_accounts',
-  'account_order',
-  'model_accounts',
-  'first_event_hedge',
-  'first_event_hedge_models',
-] as const
 
 // restartKeys 是重启服务后才生效的配置项
 const restartKeys = new Set<string>(['listen_addr', 'auth_states', 'log_format'])
@@ -249,16 +219,9 @@ function KeyAccounts({
               selected={selected}
               format={label}
               onChange={(next) => {
-                const updated = new Map(bindings)
-                if (next.length > 0) updated.set(key, next)
-                else updated.delete(key)
-                onChange(
-                  [...updated]
-                    .filter(([item]) => keys.includes(item))
-                    .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([item, ids]) => item + ':' + ids.join('|'))
-                    .join(','),
-                )
+                const updated = new Map([...bindings].filter(([item]) => keys.includes(item)))
+                updated.set(key, next)
+                onChange(formatAccountBindings(updated))
               }}
             />
           </li>
@@ -285,7 +248,7 @@ interface HedgeStat {
 // HedgeStats 列出各备用请求模型近 24 小时原请求首事件等待的当前 p95
 function HedgeStats() {
   const m = useMessages(settingsMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const stats = useQuery({
     queryKey: ['hedge'],
     queryFn: async () => (await api<{ models: HedgeStat[] }>('/api/hedge')).models,
@@ -299,7 +262,7 @@ function HedgeStats() {
           {item.ready
             ? fill(m.hedgeP95, {
                 model: item.model,
-                p95: formatDuration(item.p95_ms, locale),
+                p95: formatDuration(item.p95_ms, language),
                 samples: item.samples,
               })
             : fill(m.hedgeCollecting, { model: item.model, samples: item.samples })}

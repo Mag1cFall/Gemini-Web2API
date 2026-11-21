@@ -48,7 +48,7 @@ export function RequestsPage() {
   const m = useMessages(requestsMessages)
   const rm = useMessages(cooldownReasonMessages)
   const am = useMessages(accountsMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const clearCooldown = useClearCooldown()
   const accountLabel = useAccountLabel()
   const running = useRunning()
@@ -113,7 +113,7 @@ export function RequestsPage() {
       <Card className="@container">
         <CardHeader
           title={m.active}
-          actions={<CountBadge>{formatNumber(running.length, locale)}</CountBadge>}
+          actions={<CountBadge>{formatNumber(running.length, language)}</CountBadge>}
         />
         {running.length === 0 ? (
           <CardEmpty icon={<Activity size={20} aria-hidden />}>{m.noActive}</CardEmpty>
@@ -153,10 +153,12 @@ export function RequestsPage() {
                     <Elapsed request={request} />
                   </Td>
                   <Td className="text-right whitespace-nowrap @max-[480px]:hidden">
-                    {request.first_event_ms ? formatDuration(request.first_event_ms, locale) : '—'}
+                    {request.first_event_ms
+                      ? formatDuration(request.first_event_ms, language)
+                      : '—'}
                   </Td>
                   <Td className="text-right whitespace-nowrap @max-[960px]:hidden">
-                    {formatBytes(request.upstream_bytes ?? 0, locale)}
+                    {formatBytes(request.upstream_bytes ?? 0, language)}
                   </Td>
                   <Td className="text-right @max-[960px]:hidden">
                     {request.attempts?.length ?? 0}
@@ -185,7 +187,7 @@ export function RequestsPage() {
         <CardHeader
           title={m.recent}
           description={fill(m.recentHelp, { count: recentLimit })}
-          actions={<CountBadge>{formatNumber(finished.length, locale)}</CountBadge>}
+          actions={<CountBadge>{formatNumber(finished.length, language)}</CountBadge>}
         />
         {finished.length === 0 ? (
           <CardEmpty icon={<History size={20} aria-hidden />}>{m.noRecent}</CardEmpty>
@@ -227,10 +229,10 @@ export function RequestsPage() {
                   </Td>
                   <Td className="whitespace-nowrap">{protocol(request)}</Td>
                   <Td className="text-right whitespace-nowrap">
-                    {formatDuration(request.duration_ms, locale)}
+                    {formatDuration(request.duration_ms, language)}
                   </Td>
                   <Td className="text-right">
-                    {formatNumber(request.usage?.total_tokens ?? 0, locale)}
+                    {formatNumber(request.usage?.total_tokens ?? 0, language)}
                   </Td>
                 </tr>
               ))}
@@ -242,7 +244,7 @@ export function RequestsPage() {
       <Card>
         <CardHeader
           title={m.cooldowns}
-          actions={<CountBadge>{formatNumber(cooldowns.length, locale)}</CountBadge>}
+          actions={<CountBadge>{formatNumber(cooldowns.length, language)}</CountBadge>}
         />
         {cooldowns.length === 0 ? (
           <CardEmpty icon={<Snowflake size={20} aria-hidden />}>{m.noCooldowns}</CardEmpty>

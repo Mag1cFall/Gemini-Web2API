@@ -141,10 +141,7 @@ func Enabled(level slog.Level) bool {
 
 // Publish 记录事件，低于最低级别的事件丢弃
 func Publish(event Event) {
-	level, err := ParseLevel(event.Level)
-	if err != nil {
-		level = slog.LevelInfo
-	}
+	level, _ := ParseLevel(event.Level)
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}

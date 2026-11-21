@@ -315,12 +315,12 @@ func GeminiCacheUpdateHandler() gin.HandlerFunc {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "cachedContent update requires ttl, expireTime or displayName")
 			return
 		}
-		if _, ok := lookupGeminiCache(c.Param("cache")); !ok {
-			writeGeminiCacheNotFound(c)
-			return
-		}
 		geminiCaches.Lock()
 		cache, ok := geminiCaches.items[geminiCacheName(c.Param("cache"))]
+		if ok && !now.Before(cache.expires) {
+			delete(geminiCaches.items, cache.name)
+			ok = false
+		}
 		if ok {
 			if expiration {
 				cache.expires = expires.UTC()

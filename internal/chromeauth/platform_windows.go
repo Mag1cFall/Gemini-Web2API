@@ -27,7 +27,8 @@ func DefaultChromeRoot() (string, error) {
 	return filepath.Join(localAppData, "Google", "Chrome", "User Data"), nil
 }
 
-func discoverPlatform(chromeRoot string) ([]Account, error) {
+// Discover 只读列出本机 Chrome Google 账号
+func Discover(chromeRoot string) ([]Account, error) {
 	data, err := os.ReadFile(filepath.Join(chromeRoot, "Local State"))
 	if err != nil {
 		return nil, fmt.Errorf("读取 Chrome Local State: %w", err)

@@ -13,6 +13,8 @@ var ErrUpstreamFailureText = errors.New("官网返回了固定的失败回复")
 // upstreamFailureTexts 为 Gemini Web 以正文形式返回的已知固定失败文字
 var upstreamFailureTexts = []string{
 	"Sorry, something went wrong. Please try your request again.",
+	"Something went wrong. Please try again.",
+	"Something went wrong.",
 	"I encountered an error doing what you asked. Could you try again?",
 	"I seem to be encountering an error. Can I try something else for you?",
 	"I'm having a hard time fulfilling your request. Can I help you with something else instead?",

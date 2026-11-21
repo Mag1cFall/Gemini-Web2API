@@ -25,13 +25,8 @@ type CatalogModel struct {
 	AliasOf string
 }
 
-// Catalog 返回公开模型目录
+// Catalog 汇总已就绪或已读取目录的账号的模型目录，追加 gemini-default、MODEL_MAPPING 中指向已有模型的别名与改名前的旧 ID
 func Catalog(pool *balancer.AccountPool) []CatalogModel {
-	return availableModels(pool)
-}
-
-// availableModels 汇总已就绪或已读取目录的账号的模型目录，追加 gemini-default、MODEL_MAPPING 中指向已有模型的别名与改名前的旧 ID
-func availableModels(pool *balancer.AccountPool) []CatalogModel {
 	byID := make(map[string]CatalogModel)
 	defaultVotes := make(map[string]int)
 	defaults := CatalogModel{Model: gemini.Model{ID: gemini.DefaultModelID, DisplayName: "Default", Description: "Each account's official default model", Capabilities: []string{"generateContent", "streamGenerateContent"}}}
@@ -124,7 +119,7 @@ func availableModels(pool *balancer.AccountPool) []CatalogModel {
 // findModel 在公开目录中查找模型 ID、别名或改名前的旧 ID，ID 可带 models/ 或 google/ 前缀
 func findModel(pool *balancer.AccountPool, id string) (CatalogModel, bool) {
 	id = gemini.NormalizeModelID(id)
-	for _, model := range availableModels(pool) {
+	for _, model := range Catalog(pool) {
 		if strings.EqualFold(model.ID, id) {
 			return model, true
 		}
@@ -145,7 +140,7 @@ func lookupModel(pool *balancer.AccountPool, id string) (CatalogModel, error) {
 
 // modelNotFoundMessage 返回模型不存在的说明并列出可用模型
 func modelNotFoundMessage(pool *balancer.AccountPool, id string) string {
-	models := availableModels(pool)
+	models := Catalog(pool)
 	ids := make([]string, 0, len(models))
 	for _, model := range models {
 		ids = append(ids, model.ID)
@@ -213,7 +208,7 @@ func ListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_error", errCatalogNotReady.Message)
 			return
 		}
-		models := availableModels(pool)
+		models := Catalog(pool)
 		if c.GetHeader("anthropic-version") != "" {
 			data := make([]gin.H, 0, len(models))
 			for _, model := range models {
@@ -260,7 +255,7 @@ func GeminiListModelsHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeGeminiError(c, http.StatusServiceUnavailable, "UNAVAILABLE", errCatalogNotReady.Message)
 			return
 		}
-		models, next, err := geminiPage(c, availableModels(pool))
+		models, next, err := geminiPage(c, Catalog(pool))
 		if err != nil {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 			return

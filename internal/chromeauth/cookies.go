@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/auth"
 )
 
-// parseCookies 解析 Cookie Header、浏览器扩展导出的 JSON 或 Netscape cookies.txt，只保留 google.com 及其子域的 Cookie
+// parseCookies 解析 Cookie Header、浏览器扩展导出的 JSON、Netscape cookies.txt 或开发者工具 Cookie 表格，只保留 google.com 及其子域的 Cookie
 func parseCookies(input string) ([]auth.StateCookie, error) {
 	text := strings.TrimSpace(strings.TrimPrefix(input, string(rune(0xFEFF))))
 	var cookies []auth.StateCookie
@@ -18,7 +19,7 @@ func parseCookies(input string) ([]auth.StateCookie, error) {
 	case strings.HasPrefix(text, "[") || strings.HasPrefix(text, "{"):
 		cookies, err = parseCookieJSON(text)
 	case strings.Contains(text, "\t"):
-		cookies, err = parseNetscapeCookies(text)
+		cookies, err = parseCookieTable(text)
 	default:
 		cookies, err = parseCookieHeader(text)
 	}
@@ -37,33 +38,34 @@ func parseCookies(input string) ([]auth.StateCookie, error) {
 	return cookies, nil
 }
 
-// parseCookieHeader 解析一行 Cookie Header，__Host- 前缀的 Cookie 归 gemini.google.com，其余归 .google.com
+// parseCookieHeader 解析 Cookie Header，分号与换行都分隔 Cookie，跳过空项与空值项；OSID、__Secure-OSID 与 __Host- 前缀的 Cookie 归 gemini.google.com，其余归 .google.com
 func parseCookieHeader(header string) ([]auth.StateCookie, error) {
-	header = strings.TrimSpace(header)
+	header = strings.TrimSpace(strings.Trim(strings.TrimSpace(header), `"'`))
 	if len(header) >= len("Cookie:") && strings.EqualFold(header[:len("Cookie:")], "Cookie:") {
 		header = strings.TrimSpace(header[len("Cookie:"):])
 	}
-	if header == "" || strings.ContainsAny(header, "\r\n") {
-		return nil, fmt.Errorf("cookie 必须是一行 Cookie Header")
-	}
 	cookies := make([]auth.StateCookie, 0)
 	names := make(map[string]struct{})
-	for _, item := range strings.Split(header, ";") {
-		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
+	for _, item := range strings.FieldsFunc(header, func(r rune) bool { return r == ';' || r == '\n' || r == '\r' }) {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		parts := strings.SplitN(item, "=", 2)
 		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
-			return nil, fmt.Errorf("Cookie Header 项 %q 格式无效", strings.TrimSpace(item))
+			return nil, fmt.Errorf("Cookie Header 项 %q 格式无效", item)
 		}
 		name := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 		if value == "" {
-			return nil, fmt.Errorf("Cookie %s 的值为空", name)
+			continue
 		}
 		if _, exists := names[name]; exists {
 			continue
 		}
 		names[name] = struct{}{}
 		domain := ".google.com"
-		if strings.HasPrefix(name, "__Host-") {
+		if strings.HasPrefix(name, "__Host-") || name == "OSID" || name == "__Secure-OSID" {
 			domain = "gemini.google.com"
 		}
 		cookies = append(cookies, auth.StateCookie{
@@ -140,8 +142,8 @@ func sameSiteName(value string) string {
 	return ""
 }
 
-// parseNetscapeCookies 解析 Netscape cookies.txt，#HttpOnly_ 前缀表示 HttpOnly
-func parseNetscapeCookies(text string) ([]auth.StateCookie, error) {
+// parseCookieTable 解析制表符分隔的 Netscape cookies.txt 与从开发者工具 Cookie 表格复制的行，#HttpOnly_ 前缀表示 HttpOnly
+func parseCookieTable(text string) ([]auth.StateCookie, error) {
 	var cookies []auth.StateCookie
 	for number, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		httpOnly := strings.HasPrefix(line, "#HttpOnly_")
@@ -150,17 +152,31 @@ func parseNetscapeCookies(text string) ([]auth.StateCookie, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 7 {
-			return nil, fmt.Errorf("cookies.txt 第 %d 行不是 7 个制表符分隔的字段", number+1)
+		var cookie auth.StateCookie
+		switch {
+		case len(fields) == 7 && (fields[1] == "TRUE" || fields[1] == "FALSE"):
+			expires, _ := strconv.ParseFloat(fields[4], 64)
+			cookie = auth.StateCookie{
+				Name: fields[5], Value: fields[6], Domain: fields[0], Path: fields[2], Expires: expires,
+				HTTPOnly: httpOnly, Secure: strings.EqualFold(fields[3], "TRUE"),
+			}
+		case len(fields) >= 4:
+			// 开发者工具的列依次为名称、值、域、路径、到期时间、大小、HttpOnly、Secure，勾选显示为 ✓
+			cookie = auth.StateCookie{Name: fields[0], Value: fields[1], Domain: fields[2], Path: fields[3]}
+			if len(fields) > 4 {
+				if expires, err := time.Parse(time.RFC3339, fields[4]); err == nil {
+					cookie.Expires = float64(expires.Unix())
+				}
+			}
+			cookie.HTTPOnly = len(fields) > 6 && strings.TrimSpace(fields[6]) == "✓"
+			cookie.Secure = len(fields) > 7 && strings.TrimSpace(fields[7]) == "✓"
+		default:
+			return nil, fmt.Errorf("Cookie 表格第 %d 行无法识别，应为 cookies.txt 的 7 列或开发者工具 Cookie 表格的行", number+1)
 		}
-		if !googleDomain(fields[0]) || fields[6] == "" {
+		if !googleDomain(cookie.Domain) || cookie.Value == "" {
 			continue
 		}
-		expires, _ := strconv.ParseFloat(fields[4], 64)
-		cookies = append(cookies, auth.StateCookie{
-			Name: fields[5], Value: fields[6], Domain: fields[0], Path: fields[2], Expires: expires,
-			HTTPOnly: httpOnly, Secure: strings.EqualFold(fields[3], "TRUE"),
-		})
+		cookies = append(cookies, cookie)
 	}
 	return cookies, nil
 }

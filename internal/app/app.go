@@ -232,6 +232,10 @@ func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, err
 			reserved = cfg.ListenAddress
 		}
 	}
+	if errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, portInUse) {
+		_ = lock.Unlock()
+		return nil, fmt.Errorf("监听 %s 失败：端口已被其他程序占用，关闭占用它的程序，或用启动参数 --listen 或 .env 中的 LISTEN_ADDR 换一个端口", cfg.ListenAddress)
+	}
 	if err != nil {
 		_ = lock.Unlock()
 		return nil, fmt.Errorf("监听 %s: %w", cfg.ListenAddress, err)
@@ -259,6 +263,9 @@ func (instance *Instance) Address() string {
 
 // portReserved 是 Windows 拒绝监听系统保留端口（Hyper-V、WSL2、Docker 的 WinNAT 保留端口段）时返回的 WSAEACCES
 const portReserved = syscall.Errno(10013)
+
+// portInUse 是 Windows 上监听地址已被其他程序占用时返回的 WSAEADDRINUSE
+const portInUse = syscall.Errno(10048)
 
 // listenAfter 从 address 的下一个端口起依次监听，返回第一个监听成功的监听器
 func listenAfter(address string) (net.Listener, error) {
@@ -356,13 +363,13 @@ func (instance *Instance) Serve(ctx context.Context) error {
 			logging.Warn(logging.SourceService, "删除在线更新留下的旧版本失败", "错误", err)
 		}
 	}
-	server := newHTTPServer(compressAdmin(NewRouter(Deps{
-		Pool: pool, Store: store, Accounts: manager, APIKey: settings.APIKey,
+	server := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: compressAdmin(NewRouter(Deps{
+		Pool: pool, Store: store, APIKey: settings.APIKey,
 		Admin: &admin.Deps{
 			Pool: pool, Accounts: manager, Store: store, Settings: settings, Version: Version(), StartedAt: started,
 			ListenAddr: listener.Addr().String(), ReservedListen: instance.reserved, DataDir: workDir, Desktop: instance.desktop, Updates: updater, Stopping: shuttingDown,
 		},
-	})))
+	}))}
 	server.RegisterOnShutdown(func() { close(shuttingDown) })
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
@@ -443,22 +450,9 @@ func logStartup(cfg config.Config, accountCount int) {
 	for _, invalid := range cfg.Invalid {
 		logging.Warn(logging.SourceService, "配置取值无效，按默认值启动", "项", invalid.Key, "取值", invalid.Value, "原因", invalid.Reason)
 	}
-	if cfg.ProxyAPIKey == "" && !loopbackAddress(cfg.ListenAddress) {
+	if cfg.ProxyAPIKey == "" && !adapter.LoopbackHost(cfg.ListenAddress) {
 		logging.Warn(logging.SourceService, "监听地址不是本机回环且未设置 PROXY_API_KEY，能访问该地址的任何人都可以调用", "监听", cfg.ListenAddress)
 	}
-}
-
-// loopbackAddress 判断监听地址是否只接受本机连接
-func loopbackAddress(address string) bool {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return false
-	}
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // authDir 返回管理端导入账号的目录，取第一个认证路径中的目录
@@ -472,11 +466,6 @@ func authDir(paths []string) string {
 		}
 	}
 	return "auth"
-}
-
-// newHTTPServer 创建 HTTP 服务，活动请求在停机时先等待结束
-func newHTTPServer(handler http.Handler) *http.Server {
-	return &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 }
 
 // firstEventHedge 把配置中的首事件备用请求方式换成适配层设置
@@ -510,14 +499,11 @@ func ParseFlags(args []string, cfg *config.Config) (bool, error) {
 	}
 	flags.Visit(func(set *flag.Flag) {
 		if key := flagKeys[set.Name]; key != "" {
-			if cfg.Locked == nil {
-				cfg.Locked = map[string]string{}
-			}
 			cfg.Locked[key] = "flag"
 		}
 	})
 
-	cfg.AuthStatePaths = splitFlagList(*authPaths)
+	cfg.AuthStatePaths = config.SplitList(*authPaths)
 	cfg.ListenAddress = strings.TrimSpace(*listenAddress)
 	if cfg.ListenAddress == "" {
 		return false, fmt.Errorf("监听地址不能为空")
@@ -541,18 +527,6 @@ func usage(flags *flag.FlagSet) string {
 	lines := []string{"首次配置: gemini-web2api setup", "查看版本: gemini-web2api version", "日常启动: gemini-web2api [参数]"}
 	flags.VisitAll(func(item *flag.Flag) { lines = append(lines, fmt.Sprintf("--%s：%s", item.Name, item.Usage)) })
 	return strings.Join(lines, "\n")
-}
-
-func splitFlagList(value string) []string {
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
 }
 
 // recordLogs 把 WARN 以上的日志写入账本，订阅因跟不上被关闭时重新订阅，直到 ctx 结束

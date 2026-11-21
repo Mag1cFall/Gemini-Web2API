@@ -225,10 +225,14 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			}
 			rememberHistory(pool, result, request.Instructions, bridge, turns)
 			applyRequestFields(response, request)
+			err = writer.settleOutput(response, result.Accumulator, projection)
 			if !finishResponseJob(responseID) {
 				saveResponse(ctx, store, request, responseID, created, response)
 			}
-			if err := writer.finishProjected(response, result.Accumulator, projection); err != nil {
+			if err == nil {
+				err = writer.finishOutput(response)
+			}
+			if err != nil {
 				writer.fail(c, err)
 			}
 			return
@@ -443,14 +447,14 @@ func responseImageContent(result string) (json.RawMessage, error) {
 	if strings.TrimSpace(result) == "" {
 		return nil, fmt.Errorf("image_generation_call 缺少 result")
 	}
-	data, err := base64.StdEncoding.DecodeString(result)
+	data, err := decodeBase64(result)
 	if err != nil {
 		return nil, fmt.Errorf("image_generation_call.result 不是有效 base64: %w", err)
 	}
 	mimeType := http.DetectContentType(data)
 	return json.Marshal([]gin.H{
 		{"type": "input_text", "text": "Previous generated image"},
-		{"type": "input_image", "image_url": "data:" + mimeType + ";base64," + result},
+		{"type": "input_image", "image_url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)},
 	})
 }
 
@@ -604,14 +608,10 @@ func buildResponsesObject(id string, created int64, previousResponseID string, r
 		output = append(output, gin.H{"id": "rs_" + id, "type": "reasoning", "summary": []gin.H{{"type": "summary_text", "text": primary.Thought}}})
 	}
 	if len(primary.Citations) > 0 {
-		sources := make([]gin.H, 0, len(primary.Citations))
-		seenSources := make(map[string]struct{}, len(primary.Citations))
-		for _, citation := range primary.Citations {
-			if _, exists := seenSources[citation.URL]; exists {
-				continue
-			}
-			seenSources[citation.URL] = struct{}{}
-			sources = append(sources, gin.H{"type": "url", "url": citation.URL})
+		unique, _ := citationSources(primary.Citations)
+		sources := make([]gin.H, len(unique))
+		for index, citation := range unique {
+			sources[index] = gin.H{"type": "url", "url": citation.URL}
 		}
 		output = append(output, gin.H{
 			"id": "ws_" + id, "type": "web_search_call", "status": "completed",
@@ -623,10 +623,7 @@ func buildResponsesObject(id string, created int64, previousResponseID string, r
 	markdownOutput := responsesMarkdownOutput(primary)
 	content = renderCandidateMarkdown(content, markdownOutput, 0)
 	if strings.TrimSpace(content) != "" {
-		parts := []gin.H{}
-		if content != "" {
-			parts = append(parts, gin.H{"type": "output_text", "text": content, "annotations": responsesCitationAnnotations(content, primary.Citations)})
-		}
+		parts := []gin.H{{"type": "output_text", "text": content, "annotations": responsesCitationAnnotations(content, primary.Citations)}}
 		output = append(output, gin.H{"id": "msg_" + id, "type": "message", "status": "completed", "role": "assistant", "content": parts})
 	}
 	for _, call := range calls {
@@ -644,13 +641,10 @@ func buildResponsesObject(id string, created int64, previousResponseID string, r
 	if result.ConversationID != "" {
 		response["conversation_id"] = result.ConversationID
 	}
-	if result.Accumulator.Usage != nil {
-		outputTokens := result.Accumulator.Usage.OutputTokens()
-		reasoningTokens := result.Accumulator.Usage.ThoughtTokens
-		response["usage"] = gin.H{
-			"input_tokens": result.Accumulator.Usage.PromptTokens, "output_tokens": outputTokens, "total_tokens": result.Accumulator.Usage.PromptTokens + outputTokens,
-			"input_tokens_details": gin.H{"cached_tokens": 0}, "output_tokens_details": gin.H{"reasoning_tokens": reasoningTokens},
-		}
+	usage := result.Accumulator.Usage
+	response["usage"] = gin.H{
+		"input_tokens": usage.PromptTokens, "output_tokens": usage.OutputTokens(), "total_tokens": usage.PromptTokens + usage.OutputTokens(),
+		"input_tokens_details": gin.H{"cached_tokens": 0}, "output_tokens_details": gin.H{"reasoning_tokens": usage.ThoughtTokens},
 	}
 	return response, nil
 }
@@ -771,13 +765,16 @@ type responseSequenceWriter struct {
 	writer   http.ResponseWriter
 	sequence int
 	// startAt 是开始写出的事件序号，流式取回保存的响应时为 starting_after 加 1
-	startAt            int
-	responseID         string
-	model              string
-	created            int64
-	outputOrder        []string
-	outputIndexes      map[string]int
-	reasoningStarted   bool
+	startAt          int
+	responseID       string
+	model            string
+	created          int64
+	outputOrder      []string
+	outputIndexes    map[string]int
+	reasoningStarted bool
+	// reasoningText 是已发出的思考摘要，reasoningDone 表示正文开始前已结束思考项，之后到达的思考不再发出
+	reasoningText      strings.Builder
+	reasoningDone      bool
 	messagePartStarted bool
 	imageStarted       bool
 	imageGenerating    bool
@@ -801,10 +798,6 @@ func (w *responseSequenceWriter) emit(eventType string, payload gin.H) error {
 		return err
 	}
 	return streamio.Flush(w.writer)
-}
-
-func (w *responseSequenceWriter) start(responseID string, model string, created int64) error {
-	return w.startWith(responseID, model, created, "in_progress", ResponsesRequest{})
 }
 
 // startWith 发送 response.created 与 response.in_progress，后台响应的 created 状态为 queued
@@ -856,7 +849,12 @@ func (w *responseSequenceWriter) imageProgress(phase gemini.Phase) error {
 	return nil
 }
 
+// reasoningDelta 发出一段思考摘要；正文已开始后到达的思考不再发出，与官方一样一项结束后才开始下一项
 func (w *responseSequenceWriter) reasoningDelta(delta string) error {
+	if w.reasoningDone || w.messagePartStarted {
+		return nil
+	}
+	w.reasoningText.WriteString(delta)
 	id := "rs_" + w.responseID
 	index, err := w.ensureOutputItem(id, gin.H{"id": id, "type": "reasoning", "status": "in_progress", "summary": []interface{}{}})
 	if err != nil {
@@ -871,7 +869,13 @@ func (w *responseSequenceWriter) reasoningDelta(delta string) error {
 	return w.emit("response.reasoning_summary_text.delta", gin.H{"item_id": id, "output_index": index, "summary_index": 0, "delta": delta})
 }
 
+// textDelta 发出一段正文，正文开始前先结束已发出的思考项
 func (w *responseSequenceWriter) textDelta(delta string) error {
+	if w.reasoningStarted && !w.reasoningDone {
+		if err := w.closeReasoning(); err != nil {
+			return err
+		}
+	}
 	id := "msg_" + w.responseID
 	index, err := w.ensureOutputItem(id, gin.H{"id": id, "type": "message", "status": "in_progress", "role": "assistant", "content": []interface{}{}})
 	if err != nil {
@@ -884,6 +888,18 @@ func (w *responseSequenceWriter) textDelta(delta string) error {
 		w.messagePartStarted = true
 	}
 	return w.emit("response.output_text.delta", gin.H{"item_id": id, "output_index": index, "content_index": 0, "delta": delta, "logprobs": []interface{}{}})
+}
+
+// closeReasoning 以已发出的思考摘要结束思考项
+func (w *responseSequenceWriter) closeReasoning() error {
+	w.reasoningDone = true
+	id := "rs_" + w.responseID
+	index := w.outputIndexes[id]
+	item := gin.H{"id": id, "type": "reasoning", "summary": []gin.H{{"type": "summary_text", "text": w.reasoningText.String()}}}
+	if err := w.finishReasoning(index, item); err != nil {
+		return err
+	}
+	return w.emit("response.output_item.done", gin.H{"output_index": index, "item": item})
 }
 
 func (w *responseSequenceWriter) ensureOutputItem(id string, item gin.H) (int, error) {
@@ -911,7 +927,8 @@ func (w *responseSequenceWriter) fail(c *gin.Context, err error) gin.H {
 	return failure
 }
 
-func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *EventAccumulator, projection *streamProjection) error {
+// settleOutput 补发暂缓的思考与正文，再按已发出的事件确定最终输出：输出项按发出顺序排列，正文开始前已结束的思考项只保留已发出的摘要；保存与 finishOutput 写出的都是这一对象
+func (w *responseSequenceWriter) settleOutput(response gin.H, accumulator *EventAccumulator, projection *streamProjection) error {
 	primary := accumulator.Primary()
 	if projection.includeThought && projection.bufferThought && primary.Thought != "" {
 		if err := w.reasoningDelta(primary.Thought); err != nil {
@@ -937,9 +954,23 @@ func (w *responseSequenceWriter) finishProjected(response gin.H, accumulator *Ev
 		}
 	}
 	output = w.orderOutput(output)
+	for _, item := range output {
+		if item["type"] == "reasoning" && w.reasoningDone {
+			item["summary"] = []gin.H{{"type": "summary_text", "text": w.reasoningText.String()}}
+		}
+	}
 	response["output"] = output
+	return nil
+}
+
+// finishOutput 写出各输出项的其余事件与 response.completed 或 response.incomplete，正文开始前已结束的思考项不再写出
+func (w *responseSequenceWriter) finishOutput(response gin.H) error {
+	output, _ := response["output"].([]gin.H)
 	for _, item := range output {
 		id, _ := item["id"].(string)
+		if item["type"] == "reasoning" && w.reasoningDone {
+			continue
+		}
 		index, err := w.ensureOutputItem(id, addedResponseItem(item))
 		if err != nil {
 			return err

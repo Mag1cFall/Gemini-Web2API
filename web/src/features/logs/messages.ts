@@ -42,7 +42,6 @@ export const logsMessages = defineMessages({
     hedge: '备用请求',
     stage: '阶段',
     accountAttempts: '{account} 参与的尝试',
-    attemptOk: '{account} 完成了这次请求',
     description: '实时日志保留最近 2000 条，警告与错误另存 90 天，可在“已保存”中检索',
     view: '视图',
     saved: '已保存',
@@ -53,7 +52,6 @@ export const logsMessages = defineMessages({
     range90d: '90 天',
     savedWarn: '警告与错误',
     savedError: '仅错误',
-    clearRequest: '取消按请求 {id} 筛选',
     requestIdFilter: '请求 ID',
     searchSaved: '搜索消息、账号、模型或请求 ID',
     older: '加载更早的日志',
@@ -61,7 +59,6 @@ export const logsMessages = defineMessages({
     loadFailed: '读取已保存的日志失败',
     savedEmptyTitle: '这段时间没有警告或错误',
     savedEmptyDescription: '换一个时间范围或搜索词再试',
-    openSaved: '查看已保存的日志',
     nothingToClear: '没有可清空的日志',
   },
   'zh-TW': {
@@ -104,7 +101,6 @@ export const logsMessages = defineMessages({
     hedge: '備用請求',
     stage: '階段',
     accountAttempts: '{account} 參與的嘗試',
-    attemptOk: '{account} 完成了這次請求',
     description: '即時日誌保留最近 2000 筆，警告與錯誤另存 90 天，可在「已儲存」中搜尋',
     view: '檢視',
     saved: '已儲存',
@@ -115,7 +111,6 @@ export const logsMessages = defineMessages({
     range90d: '90 天',
     savedWarn: '警告與錯誤',
     savedError: '僅錯誤',
-    clearRequest: '取消依請求 {id} 篩選',
     requestIdFilter: '請求 ID',
     searchSaved: '搜尋訊息、帳號、模型或請求 ID',
     older: '載入更早的日誌',
@@ -123,7 +118,6 @@ export const logsMessages = defineMessages({
     loadFailed: '讀取已儲存的日誌失敗',
     savedEmptyTitle: '這段時間沒有警告或錯誤',
     savedEmptyDescription: '換一個時間範圍或搜尋詞再試',
-    openSaved: '查看已儲存的日誌',
     nothingToClear: '沒有可清除的日誌',
   },
   en: {
@@ -166,7 +160,6 @@ export const logsMessages = defineMessages({
     hedge: 'Backup request',
     stage: 'Stage',
     accountAttempts: 'Attempts by {account}',
-    attemptOk: '{account} completed this request',
     description:
       'Live logs keep the latest 2000 entries; warnings and errors are saved for 90 days and searchable under Saved',
     view: 'View',
@@ -178,7 +171,6 @@ export const logsMessages = defineMessages({
     range90d: '90 days',
     savedWarn: 'Warnings and errors',
     savedError: 'Errors only',
-    clearRequest: 'Stop filtering by request {id}',
     requestIdFilter: 'Request ID',
     searchSaved: 'Search messages, accounts, models or request IDs',
     older: 'Load older logs',
@@ -186,7 +178,6 @@ export const logsMessages = defineMessages({
     loadFailed: "Couldn't load saved logs",
     savedEmptyTitle: 'No warnings or errors in this period',
     savedEmptyDescription: 'Try another time range or search term',
-    openSaved: 'View saved logs',
     nothingToClear: 'There are no logs to clear',
   },
   ja: {
@@ -229,7 +220,6 @@ export const logsMessages = defineMessages({
     hedge: '予備リクエスト',
     stage: '段階',
     accountAttempts: '{account} の試行',
-    attemptOk: '{account} がこのリクエストを完了しました',
     description:
       'リアルタイムログは直近 2000 件を保持し、警告とエラーは 90 日間保存されて「保存済み」で検索できます',
     view: '表示',
@@ -241,7 +231,6 @@ export const logsMessages = defineMessages({
     range90d: '90 日',
     savedWarn: '警告とエラー',
     savedError: 'エラーのみ',
-    clearRequest: 'リクエスト {id} での絞り込みを解除',
     requestIdFilter: 'リクエスト ID',
     searchSaved: 'メッセージ、アカウント、モデル、リクエスト ID を検索',
     older: 'さらに古いログを読み込む',
@@ -249,7 +238,6 @@ export const logsMessages = defineMessages({
     loadFailed: '保存済みログを読み込めませんでした',
     savedEmptyTitle: 'この期間に警告やエラーはありません',
     savedEmptyDescription: '別の期間や検索語で試してください',
-    openSaved: '保存済みログを見る',
     nothingToClear: '消去するログがありません',
   },
   ko: {
@@ -292,7 +280,6 @@ export const logsMessages = defineMessages({
     hedge: '백업 요청',
     stage: '단계',
     accountAttempts: '{account}의 시도',
-    attemptOk: '{account}이(가) 이 요청을 완료했습니다',
     description:
       "실시간 로그는 최근 2000건을 보관하고, 경고와 오류는 90일간 저장되어 '저장됨'에서 검색할 수 있습니다",
     view: '보기',
@@ -304,7 +291,6 @@ export const logsMessages = defineMessages({
     range90d: '90일',
     savedWarn: '경고와 오류',
     savedError: '오류만',
-    clearRequest: '요청 {id} 필터 해제',
     requestIdFilter: '요청 ID',
     searchSaved: '메시지, 계정, 모델 또는 요청 ID 검색',
     older: '이전 로그 불러오기',
@@ -312,7 +298,6 @@ export const logsMessages = defineMessages({
     loadFailed: '저장된 로그를 불러오지 못했습니다',
     savedEmptyTitle: '이 기간에 경고나 오류가 없습니다',
     savedEmptyDescription: '다른 기간이나 검색어로 다시 시도하세요',
-    openSaved: '저장된 로그 보기',
     nothingToClear: '지울 로그가 없습니다',
   },
   fr: {
@@ -355,7 +340,6 @@ export const logsMessages = defineMessages({
     hedge: 'Requête de secours',
     stage: 'Étape',
     accountAttempts: 'Tentatives de {account}',
-    attemptOk: '{account} a terminé cette requête',
     description:
       'Les journaux en direct conservent les 2000 dernières entrées ; les avertissements et erreurs sont enregistrés 90 jours et consultables dans Enregistrés',
     view: 'Vue',
@@ -367,7 +351,6 @@ export const logsMessages = defineMessages({
     range90d: '90 jours',
     savedWarn: 'Avertissements et erreurs',
     savedError: 'Erreurs uniquement',
-    clearRequest: 'Ne plus filtrer par la requête {id}',
     requestIdFilter: 'ID de requête',
     searchSaved: 'Rechercher messages, comptes, modèles ou ID de requête',
     older: 'Charger des journaux plus anciens',
@@ -375,7 +358,6 @@ export const logsMessages = defineMessages({
     loadFailed: 'Impossible de charger les journaux enregistrés',
     savedEmptyTitle: 'Aucun avertissement ni erreur sur cette période',
     savedEmptyDescription: 'Essayez une autre période ou un autre terme',
-    openSaved: 'Voir les journaux enregistrés',
     nothingToClear: 'Aucun journal à effacer',
   },
   de: {
@@ -418,7 +400,6 @@ export const logsMessages = defineMessages({
     hedge: 'Ersatzanfrage',
     stage: 'Phase',
     accountAttempts: 'Versuche von {account}',
-    attemptOk: '{account} hat diese Anfrage abgeschlossen',
     description:
       'Live-Protokolle behalten die letzten 2000 Einträge; Warnungen und Fehler werden 90 Tage gespeichert und sind unter Gespeichert durchsuchbar',
     view: 'Ansicht',
@@ -430,7 +411,6 @@ export const logsMessages = defineMessages({
     range90d: '90 Tage',
     savedWarn: 'Warnungen und Fehler',
     savedError: 'Nur Fehler',
-    clearRequest: 'Filter nach Anfrage {id} entfernen',
     requestIdFilter: 'Anfrage-ID',
     searchSaved: 'Nachrichten, Konten, Modelle oder Anfrage-IDs suchen',
     older: 'Ältere Protokolle laden',
@@ -438,7 +418,6 @@ export const logsMessages = defineMessages({
     loadFailed: 'Gespeicherte Protokolle konnten nicht geladen werden',
     savedEmptyTitle: 'Keine Warnungen oder Fehler in diesem Zeitraum',
     savedEmptyDescription: 'Versuche einen anderen Zeitraum oder Suchbegriff',
-    openSaved: 'Gespeicherte Protokolle anzeigen',
     nothingToClear: 'Keine Protokolle zum Leeren',
   },
 })

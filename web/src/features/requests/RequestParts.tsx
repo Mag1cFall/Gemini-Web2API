@@ -46,7 +46,7 @@ export function DetailSection({ title, children }: { title: string; children: Re
 // AttemptList 是失败的上游尝试时间线，empty 为没有失败尝试时的说明
 export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: string }) {
   const m = useMessages(requestsMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const accountLabel = useAccountLabel()
   if (attempts.length === 0) return <p className="text-sm text-foreground-muted">{empty}</p>
   return (
@@ -63,7 +63,7 @@ export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: s
               {attempt.status > 0 ? 'HTTP ' + String(attempt.status) : '—'}
             </span>
             <span className="text-foreground-muted tabular-nums">
-              {formatDuration(attempt.duration_ms, locale)}
+              {formatDuration(attempt.duration_ms, language)}
             </span>
             {attempt.hedge && <Tag>{m.attemptHedge}</Tag>}
             {attempt.superseded && <Tag>{m.attemptSuperseded}</Tag>}
@@ -94,8 +94,8 @@ function byteLength(text: string) {
 // RequestBodyView 读取并显示一条已结束请求保存的请求与响应正文，没有保存时说明如何开启
 export function RequestBodyView({ id }: { id: string }) {
   const m = useMessages(bodyMessages)
-  const { locale } = useI18n()
-  const body = useRequestBody(id, true)
+  const { language } = useI18n()
+  const body = useRequestBody(id)
   if (body.isPending) return <p className="text-sm text-foreground-muted">{m.loading}</p>
   if (body.isError) {
     return body.error instanceof ApiError && body.error.status === 404 ? (
@@ -118,12 +118,12 @@ export function RequestBodyView({ id }: { id: string }) {
           <div key={part.label} className="flex min-w-0 flex-col gap-1">
             <div className="flex items-center gap-2 text-xs text-foreground-muted">
               <span className="font-medium text-foreground">{part.label}</span>
-              <span className="tabular-nums">{formatBytes(part.size, locale)}</span>
+              <span className="tabular-nums">{formatBytes(part.size, language)}</span>
               {part.size > saved && (
                 <span className="text-warning-text">
                   {fill(m.truncated, {
-                    saved: formatBytes(saved, locale),
-                    size: formatBytes(part.size, locale),
+                    saved: formatBytes(saved, language),
+                    size: formatBytes(part.size, language),
                   })}
                 </span>
               )}

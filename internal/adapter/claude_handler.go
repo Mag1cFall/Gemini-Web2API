@@ -159,33 +159,31 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				if stream.reject() {
 					writeClaudeError(c, upstreamStatus(err), claudeUpstreamType(err), err.Error())
 				} else {
-					_ = processor.EmitErrorType(claudeUpstreamType(err), streamFailure(c, err))
+					_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				}
 				return
 			}
 			processor.SetModel(result.Model)
 			processor.SetProviderModel(result.ProviderModel)
 			if err := inlineResultMedia(c.Request.Context(), &result); err != nil {
-				_ = processor.EmitError(streamFailure(c, err))
+				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				return
 			}
 			primary := result.Accumulator.Primary()
 			if err := validateHostedOutput(primary, bridge); err != nil {
-				_ = processor.EmitError(streamFailure(c, err))
+				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				return
 			}
 			rememberHistory(pool, result, system, bridge, turns)
 			content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 			if err != nil {
-				_ = processor.EmitError(streamFailure(c, err))
+				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				return
 			}
 			calls = assignToolCallIDs(calls, responseID)
 			processor.SetConversationID(result.ConversationID)
-			if result.Accumulator.Usage != nil {
-				if err := processor.ProcessEvent(gemini.Event{Kind: gemini.EventMetadata, Usage: result.Accumulator.Usage}); err != nil {
-					return
-				}
+			if err := processor.ProcessEvent(gemini.Event{Kind: gemini.EventMetadata, Usage: result.Accumulator.Usage}); err != nil {
+				return
 			}
 			if includeThoughts && thinkingOpen {
 				if err := processor.FinishThinking(thinkingSignature(responseID, thinkingBlock)); err != nil {
@@ -325,11 +323,8 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 		}
 		response := claude.ClaudeResponse{
 			ID: responseID, Type: "message", Role: "assistant", Model: result.Model, Content: blocks,
-			StopReason: stopReason, StopSequence: stopSequence, ConversationID: result.ConversationID, Usage: &claude.Usage{}, ProviderModel: result.ProviderModel,
-		}
-		if result.Accumulator.Usage != nil {
-			usage := result.Accumulator.Usage
-			response.Usage = &claude.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens()}
+			StopReason: stopReason, StopSequence: stopSequence, ConversationID: result.ConversationID, ProviderModel: result.ProviderModel,
+			Usage: &claude.Usage{InputTokens: result.Accumulator.Usage.PromptTokens, OutputTokens: result.Accumulator.Usage.OutputTokens()},
 		}
 		if searched || len(pages) > 0 {
 			response.Usage.ServerToolUse = &claude.ServerToolUse{WebFetchRequests: len(pages)}
@@ -396,7 +391,7 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 	messages := request.Messages
 	if continuation {
 		for index := len(messages) - 1; index >= 0; index-- {
-			if messages[index].Role == "assistant" {
+			if messages[index].Role == "assistant" && index+1 < len(messages) {
 				messages = messages[index+1:]
 				break
 			}
@@ -435,7 +430,8 @@ func buildClaudePrompt(c *gin.Context, client *gemini.Client, request claude.Cla
 			}
 		}
 	}
-	return renderTranscript(turns, suffix), files, nil
+	prompt, files := transcriptPrompt(turns, suffix, files)
+	return prompt, files, nil
 }
 
 // claudeMessageText 返回消息内容中的文字

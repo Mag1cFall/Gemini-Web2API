@@ -1,4 +1,4 @@
-# Gemini-Web2API (Go Version)
+# Gemini-Web2API
 
 [简体中文](README.md) | [English](README.en.md)
 
@@ -294,7 +294,7 @@ DELETE /v1beta/files/{name}
 GET    /v1beta/models
 ```
 
-The same methods are also served under `/v1` (the default path of google-genai 3.x); `GET /v1/models` and `/v1/files` return the Gemini shape when the request carries `x-goog-api-key`.
+The same methods are also served under `/v1` (the default path of google-genai 3.x); `GET /v1/models` and `/v1/files` return the Gemini shape when the request carries `x-goog-api-key`, or `?key=` without `Authorization`.
 
 Interactions are stored in `data/requests.db` for 30 days like Responses; `background: true` runs them in the background, and they can be retrieved as a stream, cancelled, and deleted. `cachedContents` are kept in service memory, expire after 1 hour by default, and are cleared when the service restarts; generation and token-count requests reference them with `cachedContent`.
 
@@ -355,33 +355,6 @@ curl http://127.0.0.1:8007/v1/chat/completions \
 
 Use `http://127.0.0.1:8007/v1` as the OpenAI SDK base URL. Claude and Google GenAI SDKs use `http://127.0.0.1:8007`. Copy configuration for common clients from the Connect page in the console.
 
-## Layout
-
-```text
-cmd/gemini-web2api/  # Program entry point
-internal/
-  accounts/          # Account initialization, renewal, cookie rotation, and runtime changes
-  adapter/           # OpenAI, Claude, and Gemini projections
-  admin/             # Console API
-  app/               # Configuration, instance lock, and service lifecycle
-  auth/              # Account state loading and persistence
-  balancer/          # Multi-account scheduling
-  chromeauth/        # Chrome and cookie account import
-  claude/            # Claude protocol types and stream events
-  config/            # Service configuration
-  desktop/           # Desktop window and tray
-  gemini/            # Gemini Web protocol client
-  logging/           # Run logs and request tracing
-  mcp/               # MCP server and tools
-  pricing/           # Equivalent API prices
-  requestdb/         # Request ledger
-  streamio/          # HTTP stream flushing
-  tokencount/        # Local Gemini tokenizer counting
-  webui/             # Embedded console pages
-web/                 # Console frontend source
-build/               # Desktop icons and packaging configuration
-```
-
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -414,10 +387,10 @@ build/               # Desktop icons and packaging configuration
 | `FIRST_EVENT_HEDGE` | First-output backup request: `auto`, a wait in seconds, or `off` | `auto` |
 | `FIRST_EVENT_HEDGE_MODELS` | Model IDs that send first-output backup requests, separated by commas | `gemini-4-carbon,gemini-4-argon` |
 
-`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts; with `fill-first`, the first idle account is preferred: accounts with the largest context window come first, accounts with the same window follow the `ACCOUNT_ORDER` order, and unlisted accounts follow in import order. Keys missing from `API_KEY_ACCOUNTS` can use every account; listed keys use only their accounts and never the guest session. Models missing from `MODEL_ACCOUNTS` can use every account; listed models pick only from their accounts, together with `API_KEY_ACCOUNTS`. The model details on the console's Models page can also set these accounts. `FIRST_EVENT_HEDGE` sends the same request from another idle account when the original has not returned its first event for a while and uses whichever answers first; `auto` uses the p95 first-event wait of each model over the last 24 hours.
+`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts starting from a random position; with `fill-first`, the first idle account is preferred: accounts with the largest context window come first, accounts with the same window follow the `ACCOUNT_ORDER` order, and unlisted accounts follow in import order. Keys missing from `API_KEY_ACCOUNTS` can use every account; listed keys use only their accounts and never the guest session. Models missing from `MODEL_ACCOUNTS` can use every account; listed models pick only from their accounts, together with `API_KEY_ACCOUNTS`. The model details on the console's Models page can also set these accounts. `FIRST_EVENT_HEDGE` sends the same request from another idle account when the original has not returned its first event for a while and uses whichever answers first; `auto` uses the p95 first-event wait of each model over the last 24 hours.
 
 The `--auth` and `--listen` flags override auth paths and the listener address; `--open-ui` controls whether the console opens in the browser after startup, and defaults to on when the program starts without arguments.
 
-## Notes
+## Documentation
 
-Gemini Web is an internal protocol that can change with the website. Treat the live model catalog returned after startup as the source of truth. Issues and PRs are welcome. Development guidance is in [docs/development.md](docs/development.md); authentication, payload, and streaming details are in [docs/protocol.md](docs/protocol.md); logs and the request ledger are described in [docs/logging.md](docs/logging.md).
+Development guidance is in [docs/development.md](docs/development.md); authentication, payload, and streaming details are in [docs/protocol.md](docs/protocol.md); capturing and realigning after website changes are in [docs/upstream.md](docs/upstream.md); logs and the request ledger are described in [docs/logging.md](docs/logging.md).

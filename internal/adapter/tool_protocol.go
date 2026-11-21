@@ -482,15 +482,6 @@ func fenced(text string) string {
 	if strings.Contains(text, "|im_") {
 		text = escapeMarkers(text)
 	}
-	longest, run := 0, 0
-	for _, char := range text {
-		if char == '`' {
-			run++
-			longest = max(longest, run)
-		} else {
-			run = 0
-		}
-	}
-	fence := strings.Repeat("`", max(3, longest+1))
+	fence := strings.Repeat("`", max(3, longestBacktickRun(text)+1))
 	return fence + "\n" + text + "\n" + fence + "\n"
 }

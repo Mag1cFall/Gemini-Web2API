@@ -22,9 +22,7 @@ func (c *Client) onboardTask(ctx context.Context, bootstrap Bootstrap, model Mod
 		return false, err
 	}
 	c.bootstrapMu.Lock()
-	if c.bootstrap != nil {
-		c.bootstrap.Preferences = c.bootstrap.Preferences.with(preferenceTaskOnboarded, true)
-	}
+	c.bootstrap.Preferences = c.bootstrap.Preferences.with(preferenceTaskOnboarded, true)
 	c.bootstrapMu.Unlock()
 	return true, nil
 }

@@ -2,21 +2,15 @@ package app
 
 import (
 	"fmt"
-	"net"
 	"os/exec"
 	"runtime"
+
+	"github.com/Mag1cFall/Gemini-Web2API/internal/admin"
 )
 
 // AdminURL 返回监听地址对应的本机管理页地址，通配地址换成 127.0.0.1
 func AdminURL(address string) string {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return "http://" + address + "/"
-	}
-	if ip := net.ParseIP(host); host == "" || ip != nil && ip.IsUnspecified() {
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port) + "/"
+	return admin.BaseURL(address) + "/"
 }
 
 // openBrowser 用当前系统的默认浏览器打开地址

@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -201,26 +200,19 @@ func SetModelMapping(mapping map[string]string) {
 	mappingMu.Lock()
 	defer mappingMu.Unlock()
 
-	modelMapping = make(map[string]string, len(mapping))
-	for source, target := range mapping {
-		modelMapping[source] = target
-	}
+	modelMapping = maps.Clone(mapping)
 }
 
 // ModelAliases 返回当前模型别名映射的副本
 func ModelAliases() map[string]string {
 	mappingMu.RLock()
 	defer mappingMu.RUnlock()
-	aliases := make(map[string]string, len(modelMapping))
-	for source, target := range modelMapping {
-		aliases[source] = target
-	}
-	return aliases
+	return maps.Clone(modelMapping)
 }
 
-// MapModel 去掉首尾空白与 models/、google/ 前缀后返回别名对应的真实模型标识
+// MapModel 去掉首尾空白、models/ 与 google/ 前缀和 Claude Code 1M 上下文模式的 [1m] 后缀后返回别名对应的真实模型标识
 func MapModel(model string) string {
-	model = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(model), "models/"), "google/")
+	model = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(model), "models/"), "google/"), "[1m]")
 	mappingMu.RLock()
 	defer mappingMu.RUnlock()
 
@@ -236,13 +228,8 @@ func envOrDefault(key string) string {
 
 // FormatModelMapping 按别名排序输出 MODEL_MAPPING 格式的映射
 func FormatModelMapping(mapping map[string]string) string {
-	aliases := make([]string, 0, len(mapping))
-	for alias := range mapping {
-		aliases = append(aliases, alias)
-	}
-	sort.Strings(aliases)
-	pairs := make([]string, 0, len(aliases))
-	for _, alias := range aliases {
+	pairs := make([]string, 0, len(mapping))
+	for _, alias := range slices.Sorted(maps.Keys(mapping)) {
 		pairs = append(pairs, alias+":"+mapping[alias])
 	}
 	return strings.Join(pairs, ",")

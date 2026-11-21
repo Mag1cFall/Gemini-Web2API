@@ -154,7 +154,7 @@ func responsesInputItems(raw json.RawMessage, responseID string) json.RawMessage
 
 // saveResponse 保存响应对象与输入项
 func saveResponse(ctx context.Context, store *requestdb.Store, request ResponsesRequest, id string, created int64, response gin.H) {
-	if store == nil || !request.storesResponse() {
+	if !request.storesResponse() {
 		return
 	}
 	encoded, err := json.Marshal(fieldorder.Official("responses", response))
@@ -223,9 +223,6 @@ const interruptedMessage = "The service restarted before this background task fi
 
 // failInterruptedResponses 把上次运行未完成的后台响应保存为 failed
 func failInterruptedResponses(store *requestdb.Store) {
-	if store == nil {
-		return
-	}
 	ctx := context.Background()
 	responses, err := store.UnfinishedResponses(ctx)
 	if err != nil {
@@ -314,10 +311,6 @@ type responsesRun struct {
 
 // storedResponseOrNotFound 读取保存的响应，不存在时写入 404
 func storedResponseOrNotFound(c *gin.Context, store *requestdb.Store, id string) (requestdb.StoredResponse, bool) {
-	if store == nil {
-		writeResponseNotFound(c, id)
-		return requestdb.StoredResponse{}, false
-	}
 	stored, err := store.Response(c.Request.Context(), id)
 	if errors.Is(err, requestdb.ErrNotFound) {
 		writeResponseNotFound(c, id)
@@ -430,7 +423,7 @@ func (w *responseSequenceWriter) replayOutput(response gin.H) error {
 	if response["status"] == "failed" {
 		return w.emit("response.failed", gin.H{"response": response})
 	}
-	return w.finishProjected(response, NewEventAccumulator(), &streamProjection{})
+	return w.finishOutput(response)
 }
 
 // ginValue 把 JSON 解码出的对象转为 gin.H、对象数组转为 []gin.H，供流式写出器按创建时的类型读取
@@ -534,9 +527,6 @@ func itemID(raw json.RawMessage) string {
 
 // rebuiltResponsesRequest 返回把已保存的前文与本次输入合并为完整输入的请求，以及 instructions 是否与最近一个前序响应不同；前文为 previous_response_id 的响应链，续接官网会话开关关闭时也可为 conversation 中保存的全部响应，没有保存时请求为 nil
 func rebuiltResponsesRequest(ctx context.Context, store *requestdb.Store, request ResponsesRequest, conversationID string) (*ResponsesRequest, bool) {
-	if store == nil {
-		return nil, false
-	}
 	var history []json.RawMessage
 	var latest requestdb.StoredResponse
 	switch {
@@ -577,9 +567,7 @@ func responseChainItems(ctx context.Context, store *requestdb.Store, stored requ
 	var items []json.RawMessage
 	_ = json.Unmarshal(stored.Input, &items)
 	segments := [][]json.RawMessage{items}
-	seen := map[string]bool{stored.ID: true}
-	for previous := stored.PreviousID; previous != "" && !seen[previous]; {
-		seen[previous] = true
+	for previous := stored.PreviousID; previous != ""; {
 		parent, err := store.Response(ctx, previous)
 		if err != nil {
 			break

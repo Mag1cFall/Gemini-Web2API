@@ -21,6 +21,7 @@ type ImageGenerationRequest struct {
 	Model             string `json:"model,omitempty"`
 	N                 int    `json:"n,omitempty"`
 	Size              string `json:"size,omitempty"`
+	AspectRatio       string `json:"aspect_ratio,omitempty"`
 	ResponseFormat    string `json:"response_format,omitempty"`
 	Quality           string `json:"quality,omitempty"`
 	Style             string `json:"style,omitempty"`
@@ -59,16 +60,14 @@ func ImageEditHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		if c.Request.MultipartForm != nil {
-			defer c.Request.MultipartForm.RemoveAll()
-		}
+		defer c.Request.MultipartForm.RemoveAll()
 		if len(c.Request.MultipartForm.File["mask"]) != 0 {
 			writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "mask is not supported by Gemini Web image editing")
 			return
 		}
 
 		request := ImageGenerationRequest{
-			Prompt: c.PostForm("prompt"), Model: c.PostForm("model"), Size: c.PostForm("size"),
+			Prompt: c.PostForm("prompt"), Model: c.PostForm("model"), Size: c.PostForm("size"), AspectRatio: c.PostForm("aspect_ratio"),
 			ResponseFormat: c.PostForm("response_format"), Quality: c.PostForm("quality"), Style: c.PostForm("style"),
 			OutputFormat: c.PostForm("output_format"), Background: c.PostForm("background"), User: c.PostForm("user"),
 			InputFidelity: c.PostForm("input_fidelity"), Moderation: c.PostForm("moderation"),
@@ -141,6 +140,11 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "prompt is required")
 		return
 	}
+	aspectRatio, err := resolveImageAspectRatio(request.Size, request.AspectRatio)
+	if err != nil {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	if request.Model == "" {
 		request.Model = defaultImageModel(pool)
 	}
@@ -177,7 +181,7 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 	for index := 0; index < request.N && len(images) < request.N; index++ {
 		responseID := fmt.Sprintf("img_%d_%d", time.Now().UnixNano(), index)
 		result, accountID, err := runGeneration(
-			c.Request.Context(), pool, "", sessionContinue, request.Model, responseID, generationMedia{requireImage: true, aspectRatio: request.Size}, gemini.ThinkingLow, ToolBridge{},
+			c.Request.Context(), pool, "", sessionContinue, request.Model, responseID, generationMedia{requireImage: true, aspectRatio: aspectRatio}, gemini.ThinkingLow, ToolBridge{},
 			func(*gemini.Client, bool) (string, []gemini.FileData, error) {
 				files := make([]gemini.FileData, 0, len(inputs))
 				for _, input := range inputs {
@@ -239,6 +243,48 @@ func handleImageRequest(c *gin.Context, pool *balancer.AccountPool, request Imag
 	c.JSON(http.StatusOK, response)
 }
 
+// resolveImageAspectRatio 解析图片请求的 size 与 aspect_ratio，返回传给上游的宽高比；auto 按未指定处理，格式无效或两者比例矛盾时返回错误
+func resolveImageAspectRatio(rawSize string, rawAspectRatio string) (string, error) {
+	size := strings.TrimSpace(rawSize)
+	if strings.EqualFold(size, "auto") {
+		size = ""
+	}
+	aspect := strings.TrimSpace(rawAspectRatio)
+	if strings.EqualFold(aspect, "auto") {
+		aspect = ""
+	}
+	var sizeRatio float64
+	var normalizedSize string
+	if size != "" {
+		var ok bool
+		sizeRatio, normalizedSize, ok = gemini.ParseAspectRatio(size, false)
+		if !ok {
+			return "", fmt.Errorf("size %q 格式无效，应为 auto 或 宽x高（例如 1024x1024、1536x1024）", rawSize)
+		}
+	}
+	var aspectRatio float64
+	var normalizedAspect string
+	if aspect != "" {
+		var ok bool
+		aspectRatio, normalizedAspect, ok = gemini.ParseAspectRatio(aspect, true)
+		if !ok {
+			return "", fmt.Errorf("aspect_ratio %q 格式无效，应为 宽:高（例如 16:9、9:16、1:1）", rawAspectRatio)
+		}
+	}
+	if normalizedSize != "" && normalizedAspect != "" {
+		sizeSnap := gemini.NearestImageAspectRatio(sizeRatio)
+		aspectSnap := gemini.NearestImageAspectRatio(aspectRatio)
+		if sizeSnap != aspectSnap {
+			return "", fmt.Errorf("size %q（对应比例 %s）与 aspect_ratio %q（对应比例 %s）比例矛盾，请只保留一项或使用一致的比例", rawSize, sizeSnap, rawAspectRatio, aspectSnap)
+		}
+		return normalizedAspect, nil
+	}
+	if normalizedAspect != "" {
+		return normalizedAspect, nil
+	}
+	return normalizedSize, nil
+}
+
 // imageFields 返回生成图片的 output_format 与 size
 func imageFields(data []byte) gin.H {
 	fields := gin.H{"output_format": strings.TrimPrefix(http.DetectContentType(data), "image/")}
@@ -249,7 +295,7 @@ func imageFields(data []byte) gin.H {
 }
 
 func defaultImageModel(pool *balancer.AccountPool) string {
-	for _, model := range availableModels(pool) {
+	for _, model := range Catalog(pool) {
 		if model.ID == gemini.ImageModelID {
 			return gemini.ImageModelID
 		}

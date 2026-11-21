@@ -20,8 +20,8 @@ export function PairInput({
   invalid: boolean
   addLabel: string
   removeLabel: string
-  left: (value: string, onChange: (next: string) => void, index: number) => ReactNode
-  right: (value: string, onChange: (next: string) => void, index: number) => ReactNode
+  left: (value: string, onChange: (next: string) => void) => ReactNode
+  right: (value: string, onChange: (next: string) => void) => ReactNode
   onChange: (next: string) => void
 }) {
   const rows = splitPairs(value)
@@ -39,23 +39,15 @@ export function PairInput({
       {rows.map(([name, target], index) => (
         <div key={index} className="flex min-w-0 items-center gap-2">
           <div className="min-w-0 flex-1">
-            {left(
-              name,
-              (next) => {
-                update(index, 0, next)
-              },
-              index,
-            )}
+            {left(name, (next) => {
+              update(index, 0, next)
+            })}
           </div>
           <ArrowRight size={14} aria-hidden className="shrink-0 text-foreground-subtle" />
           <div className="min-w-0 flex-1">
-            {right(
-              target,
-              (next) => {
-                update(index, 1, next)
-              },
-              index,
-            )}
+            {right(target, (next) => {
+              update(index, 1, next)
+            })}
           </div>
           <Button
             variant="ghost"

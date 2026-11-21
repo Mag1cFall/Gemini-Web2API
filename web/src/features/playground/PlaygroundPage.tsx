@@ -45,6 +45,7 @@ import { useConfig } from '@/features/settings/queries'
 import { useKeepPage } from '@/lib/desktop'
 import { formatBytes, formatDuration, formatNumber } from '@/lib/format'
 import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
+import { patchSearchParams } from '@/lib/searchParams'
 
 // Text 是 Playground 当前语言的文案
 type Text = (typeof playgroundMessages)['zh-CN']
@@ -276,7 +277,7 @@ function MediaList({ run }: { run: Run }) {
 // Output 是右侧的输出卡片：标题行显示状态、耗时与 token，内容为回复、原始响应与请求；run 不变时不重新渲染
 const Output = memo(function Output({ run }: { run: Run | undefined }) {
   const m = useMessages(playgroundMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   if (!run) {
     return (
       <Card className="flex flex-col xl:min-h-0">
@@ -292,15 +293,15 @@ const Output = memo(function Output({ run }: { run: Run | undefined }) {
   const facts = [
     run.firstMs === undefined
       ? undefined
-      : fill(m.firstEvent, { time: formatDuration(run.firstMs, locale) }),
+      : fill(m.firstEvent, { time: formatDuration(run.firstMs, language) }),
     run.durationMs === undefined
       ? undefined
-      : fill(m.duration, { time: formatDuration(run.durationMs, locale) }),
+      : fill(m.duration, { time: formatDuration(run.durationMs, language) }),
     usage
       ? fill(usage.cached === undefined ? m.usage : m.usageCached, {
-          input: formatNumber(usage.input ?? 0, locale),
-          cached: formatNumber(usage.cached ?? 0, locale),
-          output: formatNumber(usage.output ?? 0, locale),
+          input: formatNumber(usage.input ?? 0, language),
+          cached: formatNumber(usage.cached ?? 0, language),
+          output: formatNumber(usage.output ?? 0, language),
         })
       : undefined,
   ].filter(Boolean)
@@ -473,7 +474,7 @@ function useTabTitle(run: Run | undefined, text: { running: string; done: string
 export function PlaygroundPage() {
   const m = useMessages(playgroundMessages)
   const app = useMessages(appMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const models = useModels()
   const config = useConfig()
   const [params, setParams] = useSearchParams()
@@ -530,17 +531,7 @@ export function PlaygroundPage() {
   }
 
   const setParam = (changes: Record<string, string | undefined>) => {
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current)
-        for (const [key, value] of Object.entries(changes)) {
-          if (value === undefined) next.delete(key)
-          else next.set(key, value)
-        }
-        return next
-      },
-      { replace: true },
-    )
+    patchSearchParams(setParams, changes)
   }
 
   const input = (files: Attachment[], schema: unknown, functions: FunctionDeclaration[]) => ({
@@ -893,7 +884,7 @@ export function PlaygroundPage() {
                           >
                             <span className="truncate">{item.name}</span>
                             <span className="shrink-0 text-xs text-foreground-muted tabular-nums">
-                              {formatBytes(item.size, locale)}
+                              {formatBytes(item.size, language)}
                             </span>
                             <Button
                               variant="ghost"
@@ -987,7 +978,7 @@ export function PlaygroundPage() {
                       aria-live="polite"
                       className="self-center text-sm text-foreground-muted tabular-nums"
                     >
-                      {fill(m.inputTokens, { count: formatNumber(tokens.data, locale) })}
+                      {fill(m.inputTokens, { count: formatNumber(tokens.data, language) })}
                     </span>
                   )}
                 </div>

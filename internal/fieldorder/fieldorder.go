@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// fieldOrderJSON 是各公开协议输出对象的官方字段顺序表，与 AIStudio2API、Antigravity2API 相同
+// fieldOrderJSON 是各公开协议输出对象的官方字段顺序表
 //
 //go:embed field_order.json
 var fieldOrderJSON []byte
@@ -97,52 +97,41 @@ func (order *fieldOrder) value(value any, parent string) any {
 	case map[string]any:
 		return order.mapValue(value, parent)
 	case map[string]string:
-		if value == nil {
-			return value
-		}
-		fields := make(map[string]any, len(value))
-		for key, item := range value {
-			fields[key] = item
-		}
-		return order.object(fields, parent)
+		return orderedMap(order, value, parent)
 	case map[string]json.RawMessage:
-		if value == nil {
-			return value
-		}
-		fields := make(map[string]any, len(value))
-		for key, item := range value {
-			fields[key] = item
-		}
-		return order.object(fields, parent)
+		return orderedMap(order, value, parent)
 	case []gin.H:
-		if value == nil {
-			return value
-		}
-		items := make([]any, len(value))
-		for index, item := range value {
-			items[index] = order.value(item, parent)
-		}
-		return items
+		return orderedSlice(order, value, parent)
 	case []map[string]any:
-		if value == nil {
-			return value
-		}
-		items := make([]any, len(value))
-		for index, item := range value {
-			items[index] = order.value(item, parent)
-		}
-		return items
+		return orderedSlice(order, value, parent)
 	case []any:
-		if value == nil {
-			return value
-		}
-		items := make([]any, len(value))
-		for index, item := range value {
-			items[index] = order.value(item, parent)
-		}
-		return items
+		return orderedSlice(order, value, parent)
 	}
 	return value
+}
+
+// orderedMap 按字段顺序排列字符串键对象，nil 原样返回以输出 null
+func orderedMap[T any](order *fieldOrder, value map[string]T, parent string) any {
+	if value == nil {
+		return value
+	}
+	fields := make(map[string]any, len(value))
+	for key, item := range value {
+		fields[key] = item
+	}
+	return order.object(fields, parent)
+}
+
+// orderedSlice 逐项排列数组中的嵌套值，nil 原样返回以输出 null
+func orderedSlice[T any](order *fieldOrder, value []T, parent string) any {
+	if value == nil {
+		return value
+	}
+	items := make([]any, len(value))
+	for index, item := range value {
+		items[index] = order.value(item, parent)
+	}
+	return items
 }
 
 // mapValue 逐个排列动态对象的嵌套值

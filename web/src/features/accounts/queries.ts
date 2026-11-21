@@ -138,6 +138,24 @@ export function useAccountLabel() {
   )
 }
 
+// AccountAction 是对单个账号执行的启停、重新连接或设置代理操作
+export type AccountAction =
+  | { kind: 'verify' }
+  | { kind: 'enabled'; enabled: boolean }
+  | { kind: 'proxy'; proxy: string; current: string }
+
+// runAccountAction 向服务端发送单个账号的启停、重新连接或设置代理请求，代理未变化时直接返回
+export function runAccountAction(id: string, action: AccountAction) {
+  const path = '/api/accounts/' + encodeURIComponent(id)
+  if (action.kind === 'verify') return api(path + '/verify', { method: 'POST' })
+  if (action.kind === 'proxy') {
+    return action.proxy === action.current
+      ? Promise.resolve()
+      : api(path, { method: 'PUT', json: { proxy: action.proxy } })
+  }
+  return api(path, { method: 'PUT', json: { enabled: action.enabled } })
+}
+
 // useClearCooldown 清除账号的冷却，scope 为模型 ID 或表示账号级冷却的 *
 export function useClearCooldown() {
   const m = useMessages(accountsMessages)

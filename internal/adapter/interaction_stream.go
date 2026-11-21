@@ -349,7 +349,7 @@ func startBackgroundInteraction(c *gin.Context, pool *balancer.AccountPool, stor
 // storedInteraction 读取保存的交互，不存在时写入 404
 func storedInteraction(c *gin.Context, store *requestdb.Store) (requestdb.StoredResponse, bool) {
 	id := c.Param("interaction")
-	if store != nil && strings.HasPrefix(id, interactionIDPrefix) {
+	if strings.HasPrefix(id, interactionIDPrefix) {
 		stored, err := store.Response(c.Request.Context(), id)
 		if err == nil {
 			return stored, true

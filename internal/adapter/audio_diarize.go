@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -54,7 +53,7 @@ func parseKnownSpeakers(c *gin.Context) ([]knownSpeaker, error) {
 	speakers := make([]knownSpeaker, 0, len(names))
 	for index, name := range names {
 		mimeType, encoded, ok := splitDataURL(references[index])
-		data, err := base64.StdEncoding.DecodeString(encoded)
+		data, err := decodeBase64(encoded)
 		if !ok || err != nil || len(data) == 0 {
 			return nil, fmt.Errorf("known_speaker_references[%d] must be a base64 data URL of an audio sample", index)
 		}

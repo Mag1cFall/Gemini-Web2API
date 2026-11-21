@@ -13,13 +13,7 @@ import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { toast, toastDuration } from '@/components/ui/toast'
 import { DisabledHint } from '@/components/ui/tooltip'
-import {
-  groupLogs,
-  type LogFilter,
-  matchRow,
-  minimumLevels,
-  parseLogFilter,
-} from '@/features/logs/filter'
+import { groupLogs, matchRow, minimumLevels, parseLogFilter } from '@/features/logs/filter'
 import { LogLine } from '@/features/logs/LogLine'
 import { logsMessages } from '@/features/logs/messages'
 import { SavedLogs } from '@/features/logs/SavedLogs'
@@ -27,11 +21,12 @@ import type { LogEntry } from '@/features/logs/types'
 import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
 import { useI18n, useMessages } from '@/lib/i18n'
+import { patchSearchParams } from '@/lib/searchParams'
 
 // LiveLogs 显示实时日志：请求的生命周期合成卡片，按级别、来源与搜索词筛选，只渲染可见的行，可跟随最新日志滚动；清空后 5 秒内可撤销；toolbar 是视图切换
 function LiveLogs({ toolbar }: { toolbar: ReactNode }) {
   const m = useMessages(logsMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const client = useQueryClient()
   const [params, setParams] = useSearchParams()
   const filter = parseLogFilter(params)
@@ -105,13 +100,8 @@ function LiveLogs({ toolbar }: { toolbar: ReactNode }) {
   }
 
   // update 同步写入筛选条件
-  const update = (next: Partial<LogFilter>) => {
-    const search = new URLSearchParams(params)
-    for (const [key, value] of Object.entries(next)) {
-      if (value && value !== 'all') search.set(key, value)
-      else search.delete(key)
-    }
-    setParams(search, { replace: true })
+  const update = (next: Record<string, string>) => {
+    patchSearchParams(setParams, next)
   }
 
   // followScroll 在日志区离开末尾时停止跟随，回到末尾时恢复跟随
@@ -140,7 +130,7 @@ function LiveLogs({ toolbar }: { toolbar: ReactNode }) {
       <Card className="flex grow basis-0 flex-col max-lg:grow-0 max-lg:basis-auto">
         <CardHeader
           title={m.live}
-          actions={<CountBadge>{formatNumber(filtered.length, locale)}</CountBadge>}
+          actions={<CountBadge>{formatNumber(filtered.length, language)}</CountBadge>}
         />
         <div className="flex flex-wrap items-center gap-3 border-b border-border px-5 py-3">
           {toolbar}
@@ -148,7 +138,7 @@ function LiveLogs({ toolbar }: { toolbar: ReactNode }) {
             label={m.level}
             value={filter.level}
             onValueChange={(level) => {
-              update({ level })
+              update({ level: level === 'all' ? '' : level })
             }}
             options={minimumLevels.map((level) => ({
               value: level,

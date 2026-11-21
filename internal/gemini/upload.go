@@ -73,9 +73,7 @@ func (c *Client) acceptUploadTerms(ctx context.Context, bootstrap Bootstrap, mod
 		return err
 	}
 	c.bootstrapMu.Lock()
-	if c.bootstrap != nil {
-		c.bootstrap.Preferences = c.bootstrap.Preferences.with(preferenceUploadTerms, float64(now.Unix()))
-	}
+	c.bootstrap.Preferences = c.bootstrap.Preferences.with(preferenceUploadTerms, float64(now.Unix()))
 	c.bootstrapMu.Unlock()
 	return nil
 }
@@ -131,9 +129,13 @@ func (c *Client) uploadFile(ctx context.Context, bootstrap Bootstrap, file FileD
 	return FileData{URL: strings.TrimSpace(string(path)), FileName: filename, MimeType: mimeType}, nil
 }
 
-// uploadMIME 返回登记附件用的 MIME：未声明时按内容嗅探，内容为文本而类型不是 text/* 与 application/json 时为 text/plain
+// audioMIMEAliases 把旧式与嗅探得到的音频 MIME 换成 Chrome 选择文件时给出的标准写法
+var audioMIMEAliases = map[string]string{"audio/wave": "audio/wav", "audio/x-wav": "audio/wav", "audio/x-flac": "audio/flac", "audio/x-aac": "audio/aac", "audio/mp3": "audio/mpeg"}
+
+// uploadMIME 返回登记附件用的 MIME：未声明时按内容嗅探，旧式音频 MIME 换成标准写法，内容为文本而类型不是 text/* 与 application/json 时为 text/plain
 func uploadMIME(declared string, data []byte) string {
 	mimeType, _, _ := strings.Cut(cmp.Or(declared, http.DetectContentType(data)), ";")
+	mimeType = cmp.Or(audioMIMEAliases[mimeType], mimeType)
 	if strings.HasPrefix(mimeType, "text/") || mimeType == "application/json" || !textContent(data) {
 		return mimeType
 	}

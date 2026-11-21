@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"net/url"
 	"strings"
+	"time"
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
@@ -125,9 +126,9 @@ type deviceBindingKey interface {
 
 // fetchGoogleCookies 用 refresh token 经 OAuthMultilogin 取得 Google Cookie 与 DBSC 会话登记，有设备绑定密钥时走 DBSC 挑战与 HPKE 解密，没有时一次 MultiBearer 请求取得明文 Cookie
 func fetchGoogleCookies(ctx context.Context, identity browserIdentity, gaiaID string, token string, wrappedKey []byte, proxyURL string) ([]multiloginCookie, *auth.BoundSession, error) {
-	client, err := newOAuthClient(proxyURL, identity.chrome)
+	client, err := gemini.NewHTTPClient(30*time.Second, proxyURL, identity.chrome)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("创建 OAuth HTTP 客户端: %w", err)
 	}
 	defer client.CloseIdleConnections()
 	if len(wrappedKey) == 0 {
@@ -202,19 +203,13 @@ func fetchBoundCookies(ctx context.Context, client tls_client.HttpClient, identi
 	return second.Cookies, second.googleBoundSession(), nil
 }
 
-// checkMultiloginCookies 核对 OAuthMultilogin 返回的 Cookie 带有名称、值、域，并包含 SAPISID 与 __Secure-1PSID
+// checkMultiloginCookies 核对 OAuthMultilogin 返回的 Cookie 包含 SAPISID 与 __Secure-1PSID
 func checkMultiloginCookies(cookies []multiloginCookie) error {
 	if len(cookies) == 0 {
 		return fmt.Errorf("Google 续签响应缺少 Cookie")
 	}
 	names := make(map[string]struct{}, len(cookies))
 	for _, cookie := range cookies {
-		if cookie.Name == "" || cookie.Value == "" {
-			return fmt.Errorf("Google 续签返回的 Cookie 格式异常")
-		}
-		if cookie.Domain == "" && (cookie.Host == "" || strings.HasPrefix(cookie.Host, ".")) {
-			return fmt.Errorf("Google 续签返回的 Cookie 域格式异常")
-		}
 		names[cookie.Name] = struct{}{}
 	}
 	for _, required := range []string{"SAPISID", "__Secure-1PSID"} {
@@ -223,15 +218,6 @@ func checkMultiloginCookies(cookies []multiloginCookie) error {
 		}
 	}
 	return nil
-}
-
-// newOAuthClient 返回以主版本 chrome 的 Chrome 身份访问 accounts.google.com 的客户端
-func newOAuthClient(proxyURL string, chrome int) (tls_client.HttpClient, error) {
-	client, err := gemini.NewHTTPClient(30, proxyURL, chrome)
-	if err != nil {
-		return nil, fmt.Errorf("创建 OAuth HTTP 客户端: %w", err)
-	}
-	return client, nil
 }
 
 // requestMultilogin 按 Chrome 的请求头发送一次 OAuthMultilogin：带 assertion 时用 MultiOAuth 头，没有设备绑定的 token 用 MultiBearer 头

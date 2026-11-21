@@ -191,24 +191,31 @@ func mp3BitRate(data []byte) int {
 	return 0
 }
 
+// mvhdSeconds 返回 MP4 与 QuickTime 的 mvhd 盒记录的时长，单位为秒，找不到 mvhd 或时间刻度为 0 时 ok 为假
+func mvhdSeconds(data []byte) (seconds float64, ok bool) {
+	index := bytes.Index(data, []byte("mvhd"))
+	if index < 4 || index+24 > len(data) {
+		return 0, false
+	}
+	box := data[index+4:]
+	var scale uint32
+	var duration uint64
+	switch {
+	case box[0] == 1 && len(box) >= 32:
+		scale, duration = binary.BigEndian.Uint32(box[20:24]), binary.BigEndian.Uint64(box[24:32])
+	case box[0] == 0:
+		scale, duration = binary.BigEndian.Uint32(box[12:16]), uint64(binary.BigEndian.Uint32(box[16:20]))
+	}
+	if scale == 0 {
+		return 0, false
+	}
+	return float64(duration) / float64(scale), true
+}
+
 // videoSeconds 返回 MP4 与 QuickTime 的 mvhd 时长，其余按 1 Mbps 估算
 func videoSeconds(data []byte) float64 {
-	if index := bytes.Index(data, []byte("mvhd")); index >= 4 && index+24 <= len(data) {
-		box := data[index+4:]
-		if box[0] == 1 && len(box) >= 32 {
-			scale := binary.BigEndian.Uint32(box[20:24])
-			duration := binary.BigEndian.Uint64(box[24:32])
-			if scale > 0 {
-				return float64(duration) / float64(scale)
-			}
-		}
-		if box[0] == 0 && len(box) >= 20 {
-			scale := binary.BigEndian.Uint32(box[12:16])
-			duration := binary.BigEndian.Uint32(box[16:20])
-			if scale > 0 {
-				return float64(duration) / float64(scale)
-			}
-		}
+	if seconds, ok := mvhdSeconds(data); ok {
+		return seconds
 	}
 	return float64(len(data)) * 8 / unknownVideoBitRate
 }

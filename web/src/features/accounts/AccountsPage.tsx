@@ -39,11 +39,16 @@ import {
 import { accountsMessages, accountStateMessages } from '@/features/accounts/messages'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { ProxyValue } from '@/features/accounts/ProxyValue'
-import { accountsKey, useAccounts, useDeleteAccounts } from '@/features/accounts/queries'
+import {
+  accountsKey,
+  runAccountAction,
+  useAccounts,
+  useDeleteAccounts,
+} from '@/features/accounts/queries'
+import { SelectAllCheckbox } from '@/features/accounts/SelectAllCheckbox'
 import type { Account, AccountState } from '@/features/accounts/types'
 import { stateTone } from '@/features/accounts/usage'
 import { WarmupDialog } from '@/features/accounts/WarmupDialog'
-import { api } from '@/lib/api'
 import { formatDateTime, formatPercent } from '@/lib/format'
 import { fill, plural, serverText, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
@@ -63,21 +68,6 @@ interface BatchRequest {
 
 // errorStates 是在行内显示失败原因的账号状态
 const errorStates: ReadonlySet<AccountState> = new Set(['auth_required', 'unavailable'])
-
-// applyBatch 对一个账号执行批量操作，代理未变化时不发送请求
-function applyBatch({ action, proxy = '' }: BatchRequest, account: Account) {
-  const path = '/api/accounts/' + encodeURIComponent(account.account_id)
-  switch (action) {
-    case 'verify':
-      return api(path + '/verify', { method: 'POST' })
-    case 'proxy':
-      return proxy === (account.fixed_proxy ?? '')
-        ? Promise.resolve()
-        : api(path, { method: 'PUT', json: { proxy } })
-    default:
-      return api(path, { method: 'PUT', json: { enabled: action === 'enable' } })
-  }
-}
 
 // SortHeader 是可点击排序的表头，再次点击同一列时反向
 function SortHeader({
@@ -123,7 +113,7 @@ export function AccountsPage() {
   const m = useMessages(accountsMessages)
   const app = useMessages(appMessages)
   const sm = useMessages(accountStateMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const now = useNow(30_000)
   const client = useQueryClient()
   const accounts = useAccounts()
@@ -133,15 +123,22 @@ export function AccountsPage() {
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set())
   const [proxyOpen, setProxyOpen] = useState(false)
   const batch = useMutation({
-    mutationFn: (request: BatchRequest) =>
-      runBatch(
-        request.accounts.map((account) => account.account_id),
+    mutationFn: ({ action, accounts: targets, proxy = '' }: BatchRequest) => {
+      const proxies = new Map(targets.map((item) => [item.account_id, item.fixed_proxy ?? '']))
+      return runBatch(
+        targets.map((account) => account.account_id),
         batchLimit,
-        (id) => {
-          const account = request.accounts.find((item) => item.account_id === id)
-          return account ? applyBatch(request, account) : Promise.resolve()
-        },
-      ),
+        (id) =>
+          runAccountAction(
+            id,
+            action === 'verify'
+              ? { kind: 'verify' }
+              : action === 'proxy'
+                ? { kind: 'proxy', proxy, current: proxies.get(id) ?? '' }
+                : { kind: 'enabled', enabled: action === 'enable' },
+          ),
+      )
+    },
     onSuccess: (failures, request) => {
       const labels = { proxy: m.setProxy, enable: m.enable, disable: m.disable, verify: m.verify }
       const result = fill(m.batchResult, {
@@ -184,7 +181,6 @@ export function AccountsPage() {
   const visible = matched.slice((page - 1) * pageSize, page * pageSize)
   const selected = rows.filter((account) => selection.has(account.account_id))
   const visibleSelected = visible.filter((account) => selection.has(account.account_id))
-  const allSelected = visible.length > 0 && visibleSelected.length === visible.length
   const running = batch.isPending ? batch.variables.action : undefined
   const update = (change: Partial<typeof query>) => {
     setParams(accountQueryParams({ ...query, page: 1, ...change }), { replace: true })
@@ -272,7 +268,7 @@ export function AccountsPage() {
               className="flex min-h-[60px] flex-wrap items-center gap-2 border-b border-border bg-primary-soft px-5 py-3"
             >
               <span className="mr-auto text-sm font-medium tabular-nums">
-                {fill(plural(locale, selected.length, m.selectedCountOne, m.selectedCount), {
+                {fill(plural(language, selected.length, m.selectedCountOne, m.selectedCount), {
                   count: selected.length,
                 })}
               </span>
@@ -365,19 +361,15 @@ export function AccountsPage() {
               <thead>
                 <tr>
                   <Th className="w-[40px] first:pr-0">
-                    <input
-                      type="checkbox"
-                      className="size-4 align-middle accent-primary"
-                      aria-label={m.selectAll}
-                      checked={allSelected}
-                      ref={(node) => {
-                        if (node) node.indeterminate = visibleSelected.length > 0 && !allSelected
-                      }}
-                      onChange={() => {
+                    <SelectAllCheckbox
+                      label={m.selectAll}
+                      selected={visibleSelected.length}
+                      total={visible.length}
+                      onToggle={(checked) => {
                         const next = new Set(selection)
                         for (const account of visible) {
-                          if (allSelected) next.delete(account.account_id)
-                          else next.add(account.account_id)
+                          if (checked) next.add(account.account_id)
+                          else next.delete(account.account_id)
                         }
                         setSelection(next)
                       }}
@@ -460,12 +452,12 @@ export function AccountsPage() {
                       <Td className="text-right">{account.models.length}</Td>
                       <Td className="text-right tabular-nums">
                         {account.usage?.current
-                          ? formatPercent(account.usage.current.used_ratio, locale)
+                          ? formatPercent(account.usage.current.used_ratio, language)
                           : m.none}
                       </Td>
                       <Td className="whitespace-nowrap text-foreground-muted">
                         {account.last_used
-                          ? formatDateTime(new Date(account.last_used), now, locale)
+                          ? formatDateTime(new Date(account.last_used), now, language)
                           : m.never}
                       </Td>
                       <Td className="max-w-[104px] font-mono text-foreground-muted">
@@ -517,7 +509,7 @@ export function AccountsPage() {
       )}
       {proxyOpen && (
         <ProxyDialog
-          title={fill(plural(locale, selected.length, m.batchProxyTitleOne, m.batchProxyTitle), {
+          title={fill(plural(language, selected.length, m.batchProxyTitleOne, m.batchProxyTitle), {
             count: selected.length,
           })}
           initial=""
@@ -544,12 +536,12 @@ function RowActions({
 }) {
   const m = useMessages(accountsMessages)
   const client = useQueryClient()
-  const path = '/api/accounts/' + encodeURIComponent(account.account_id)
   const action = useMutation({
     mutationFn: (kind: 'toggle' | 'verify') =>
-      kind === 'verify'
-        ? api(path + '/verify', { method: 'POST' })
-        : api(path, { method: 'PUT', json: { enabled: !account.enabled } }),
+      runAccountAction(
+        account.account_id,
+        kind === 'verify' ? { kind: 'verify' } : { kind: 'enabled', enabled: !account.enabled },
+      ),
     onSuccess: (_, kind) => {
       if (kind === 'verify') toast({ tone: 'success', title: m.verified })
     },

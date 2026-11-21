@@ -147,7 +147,7 @@ func (h *handler) guard(c *gin.Context) {
 		writeError(c, http.StatusForbidden, "admin_cross_origin", "管理端拒绝跨站请求")
 		return
 	}
-	cfg := h.settings.Snapshot()
+	cfg := h.Settings.Snapshot()
 	if !cfg.AdminAuthEnabled {
 		if !loopbackRequest(c) {
 			writeError(c, http.StatusForbidden, "admin_remote_forbidden", "管理端只接受本机访问；远程访问需设置 ADMIN_AUTH_ENABLED=true 与 ADMIN_PASSWORD")
@@ -187,7 +187,7 @@ func (h *handler) authenticated(c *gin.Context) bool {
 }
 
 func (h *handler) session(c *gin.Context) {
-	cfg := h.settings.Snapshot()
+	cfg := h.Settings.Snapshot()
 	c.JSON(http.StatusOK, sessionView{
 		Enabled: cfg.AdminAuthEnabled, Authenticated: !cfg.AdminAuthEnabled || h.authenticated(c), Username: cfg.AdminUsername,
 	})
@@ -201,7 +201,7 @@ func (h *handler) login(c *gin.Context) {
 	if !bindJSON(c, &input) {
 		return
 	}
-	cfg := h.settings.Snapshot()
+	cfg := h.Settings.Snapshot()
 	if !cfg.AdminAuthEnabled {
 		c.JSON(http.StatusOK, sessionView{Enabled: false, Authenticated: true, Username: cfg.AdminUsername})
 		return
@@ -223,7 +223,7 @@ func (h *handler) login(c *gin.Context) {
 	h.attempts.reset(peer)
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name: sessionCookie, Value: h.sessions.create(), Path: "/", MaxAge: int(sessionLifetime / time.Second),
-		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: c.Request.TLS != nil,
+		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: strings.HasPrefix(adapter.RequestBaseURL(c), "https:"),
 	})
 	c.JSON(http.StatusOK, sessionView{Enabled: true, Authenticated: true, Username: cfg.AdminUsername})
 }

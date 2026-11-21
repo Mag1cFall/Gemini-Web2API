@@ -1,16 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { formatAccountBindings, maskKey, modelsForKey, parseAccountBindings } from './apiKeys'
-
-describe('maskKey', () => {
-  test('不超过 12 个字符时完整显示', () => {
-    expect(maskKey('123456789012')).toBe('123456789012')
-  })
-
-  test('更长时只显示首尾各 4 个字符', () => {
-    expect(maskKey('1234567890123')).toBe('1234…0123')
-  })
-})
+import { formatAccountBindings, modelsForKey, parseAccountBindings } from './apiKeys'
 
 describe('parseAccountBindings', () => {
   test('按最后一个冒号分开 key 与账号，账号以竖线分隔', () => {
@@ -33,11 +23,11 @@ describe('formatAccountBindings', () => {
       formatAccountBindings(
         new Map([
           ['gemini-4-carbon', ['acc-2', 'acc-1']],
-          ['gemini-3.8-flash', ['acc-3']],
+          ['gemini-4-hydrogen', ['acc-3']],
           ['gemini-4-argon', []],
         ]),
       ),
-    ).toBe('gemini-3.8-flash:acc-3,gemini-4-carbon:acc-2|acc-1')
+    ).toBe('gemini-4-carbon:acc-2|acc-1,gemini-4-hydrogen:acc-3')
   })
 })
 

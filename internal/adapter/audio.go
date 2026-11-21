@@ -460,10 +460,7 @@ func streamTranscription(c *gin.Context, pool *balancer.AccountPool, request tra
 // transcriptionUsage 返回 gpt-4o-transcribe 形状的 tokens 用量，音频 token 按 Gemini 每秒 32 计
 func transcriptionUsage(usage *gemini.Usage, file gemini.FileData) gin.H {
 	audioTokens := mediaTokens([]gemini.FileData{file})
-	input, output := audioTokens, 0
-	if usage != nil {
-		input, output = max(usage.PromptTokens, audioTokens), usage.OutputTokens()
-	}
+	input, output := max(usage.PromptTokens, audioTokens), usage.OutputTokens()
 	return gin.H{
 		"type": "tokens", "input_tokens": input, "output_tokens": output, "total_tokens": input + output,
 		"input_token_details": gin.H{"text_tokens": input - audioTokens, "audio_tokens": audioTokens},

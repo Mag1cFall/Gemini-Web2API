@@ -54,7 +54,7 @@ func TestResponsesKeepaliveSequence(t *testing.T) {
 		c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
 		stream, stop := startStreamWriter(c, openAIKeepalive, false)
 		writer := responseSequenceWriter{writer: c.Writer}
-		if err := writer.start("resp_1", "m", 1); err != nil {
+		if err := writer.startWith("resp_1", "m", 1, "in_progress", ResponsesRequest{}); err != nil {
 			t.Fatal(err)
 		}
 		stream.setPulse(writer.progress)

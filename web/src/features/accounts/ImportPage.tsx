@@ -16,8 +16,9 @@ import { DisabledHint, Tooltip } from '@/components/ui/tooltip'
 import { AccountTasks } from '@/features/accounts/AccountTasks'
 import { importMessages } from '@/features/accounts/messages'
 import { chromeProfilesKey, tasksKey } from '@/features/accounts/queries'
+import { SelectAllCheckbox } from '@/features/accounts/SelectAllCheckbox'
 import type { ChromeProfiles, CookieAccount, PairingToken } from '@/features/accounts/types'
-import { api, serviceURL } from '@/lib/api'
+import { api, cliCommand, serviceURL } from '@/lib/api'
 import { formatDateTime } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
@@ -58,7 +59,7 @@ function ChromeImport() {
   }
   const items = profiles.data.profiles
   const importable = items.filter((profile) => profile.importable).map((profile) => profile.email)
-  const allSelected = importable.length > 0 && importable.every((email) => selected.includes(email))
+  const selectedImportable = importable.filter((email) => selected.includes(email)).length
   const toggle = (email: string) => {
     setSelected((current) =>
       current.includes(email) ? current.filter((item) => item !== email) : [...current, email],
@@ -71,16 +72,11 @@ function ChromeImport() {
       ) : (
         <div className="-mx-5 -mt-4 border-b border-border">
           <label className="flex cursor-pointer items-center gap-3 border-b border-border px-5 py-3 text-sm text-foreground-muted hover:bg-hover has-disabled:cursor-default has-disabled:opacity-70">
-            <input
-              type="checkbox"
-              className="size-4 accent-primary"
-              checked={allSelected}
-              disabled={importable.length === 0}
-              ref={(node) => {
-                if (node) node.indeterminate = selected.length > 0 && !allSelected
-              }}
-              onChange={() => {
-                setSelected(allSelected ? [] : importable)
+            <SelectAllCheckbox
+              selected={selectedImportable}
+              total={importable.length}
+              onToggle={(checked) => {
+                setSelected(checked ? importable : [])
               }}
             />
             {m.selectAllProfiles}
@@ -297,10 +293,7 @@ function CookieImport() {
 }
 
 // pairingCommand 是在登录了 Chrome 的电脑上上传账号的命令
-const pairingCommand =
-  (navigator.userAgent.includes('Windows') ? '.\\gemini-web2api.exe' : './gemini-web2api') +
-  ' setup --remote ' +
-  serviceURL
+const pairingCommand = cliCommand + ' setup --remote ' + serviceURL
 
 // pairingInsecure 表示当前页面经 HTTP 访问非本机地址，setup --remote 不接受这种地址
 const pairingInsecure =
@@ -330,7 +323,7 @@ function savedPairing(): PairingToken | undefined {
 // RemotePairing 生成配对令牌并给出 setup --remote 命令，令牌保存在本标签页直到过期
 function RemotePairing() {
   const m = useMessages(importMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const now = useNow(1000)
   const [pairing, setPairing] = useState(savedPairing)
   const create = useMutation({
@@ -370,7 +363,7 @@ function RemotePairing() {
           ))}
           <p className="text-xs text-foreground-muted">
             {fill(m.pairingExpires, {
-              time: formatDateTime(new Date(pairing.expires_at), now, locale),
+              time: formatDateTime(new Date(pairing.expires_at), now, language),
               remaining: countdown(remaining),
             })}
           </p>

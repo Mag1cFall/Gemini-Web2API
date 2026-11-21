@@ -118,7 +118,7 @@ export function codexEnv(input: SnippetInput, shell: Shell) {
   return envBlock(shell, [['GEMINI_WEB2API_KEY', input.key]], 'codex')
 }
 
-// opencodeConfig 是 ~/.config/opencode/opencode.json 中的自定义提供商，AI SDK 的 Anthropic 提供商在 baseURL 后直接拼 /messages
+// opencodeConfig 是 ~/.config/opencode/opencode.json 中的自定义提供商，AI SDK 的 Anthropic 提供商在 baseURL 后直接拼 /messages；模型声明可收图片与 PDF 附件
 export function opencodeConfig(input: SnippetInput, protocol: ClientProtocol) {
   return JSON.stringify(
     {
@@ -132,7 +132,16 @@ export function opencodeConfig(input: SnippetInput, protocol: ClientProtocol) {
               protocol === 'anthropic' ? input.origin + '/v1' : protocolURL(input.origin, protocol),
             apiKey: input.key,
           },
-          models: Object.fromEntries(input.models.map((model) => [model.id, { name: model.name }])),
+          models: Object.fromEntries(
+            input.models.map((model) => [
+              model.id,
+              {
+                name: model.name,
+                attachment: true,
+                modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+              },
+            ]),
+          ),
         },
       },
       model: 'gemini-web2api/' + input.model,

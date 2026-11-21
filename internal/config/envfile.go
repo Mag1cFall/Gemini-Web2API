@@ -2,10 +2,11 @@ package config
 
 import (
 	"bytes"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -43,7 +44,7 @@ func WriteEnv(path string, values map[string]string) error {
 		kept = append(kept, line)
 	}
 	lines = kept
-	for _, key := range sortedKeys(values) {
+	for _, key := range slices.Sorted(maps.Keys(values)) {
 		if !written[key] && !isDefault(key, values[key]) {
 			lines = append(lines, key+"="+quoteEnv(values[key]))
 		}
@@ -72,13 +73,4 @@ func quoteEnv(value string) string {
 	}
 	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, `$`, `\$`)
 	return `"` + replacer.Replace(value) + `"`
-}
-
-func sortedKeys(values map[string]string) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }

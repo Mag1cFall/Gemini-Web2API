@@ -148,7 +148,7 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
 export function AboutPage() {
   const m = useMessages(aboutMessages)
   const app = useMessages(appMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const status = useStatus()
   if (status.isPending) {
     return <PagePlaceholder title={m.title} description={m.tagline} label={app.loading} />
@@ -209,7 +209,7 @@ export function AboutPage() {
             }
           />
           <Row label={m.dataDir} value={data.data_dir} />
-          <Row label={m.started} value={formatFullDateTime(new Date(data.started_at), locale)} />
+          <Row label={m.started} value={formatFullDateTime(new Date(data.started_at), language)} />
         </dl>
       </Card>
       <UpdateCard />

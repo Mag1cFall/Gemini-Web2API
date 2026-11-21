@@ -1,4 +1,4 @@
-# Gemini-Web2API (Go Version)
+# Gemini-Web2API
 
 [简体中文](README.md) | [English](README.en.md)
 
@@ -294,7 +294,7 @@ DELETE /v1beta/files/{name}
 GET    /v1beta/models
 ```
 
-`/v1/models/{model}:generateContent` 等路径与 `/v1beta` 相同（google-genai 3.x 的默认路径），`GET /v1/models` 与 `/v1/files` 带 `x-goog-api-key` 时按 Gemini 形状返回。
+`/v1/models/{model}:generateContent` 等路径与 `/v1beta` 相同（google-genai 3.x 的默认路径），`GET /v1/models` 与 `/v1/files` 带 `x-goog-api-key` 或不带 `Authorization` 的 `?key=` 时按 Gemini 形状返回。
 
 Interactions 与 Responses 一样保存到 `data/requests.db` 30 天，`background: true` 在后台运行，可流式取回、取消与删除。`cachedContents` 保存在服务内存中，默认 1 小时到期，服务重启后清空；生成与计数请求以 `cachedContent` 引用。
 
@@ -355,33 +355,6 @@ curl http://127.0.0.1:8007/v1/chat/completions \
 
 OpenAI SDK 的 base URL 使用 `http://127.0.0.1:8007/v1`；Claude 和 Google GenAI SDK 使用 `http://127.0.0.1:8007`。常用客户端的配置在管理端“接入”页复制。
 
-## 目录结构
-
-```text
-cmd/gemini-web2api/  # 程序入口
-internal/
-  accounts/          # 账号初始化、续签、Cookie 轮换与运行期增删
-  adapter/           # OpenAI、Claude、Gemini 协议适配
-  admin/             # 管理端接口
-  app/               # 配置、实例锁与服务生命周期
-  auth/              # 账号状态加载与写回
-  balancer/          # 多账户调度
-  chromeauth/        # Chrome 与 Cookie 账号导入
-  claude/            # Claude 协议类型与流式事件
-  config/            # 服务配置
-  desktop/           # 桌面窗口与托盘
-  gemini/            # Gemini Web 协议客户端
-  logging/           # 运行日志与请求追踪
-  mcp/               # MCP 服务与工具
-  pricing/           # 等价 API 单价
-  requestdb/         # 请求账本
-  streamio/          # HTTP 流刷新
-  tokencount/        # Gemini tokenizer 本地计数
-  webui/             # 内嵌的管理端页面
-web/                 # 管理端前端源码
-build/               # 桌面版图标与打包配置
-```
-
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
@@ -418,8 +391,6 @@ build/               # 桌面版图标与打包配置
 
 命令行 `--auth` 和 `--listen` 可以覆盖认证路径与监听地址；`--open-ui` 控制启动后是否在浏览器中打开管理端，不带参数启动时默认打开。
 
-## 注意
-
-Gemini Web 内部协议可能随官网更新，模型 ID 以服务启动后返回的动态目录为准。欢迎提 Issue 和 PR。
+## 文档
 
 开发与贡献见 [docs/development.md](docs/development.md)，认证、请求载荷和流式解码原理见 [docs/protocol.md](docs/protocol.md)，官网变化后的采集与对齐步骤见 [docs/upstream.md](docs/upstream.md)，日志与请求账本见 [docs/logging.md](docs/logging.md)。

@@ -83,11 +83,6 @@ func New(ctx context.Context, pool *balancer.AccountPool, settings Settings) *Ma
 	return manager
 }
 
-// Pool 返回账号池
-func (m *Manager) Pool() *balancer.AccountPool {
-	return m.pool
-}
-
 // Settings 返回当前账号配置
 func (m *Manager) Settings() Settings {
 	m.mu.Lock()
@@ -97,6 +92,9 @@ func (m *Manager) Settings() Settings {
 
 // Start 登记并启动全部账号与访客会话，返回后首轮初始化全部结束
 func (m *Manager) Start(accounts []auth.LoadedAccount) {
+	for _, account := range accounts {
+		m.proxies.SetFixed(account.ID, fixedProxy(account))
+	}
 	var wait sync.WaitGroup
 	for _, account := range accounts {
 		wait.Add(1)
@@ -192,17 +190,6 @@ func (m *Manager) runGuest(ctx context.Context, client *gemini.Client, previous 
 	}
 }
 
-// Add 登记并启动一个新导入的账号，返回后首轮初始化结束
-func (m *Manager) Add(account auth.LoadedAccount) error {
-	m.mu.Lock()
-	_, exists := m.accounts[account.ID]
-	m.mu.Unlock()
-	if exists {
-		return fmt.Errorf("账号 %q 已存在", account.ID)
-	}
-	return m.restart(account)
-}
-
 // handover 在替换启动时让账号池改用 client，再停止 previous 的生命周期；previous 为 nil 时不做任何事
 func (m *Manager) handover(accountID string, client *gemini.Client, previous *managed) {
 	if previous == nil {
@@ -219,18 +206,14 @@ func (m *Manager) handover(accountID string, client *gemini.Client, previous *ma
 
 // launch 创建账号客户端并启动其生命周期，firstDone 在首轮初始化结束或账号停用时调用；有认证文件的账号以文件当前的 Cookie、续签材料与设置启动；previous 不为 nil 时它在新客户端首轮初始化结束前继续处理请求
 func (m *Manager) launch(account auth.LoadedAccount, previous *managed, firstDone func()) {
-	if account.File != nil {
-		account = account.File.Account()
-	}
+	account = account.File.Account()
 	proxy, source := m.accountProxy(account)
 	account.ProxyURL = proxy
 	info := balancer.AccountInfo{Source: "cookie", Profile: account.Profile, Proxy: proxy, ProxySource: source}
 	if account.OAuth != nil {
 		info.Source = "chrome"
 	}
-	if account.File != nil {
-		info.Path = account.File.Path()
-	}
+	info.Path = account.File.Path()
 	if previous == nil {
 		m.pool.Register(account.ID, info, account.Disabled)
 	} else {
@@ -480,13 +463,11 @@ func (m *Manager) Remove(accountID string) error {
 		}
 	}
 	m.mu.Unlock()
-	if entry.account.File != nil {
-		path := entry.account.File.Path()
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("删除认证状态 %s: %w", path, err)
-		}
-		_ = os.Remove(filepath.Dir(path))
+	path := entry.account.File.Path()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("删除认证状态 %s: %w", path, err)
 	}
+	_ = os.Remove(filepath.Dir(path))
 	logging.Info(accountID, "账号已删除")
 	return nil
 }
@@ -498,10 +479,8 @@ func (m *Manager) SetEnabled(accountID string, enabled bool) error {
 	if err != nil {
 		return err
 	}
-	if entry.account.File != nil {
-		if err := entry.account.File.SetDisabled(!enabled); err != nil {
-			return err
-		}
+	if err := entry.account.File.SetDisabled(!enabled); err != nil {
+		return err
 	}
 	entry.account.Disabled = !enabled
 	if !enabled {
@@ -527,10 +506,8 @@ func (m *Manager) SetProxy(accountID string, proxy string) error {
 	if err != nil {
 		return err
 	}
-	if entry.account.File != nil {
-		if err := entry.account.File.SetProxy(proxy); err != nil {
-			return err
-		}
+	if err := entry.account.File.SetProxy(proxy); err != nil {
+		return err
 	}
 	entry.account.ProxyURL, _ = m.accountProxy(entry.account)
 	logging.Info(accountID, "账号代理已更新", "代理", cmp.Or(proxypool.Redact(entry.account.ProxyURL), "直连"))
@@ -546,10 +523,7 @@ func (m *Manager) TemporaryClient(ctx context.Context, accountID string) (*gemin
 	if entry == nil {
 		return nil, fmt.Errorf("账号 %q 不存在", accountID)
 	}
-	account := entry.account
-	if account.File != nil {
-		account = account.File.Account()
-	}
+	account := entry.account.File.Account()
 	proxy := fixedProxy(account)
 	switch proxy {
 	case "":
@@ -783,7 +757,7 @@ func (m *Manager) addFile(path string) (string, error) {
 		return account.ID, m.await(func(firstDone func()) { m.launch(account, previous, firstDone) })
 	}
 	logging.Info(account.ID, "账号已导入")
-	return account.ID, m.Add(account)
+	return account.ID, m.restart(account)
 }
 
 // SetPairingRenewal 更新账号的远程配对续签凭据摘要并写回

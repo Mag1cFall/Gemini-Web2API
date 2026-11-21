@@ -263,7 +263,7 @@ func (ch *channel) close() {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
 	if err := ch.end(ctx); err != nil {
-		logging.Warn(ch.client.displayAccountID(), "关闭生成会话失败", "原因", err)
+		logging.Warn(ch.client.accountID, "关闭生成会话失败", "原因", err)
 	}
 	ch.terminate()
 }
@@ -278,7 +278,7 @@ func (ch *channel) terminate() {
 	ch.mu.Unlock()
 	resp, err := ch.client.channelRequest(ctx, http.MethodPost, query, "", true)
 	if err != nil {
-		logging.Warn(ch.client.displayAccountID(), "关闭生成会话失败", "原因", err)
+		logging.Warn(ch.client.accountID, "关闭生成会话失败", "原因", err)
 		return
 	}
 	resp.Body.Close()

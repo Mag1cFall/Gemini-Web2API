@@ -411,9 +411,6 @@ var usageDimensions = append(slices.Clone(UsageDimensions), "status")
 func (store *Store) Usage(ctx context.Context, query UsageQuery) (UsageReport, error) {
 	store.flush()
 	location := query.Location
-	if location == nil {
-		location = time.UTC
-	}
 	now := time.Now()
 	from, to := query.From.UnixMilli(), query.To.UnixMilli()
 	starts := bucketStarts(query.From, query.To, query.Bucket, location)

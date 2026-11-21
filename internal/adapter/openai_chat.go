@@ -269,7 +269,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				usage = addUsage(usage, result.Accumulator.Usage)
 			}
 			recordChoiceUsage(c, n, usage)
-			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage && usage != nil {
+			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage {
 				if err := writeOpenAIUsageChunk(c.Writer, responseID, created, streamModel, usage); err != nil {
 					return
 				}
@@ -310,9 +310,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			response["choices"] = append(response["choices"].([]gin.H), next)
 		}
 		recordChoiceUsage(c, n, usage)
-		if usage != nil {
-			response["usage"] = openAIUsage(usage)
-		}
+		response["usage"] = openAIUsage(usage)
 		c.JSON(http.StatusOK, fieldorder.Official("chat", response))
 	}
 }
@@ -329,13 +327,10 @@ func choiceCount(c *gin.Context, n *int) (int, bool) {
 	return *n, true
 }
 
-// addUsage 返回两次生成用量之和，其中一个为空时返回另一个
+// addUsage 返回两次生成用量之和，total 为空时返回 usage
 func addUsage(total *gemini.Usage, usage *gemini.Usage) *gemini.Usage {
 	if total == nil {
 		return usage
-	}
-	if usage == nil {
-		return total
 	}
 	return &gemini.Usage{
 		PromptTokens: total.PromptTokens + usage.PromptTokens, CompletionTokens: total.CompletionTokens + usage.CompletionTokens,
@@ -345,7 +340,7 @@ func addUsage(total *gemini.Usage, usage *gemini.Usage) *gemini.Usage {
 
 // recordChoiceUsage 在逐个生成多个 choice 后把各次用量之和记入请求跟踪
 func recordChoiceUsage(c *gin.Context, n int, usage *gemini.Usage) {
-	if n > 1 && usage != nil {
+	if n > 1 {
 		logging.FromContext(c.Request.Context()).SetUsage(usage.PromptTokens, usage.ThoughtTokens, usage.CompletionTokens)
 	}
 }
@@ -406,7 +401,8 @@ func buildOpenAIChatPrompt(c *gin.Context, client *gemini.Client, request ChatRe
 	if request.TruncateTo > 0 {
 		turns, turnFiles = truncateTurns(turns, turnFiles, suffix, request.TruncateTo)
 	}
-	return renderTranscript(turns, suffix), slices.Concat(turnFiles...), nil
+	prompt, files := transcriptPrompt(turns, suffix, slices.Concat(turnFiles...))
+	return prompt, files, nil
 }
 
 // truncateTurns 在提示词超过 limit 个 token 时从最早的一轮起整轮删除，每删一轮减去其角色块的 token 数：一轮从系统消息之后第一条消息开始，到下一条 user 消息之前，最后一条 user 消息所在的轮次保留
@@ -487,9 +483,7 @@ func buildOpenAIResponse(responseID string, created int64, result generationResu
 	if result.ConversationID != "" {
 		response["conversation_id"] = result.ConversationID
 	}
-	if result.Accumulator.Usage != nil {
-		response["usage"] = openAIUsage(result.Accumulator.Usage)
-	}
+	response["usage"] = openAIUsage(result.Accumulator.Usage)
 	return response, nil
 }
 

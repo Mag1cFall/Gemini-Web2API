@@ -4,6 +4,7 @@ import {
   filterParams,
   rangeError,
   resolveRange,
+  retention,
   type UsageFilters,
   type UsageView,
 } from '@/features/usage/model'
@@ -13,39 +14,31 @@ import { api } from '@/lib/api'
 // timeZone 是本机 IANA 时区，用量分桶按它对齐
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 
+// recentUsage 读取截止到当前时间 span 毫秒内的用量报告
+function recentUsage(span: number, signal: AbortSignal) {
+  const now = Date.now()
+  const query = new URLSearchParams({
+    from: new Date(now - span).toISOString(),
+    to: new Date(now).toISOString(),
+    tz: timeZone,
+  })
+  return api<UsageReport>('/api/usage?' + query.toString(), { signal })
+}
+
 // useUsage 读取截止到当前时间 rangeMs 毫秒内的用量报告，请求结束时由事件流刷新
 export function useUsage(rangeMs: number) {
   return useQuery({
     queryKey: ['usage', rangeMs],
-    queryFn: ({ signal }) => {
-      const now = Date.now()
-      const query = new URLSearchParams({
-        from: new Date(now - rangeMs).toISOString(),
-        to: new Date(now).toISOString(),
-        tz: timeZone,
-      })
-      return api<UsageReport>('/api/usage?' + query.toString(), { signal })
-    },
+    queryFn: ({ signal }) => recentUsage(rangeMs, signal),
     placeholderData: keepPreviousData,
   })
 }
-
-// historySpan 是判断是否有过请求时查询的时间范围，与账本保留时长相同
-const historySpan = 90 * 24 * 3_600_000
 
 // useHadRequests 读取近 90 天是否有过请求，打开页面时读取一次，不随请求结束重读
 export function useHadRequests() {
   return useQuery({
     queryKey: ['had-requests'],
-    queryFn: ({ signal }) => {
-      const now = Date.now()
-      const query = new URLSearchParams({
-        from: new Date(now - historySpan).toISOString(),
-        to: new Date(now).toISOString(),
-        tz: timeZone,
-      })
-      return api<UsageReport>('/api/usage?' + query.toString(), { signal })
-    },
+    queryFn: ({ signal }) => recentUsage(retention, signal),
     select: (report) => report.totals.requests > 0,
     staleTime: Number.POSITIVE_INFINITY,
   })

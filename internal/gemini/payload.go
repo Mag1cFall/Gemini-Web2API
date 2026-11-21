@@ -30,10 +30,7 @@ func buildGeneratePayload(request GenerateRequest, language string, preferences 
 	}
 	inner[0] = message
 	inner[1] = []any{language}
-	conversation := ConversationSnapshot{}
-	if request.Conversation != nil {
-		conversation = request.Conversation.Snapshot()
-	}
+	conversation := request.Conversation.Snapshot()
 	inner[17] = []any{[]any{conversation.Turns}}
 	switch {
 	case conversation.CID != "" && request.Branch:

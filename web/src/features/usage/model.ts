@@ -87,10 +87,7 @@ export function usageViewParams(view: UsageView): URLSearchParams {
     params.set('to', view.to)
   }
   if (view.stack !== defaultView.stack) params.set('stack', view.stack)
-  for (const dimension of dimensions) {
-    const values = view.filters[dimension] ?? []
-    if (values.length > 0) params.set(dimension, values.join(','))
-  }
+  filterParams(params, view.filters)
   if (view.status) params.set('status', view.status)
   if (view.q) params.set('q', view.q)
   return params

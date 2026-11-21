@@ -11,25 +11,59 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 )
 
-const maxMediaRedirects = 5
+const (
+	maxMediaRedirects = 5
+	// mediaPartialMaxAttempts 是媒体下载连续返回 206（仍在转码）时的最大请求次数，含首次请求
+	mediaPartialMaxAttempts = 12
+)
 
-// FetchMedia 使用账号固定身份和 Cookie 下载媒体内容
+// mediaPartialPollInterval 是媒体下载返回 206 时的轮询等待间隔
+var mediaPartialPollInterval = 10 * time.Second
+
+// FetchMedia 使用账号固定身份和 Cookie 下载媒体内容，生成媒体的首跳地址带上账号在多账号 Cookie 中的序号；遇 206 转码中按间隔轮询直到 200 或达到次数上限
 func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error) {
-	currentURL, err := url.Parse(mediaURL)
+	initialURL, err := url.Parse(mediaURL)
 	if err != nil {
 		return nil, err
 	}
-	generatedMedia := prepareGeneratedMediaURL(currentURL)
+	generatedMedia := prepareGeneratedMediaURL(initialURL)
+	if generatedMedia && c.authUser > 0 {
+		initialURL.RawQuery = strings.TrimPrefix(initialURL.RawQuery+"&authuser="+strconv.Itoa(c.authUser), "&")
+	}
+	for attempt := 1; ; attempt++ {
+		body, partial, err := c.fetchMediaOnce(ctx, initialURL, generatedMedia)
+		if !partial {
+			return body, err
+		}
+		if attempt >= mediaPartialMaxAttempts {
+			return nil, retryableProtocolError(fmt.Sprintf("官网生成的媒体仍在转码（连续 %d 次返回 HTTP 206），暂无法下载，请稍后重试", mediaPartialMaxAttempts), nil)
+		}
+		logging.FromContext(ctx).Stage("生成媒体仍在转码，等待重试下载", "次数", attempt)
+		timer := time.NewTimer(mediaPartialPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// fetchMediaOnce 沿重定向与中继链下载一次媒体内容，响应为 206 时关闭连接并返回 partial 为真
+func (c *Client) fetchMediaOnce(ctx context.Context, initialURL *url.URL, generatedMedia bool) ([]byte, bool, error) {
+	currentURL := initialURL
 	for redirects := 0; redirects <= maxMediaRedirects; redirects++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, currentURL.String(), nil)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if generatedMedia {
 			c.applyChromeHeaders(req, true)
@@ -57,46 +91,50 @@ func (c *Client) FetchMedia(ctx context.Context, mediaURL string) ([]byte, error
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, transportProtocolError("下载媒体", err)
+			return nil, false, transportProtocolError("下载媒体", err)
 		}
 		if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 			resp.Body.Close()
-			return nil, err
+			return nil, false, err
 		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			location := resp.Header.Get("Location")
 			resp.Body.Close()
 			if location == "" {
-				return nil, fmt.Errorf("下载媒体时重定向没有目标地址")
+				return nil, false, fmt.Errorf("下载媒体时重定向没有目标地址")
 			}
 			nextURL, err := currentURL.Parse(location)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			currentURL = nextURL
 			continue
 		}
+		if resp.StatusCode == http.StatusPartialContent {
+			resp.Body.Close()
+			return nil, true, nil
+		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, responseStatusError(resp, "下载媒体")
+			return nil, false, responseStatusError(resp, "下载媒体")
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			return nil, retryableProtocolError("下载媒体时读取内容失败", err)
+			return nil, false, retryableProtocolError("下载媒体时读取内容失败", err)
 		}
 		contentType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 		if generatedMedia && contentType == "text/plain" {
 			nextURL, err := parseGeneratedMediaRelay(body)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			currentURL = nextURL
 			continue
 		}
-		return body, nil
+		return body, false, nil
 	}
-	return nil, fmt.Errorf("下载媒体时重定向次数过多")
+	return nil, false, fmt.Errorf("下载媒体时重定向次数过多")
 }
 
 // FetchRemoteMedia 以账号的浏览器身份与出口、不带账号 Cookie 下载客户端给出的媒体地址，每条连接只连向解析后检查过的公网地址，声明或读到的大小超过 limit 时返回错误
@@ -147,8 +185,8 @@ func (c *Client) FetchRemoteMedia(ctx context.Context, mediaURL string, limit in
 }
 
 // newMediaClient 创建下载客户端给出的媒体地址的客户端：请求身份与代理和账号相同，不带 Cookie，建立连接前解析目标主机，只连接检查过的公网地址，经代理时按该地址建隧道
-func newMediaClient(timeoutSeconds int, proxyURL string, major int) (tls_client.HttpClient, error) {
-	tunnel, err := NewHTTPClient(timeoutSeconds, proxyURL, major)
+func newMediaClient(idle time.Duration, proxyURL string, major int) (tls_client.HttpClient, error) {
+	tunnel, err := NewHTTPClient(idle, proxyURL, major)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +195,8 @@ func newMediaClient(timeoutSeconds int, proxyURL string, major int) (tls_client.
 		return nil, err
 	}
 	dialer := tunnel.GetDialer()
-	return tls_client.NewHttpClient(tls_client.NewNoopLogger(),
-		tls_client.WithTimeoutSeconds(timeoutSeconds),
+	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(),
+		tls_client.WithTimeoutSeconds(0),
 		tls_client.WithClientProfile(build.clientProfile()),
 		tls_client.WithRandomTLSExtensionOrder(),
 		tls_client.WithNotFollowRedirects(),
@@ -175,6 +213,20 @@ func newMediaClient(timeoutSeconds int, proxyURL string, major int) (tls_client.
 			return dialer.DialContext(ctx, network, net.JoinHostPort(checked.String(), port))
 		}),
 	)
+	if err != nil {
+		return nil, err
+	}
+	return &idleClient{HttpClient: client, idle: idle}, nil
+}
+
+// idleClient 是请求连续 idle 没有收发数据时取消的 tls-client 客户端
+type idleClient struct {
+	tls_client.HttpClient
+	idle time.Duration
+}
+
+func (c *idleClient) Do(req *http.Request) (*http.Response, error) {
+	return doIdle(c.HttpClient.Do, req, c.idle)
 }
 
 // publicAddress 解析 host 并返回第一个地址，解析结果含本机、私网、链路本地、组播或未指定地址时返回错误

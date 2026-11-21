@@ -186,7 +186,7 @@ func CompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					return transcript, nil, nil
 				}, onEvent, projection)
 			c.Set("account_id", accountID)
-			if err == nil && result.Accumulator.Usage != nil {
+			if err == nil {
 				usage.PromptTokens += result.Accumulator.Usage.PromptTokens
 				usage.CompletionTokens += result.Accumulator.Usage.CompletionTokens
 				usage.ThoughtTokens += result.Accumulator.Usage.ThoughtTokens

@@ -103,21 +103,21 @@ func ChromeUserAgent(major int) string {
 	return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + strconv.Itoa(major) + ".0.0.0 Safari/537.36"
 }
 
-// NewHTTPClient 创建经代理 proxyURL 访问、TLS 与 HTTP/2 和主版本 major 的 Chrome 稳定版一致的客户端，proxyURL 为空时直连，major 为 0 时为版本池中最新的版本
-func NewHTTPClient(timeoutSeconds int, proxyURL string, major int) (tls_client.HttpClient, error) {
+// NewHTTPClient 创建经代理 proxyURL 访问、TLS 与 HTTP/2 和主版本 major 的 Chrome 稳定版一致的客户端，请求连续 idle 没有收发数据时取消，proxyURL 为空时直连，major 为 0 时为版本池中最新的版本
+func NewHTTPClient(idle time.Duration, proxyURL string, major int) (tls_client.HttpClient, error) {
 	build, err := chromeBuildFor(major)
 	if err != nil {
 		return nil, err
 	}
-	return build.httpClient(timeoutSeconds, tls_client.WithProxyUrl(proxyURL))
+	return build.httpClient(idle, tls_client.WithProxyUrl(proxyURL))
 }
 
-// httpClient 创建该构建的客户端，connect 给出代理或建立 TCP 连接的方式：https 请求经 Chrome HTTP/2 传输，扩展顺序与 Chrome 一样每条连接随机排列，HEADERS 帧的权重按 priority 请求头、依赖按连接上仍打开的流与 Chrome 网络栈一致
-func (b *chromeBuild) httpClient(timeoutSeconds int, connect tls_client.HttpClientOption) (tls_client.HttpClient, error) {
+// httpClient 创建该构建的客户端，请求连续 idle 没有收发数据时取消，connect 给出代理或建立 TCP 连接的方式：https 请求经 Chrome HTTP/2 传输，扩展顺序与 Chrome 一样每条连接随机排列，HEADERS 帧的权重按 priority 请求头、依赖按连接上仍打开的流与 Chrome 网络栈一致
+func (b *chromeBuild) httpClient(idle time.Duration, connect tls_client.HttpClientOption) (tls_client.HttpClient, error) {
 	profile := b.clientProfile()
 	jar := newCookieJar()
 	base, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(),
-		tls_client.WithTimeoutSeconds(timeoutSeconds),
+		tls_client.WithTimeoutSeconds(chromeConnectTimeoutSeconds),
 		tls_client.WithClientProfile(profile),
 		tls_client.WithRandomTLSExtensionOrder(),
 		tls_client.WithNotFollowRedirects(),
@@ -127,10 +127,9 @@ func (b *chromeBuild) httpClient(timeoutSeconds int, connect tls_client.HttpClie
 	if err != nil {
 		return nil, err
 	}
-	return &chromeClient{HttpClient: base, client: http.Client{
+	return &chromeClient{HttpClient: base, idle: idle, client: http.Client{
 		Transport:     newChromeTransport(base.GetDialer(), profile),
 		Jar:           jar,
-		Timeout:       time.Duration(timeoutSeconds) * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}, nil
 }

@@ -96,7 +96,7 @@ func mixMono(audio audioPCM) audioPCM {
 
 // resamplePCM 以线性插值把 PCM 转到目标采样率
 func resamplePCM(audio audioPCM, rate int) audioPCM {
-	if audio.SampleRate == rate || audio.SampleRate <= 0 {
+	if audio.SampleRate == rate {
 		return audio
 	}
 	frames := len(audio.Data) / 2 / audio.Channels

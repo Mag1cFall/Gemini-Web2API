@@ -177,7 +177,6 @@ export const accountsMessages = defineMessages({
     consecutiveFailures: '连续失败',
     lastError: '最近错误',
     runtimeInfo: '运行状态',
-    proxyTitle: '修改代理',
     proxyHint: '留空时从代理池分配，填 direct 表示直连；支持 http、https、socks4、socks5',
     direct: '直连',
     proxySourceFixed: '固定',
@@ -266,7 +265,6 @@ export const accountsMessages = defineMessages({
     consecutiveFailures: '連續失敗',
     lastError: '最近錯誤',
     runtimeInfo: '執行狀態',
-    proxyTitle: '修改代理',
     proxyHint: '留空時從代理池分配，填 direct 表示直連；支援 http、https、socks4、socks5',
     direct: '直連',
     proxySourceFixed: '固定',
@@ -356,7 +354,6 @@ export const accountsMessages = defineMessages({
     consecutiveFailures: 'Consecutive failures',
     lastError: 'Last error',
     runtimeInfo: 'Runtime',
-    proxyTitle: 'Edit proxy',
     proxyHint:
       'Leave empty to use the proxy pool, or enter direct to connect without a proxy; http, https, socks4 and socks5',
     direct: 'Direct',
@@ -448,7 +445,6 @@ export const accountsMessages = defineMessages({
     consecutiveFailures: '連続失敗',
     lastError: '直近のエラー',
     runtimeInfo: '実行状態',
-    proxyTitle: 'プロキシを変更',
     proxyHint:
       '空欄の場合はプロキシプールから割り当て、direct と入力すると直接接続します。http、https、socks4、socks5 に対応',
     direct: '直接接続',
@@ -540,7 +536,6 @@ export const accountsMessages = defineMessages({
     consecutiveFailures: '연속 실패',
     lastError: '최근 오류',
     runtimeInfo: '실행 상태',
-    proxyTitle: '프록시 수정',
     proxyHint:
       '비워 두면 프록시 풀에서 할당하고, direct를 입력하면 직접 연결합니다. http, https, socks4, socks5 지원',
     direct: '직접 연결',
@@ -632,7 +627,6 @@ export const accountsMessages = defineMessages({
     consecutiveFailures: 'Échecs consécutifs',
     lastError: 'Dernière erreur',
     runtimeInfo: 'État d’exécution',
-    proxyTitle: 'Modifier le proxy',
     proxyHint:
       'Laissez vide pour utiliser le pool de proxys, ou saisissez direct pour une connexion directe ; http, https, socks4 et socks5',
     direct: 'Direct',
@@ -724,7 +718,6 @@ export const accountsMessages = defineMessages({
     consecutiveFailures: 'Fehler in Folge',
     lastError: 'Letzter Fehler',
     runtimeInfo: 'Laufzeitstatus',
-    proxyTitle: 'Proxy ändern',
     proxyHint:
       'Leer lassen für den Proxy-Pool, direct für eine direkte Verbindung; http, https, socks4 und socks5',
     direct: 'Direkt',

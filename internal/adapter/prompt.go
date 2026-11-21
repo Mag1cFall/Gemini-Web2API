@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -68,7 +69,7 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			if file != nil {
 				files = append(files, *file)
 			}
-		case "document", "input_file", "input_audio", "audio", "input_video", "video", "file":
+		case "document", "input_file", "input_audio", "audio", "input_video", "video", "video_url", "file":
 			if partType == "document" {
 				var source struct {
 					Type    string          `json:"type"`
@@ -196,6 +197,14 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 	if imageURL == "" {
 		_ = json.Unmarshal(part["url"], &imageURL)
 	}
+	var source struct {
+		Type      string `json:"type"`
+		MediaType string `json:"media_type"`
+		Data      string `json:"data"`
+		URL       string `json:"url"`
+	}
+	_ = json.Unmarshal(part["source"], &source)
+	imageURL = cmp.Or(imageURL, source.URL)
 	if isYouTubeURL(imageURL) {
 		return "\n" + imageURL + "\n", nil, nil
 	}
@@ -204,26 +213,7 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 		if err != nil {
 			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
 		}
-		filename := fmt.Sprintf("image_%d.bin", time.Now().UnixNano())
-		return "[Image]", &gemini.FileData{Data: data, FileName: filename}, nil
-	}
-
-	var source struct {
-		Type      string `json:"type"`
-		MediaType string `json:"media_type"`
-		Data      string `json:"data"`
-		URL       string `json:"url"`
-	}
-	_ = json.Unmarshal(part["source"], &source)
-	if imageURL == "" {
-		imageURL = source.URL
-	}
-	if imageURL != "" && !strings.HasPrefix(imageURL, "data:") {
-		data, err := fetchRemoteMedia(ctx, client, imageURL)
-		if err != nil {
-			return "", nil, fmt.Errorf("下载远程图片失败: %w", err)
-		}
-		filename := fmt.Sprintf("image_%d%s", time.Now().UnixNano(), mimeTypeToExt(source.MediaType))
+		filename := fmt.Sprintf("image_%d%s", time.Now().UnixNano(), mimeTypeToExt(cmp.Or(source.MediaType, http.DetectContentType(data))))
 		return "[Image]", &gemini.FileData{Data: data, FileName: filename, MimeType: source.MediaType}, nil
 	}
 	if imageURL != "" {
@@ -233,6 +223,9 @@ func decodeImagePart(ctx context.Context, part map[string]json.RawMessage, clien
 		}
 		source.MediaType = strings.TrimSuffix(mime, ";base64")
 		source.Data = data
+	}
+	if mimeType, data, ok := splitDataURL(source.Data); ok {
+		source.MediaType, source.Data = cmp.Or(source.MediaType, mimeType), data
 	}
 	if source.Data == "" {
 		return "", nil, fmt.Errorf("图片内容为空")
@@ -286,6 +279,13 @@ func decodeFilePart(ctx context.Context, part map[string]json.RawMessage, client
 	if fileURL == "" {
 		fileURL = source.URL
 	}
+	if raw := part["video_url"]; fileURL == "" && len(raw) > 0 && json.Unmarshal(raw, &fileURL) != nil {
+		var value struct {
+			URL string `json:"url"`
+		}
+		_ = json.Unmarshal(raw, &value)
+		fileURL = value.URL
+	}
 	if isYouTubeURL(fileURL) {
 		return "\n" + fileURL + "\n", nil, nil
 	}
@@ -336,6 +336,16 @@ func mediaFormatMIME(format string) string {
 		return "audio/ogg"
 	case "flac":
 		return "audio/flac"
+	case "aac":
+		return "audio/aac"
+	case "m4a":
+		return "audio/mp4"
+	case "opus":
+		return "audio/ogg"
+	case "amr":
+		return "audio/amr"
+	case "aiff", "aif":
+		return "audio/aiff"
 	case "mp4":
 		return "video/mp4"
 	case "webm":
@@ -382,6 +392,16 @@ func renderTranscript(turns []transcriptTurn, suffix string) string {
 	}
 	builder.WriteString("<|im_start|>assistant\n")
 	return builder.String()
+}
+
+// transcriptPrompt 把转录与协议说明写成提示词；超过官网输入上限时转录写入 message.txt 附件，工具与输出格式的协议说明留在提示词正文
+func transcriptPrompt(turns []transcriptTurn, suffix string, files []gemini.FileData) (string, []gemini.FileData) {
+	prompt := renderTranscript(turns, suffix)
+	if strings.TrimSpace(suffix) == "" || utf8.RuneCountInString(prompt) <= gemini.MaxPromptLength {
+		return prompt, files
+	}
+	body := renderTranscript(turns, "")
+	return gemini.LongPromptInstruction + suffix, append(files, gemini.FileData{Data: []byte(body), FileName: "message.txt", MimeType: "text/plain"})
 }
 
 // transcriptBlock 返回一轮对话在转录中的角色块

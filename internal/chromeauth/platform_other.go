@@ -9,7 +9,8 @@ func DefaultChromeRoot() (string, error) {
 	return "", fmt.Errorf("Chrome OAuth 导入仅支持 Windows")
 }
 
-func discoverPlatform(string) ([]Account, error) {
+// Discover 只读列出本机 Chrome Google 账号
+func Discover(string) ([]Account, error) {
 	return nil, fmt.Errorf("Chrome OAuth 导入仅支持 Windows")
 }
 

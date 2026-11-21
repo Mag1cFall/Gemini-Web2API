@@ -31,11 +31,11 @@ export function RequestDetailSheet({
   const m = useMessages(requestsMessages)
   const body = useMessages(bodyMessages)
   const finish: Record<string, string> = useMessages(finishMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const accountLabel = useAccountLabel()
   if (!request) return null
   const running = request.state === 'running'
-  const duration = (value: number | undefined) => (value ? formatDuration(value, locale) : '—')
+  const duration = (value: number | undefined) => (value ? formatDuration(value, language) : '—')
   const summary = [
     {
       label: m.protocol,
@@ -52,18 +52,18 @@ export function RequestDetailSheet({
     { label: m.queue, value: duration(request.queue_ms) },
     { label: m.firstEvent, value: duration(request.first_event_ms) },
     ...(request.stage ? [{ label: m.stage, value: request.stage }] : []),
-    { label: m.messages, value: formatNumber(request.messages ?? 0, locale) },
-    ...(request.media ? [{ label: m.media, value: formatNumber(request.media, locale) }] : []),
-    ...(request.tools ? [{ label: m.tools, value: formatNumber(request.tools, locale) }] : []),
+    { label: m.messages, value: formatNumber(request.messages ?? 0, language) },
+    ...(request.media ? [{ label: m.media, value: formatNumber(request.media, language) }] : []),
+    ...(request.tools ? [{ label: m.tools, value: formatNumber(request.tools, language) }] : []),
     ...(request.tool_calls
-      ? [{ label: m.toolCalls, value: formatNumber(request.tool_calls, locale) }]
+      ? [{ label: m.toolCalls, value: formatNumber(request.tool_calls, language) }]
       : []),
     ...(request.finish_reason
       ? [{ label: m.finishReason, value: finish[request.finish_reason] ?? request.finish_reason }]
       : []),
-    { label: m.upstreamBytes, value: formatBytes(request.upstream_bytes ?? 0, locale) },
+    { label: m.upstreamBytes, value: formatBytes(request.upstream_bytes ?? 0, language) },
     ...(request.heartbeats
-      ? [{ label: m.heartbeats, value: formatNumber(request.heartbeats, locale) }]
+      ? [{ label: m.heartbeats, value: formatNumber(request.heartbeats, language) }]
       : []),
     ...(request.client_ip ? [{ label: m.clientIp, value: request.client_ip }] : []),
     ...(request.response_id ? [{ label: m.responseId, value: request.response_id }] : []),
@@ -96,7 +96,7 @@ export function RequestDetailSheet({
             <code className="font-mono text-foreground">{request.id}</code>
             <CopyButton value={request.id} label={m.copyId} copiedLabel={m.copied} />
             <span className="tabular-nums">
-              {formatFullDateTime(new Date(request.started_at), locale)}
+              {formatFullDateTime(new Date(request.started_at), language)}
             </span>
           </span>
         }
@@ -122,10 +122,10 @@ export function RequestDetailSheet({
             <DetailSection title={m.tokens}>
               <DetailList
                 items={[
-                  { label: m.input, value: formatNumber(usage.input_tokens, locale) },
-                  { label: m.reasoning, value: formatNumber(usage.reasoning_tokens, locale) },
-                  { label: m.reply, value: formatNumber(usage.reply_tokens, locale) },
-                  { label: m.total, value: formatNumber(usage.total_tokens, locale) },
+                  { label: m.input, value: formatNumber(usage.input_tokens, language) },
+                  { label: m.reasoning, value: formatNumber(usage.reasoning_tokens, language) },
+                  { label: m.reply, value: formatNumber(usage.reply_tokens, language) },
+                  { label: m.total, value: formatNumber(usage.total_tokens, language) },
                 ]}
               />
             </DetailSection>

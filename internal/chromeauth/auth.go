@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -88,11 +89,6 @@ type Chrome struct {
 	accounts []Account
 	// masterKey 在首次导入时读取 App-Bound v20 主密钥
 	masterKey func() ([]byte, error)
-}
-
-// Discover 只读列出本机 Chrome Google 账号
-func Discover(chromeRoot string) ([]Account, error) {
-	return discoverPlatform(chromeRoot)
 }
 
 // OpenChrome 发现 chromeRoot 中的 Google 账号
@@ -187,9 +183,6 @@ func selectAccounts(accounts []Account, profiles []string, emails []string) ([]A
 		if !account.Importable {
 			return nil, fmt.Errorf("%s %s 缺少可导入的 OAuth 认证材料", account.Profile, account.Email)
 		}
-		if !strings.Contains(account.Email, "@") {
-			return nil, fmt.Errorf("%s 缺少账号邮箱", account.Profile)
-		}
 		foundProfiles[profile] = struct{}{}
 		if _, exists := foundEmails[email]; exists {
 			continue
@@ -253,6 +246,14 @@ func importProxies(proxy string, fallback string) (string, string, error) {
 	return fixed, cmp.Or(fixed, fallback), nil
 }
 
+// withImportProxyHint 在导入遇到网络连接或超时失败时为容器内的环回代理附加排障说明
+func withImportProxyHint(proxyURL string, err error) error {
+	if errors.Is(err, gemini.ErrTransport) || errors.Is(err, context.DeadlineExceeded) {
+		return proxypool.WithLoopbackHint(proxyURL, err)
+	}
+	return err
+}
+
 // ValidateProxy 校验 HTTP、HTTPS、SOCKS4 或 SOCKS5 代理 URL 并返回去掉空白的值
 func ValidateProxy(value string) (string, error) {
 	value = strings.TrimSpace(value)
@@ -313,7 +314,7 @@ func (c *Chrome) importAccount(ctx context.Context, account Account, options Imp
 	}
 	cookies, bound, err := fetchGoogleCookies(ctx, browserIdentity{chrome: metadata.Chrome, language: metadata.Language}, account.GaiaID, token, account.token.bindingKey, requestProxy)
 	if err != nil {
-		return pendingImport{}, err
+		return pendingImport{}, withImportProxyHint(requestProxy, err)
 	}
 	metadata.OAuth = &auth.OAuthMaterial{GaiaID: account.GaiaID, RefreshToken: token, WrappedBindingKey: account.token.bindingKey}
 	metadata.BoundSession = bound
@@ -346,7 +347,7 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 		cancel()
 		client.CloseIdleConnections()
 		if err != nil {
-			return nil, 0, fmt.Errorf("验证账号 %s: %w", item.state.Metadata.ID, err)
+			return nil, 0, fmt.Errorf("验证账号 %s: %w", item.state.Metadata.ID, withImportProxyHint(item.requestProxy, err))
 		}
 		for _, model := range client.Models() {
 			models[model.ID] = struct{}{}
@@ -390,16 +391,10 @@ func toStorageCookies(cookies []multiloginCookie) []auth.StateCookie {
 		if path == "" {
 			path = "/"
 		}
-		sameSite := strings.ToLower(cookie.SameSite)
-		if sameSite != "none" && sameSite != "lax" && sameSite != "strict" {
-			sameSite = ""
-		} else {
-			sameSite = strings.ToUpper(sameSite[:1]) + sameSite[1:]
-		}
 		result = append(result, auth.StateCookie{
 			Name: cookie.Name, Value: cookie.Value, Domain: domain, Path: path,
 			Expires:  float64(now.Add(lifetime).UnixNano()) / 1e9,
-			HTTPOnly: cookie.IsHTTPOnly, Secure: cookie.IsSecure, SameSite: sameSite,
+			HTTPOnly: cookie.IsHTTPOnly, Secure: cookie.IsSecure, SameSite: sameSiteName(cookie.SameSite),
 		})
 	}
 	return result

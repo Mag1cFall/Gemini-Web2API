@@ -29,6 +29,7 @@ import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { ProxyValue } from '@/features/accounts/ProxyValue'
 import {
   accountsKey,
+  runAccountAction,
   useAccounts,
   useClearCooldown,
   useDeleteAccounts,
@@ -45,7 +46,7 @@ export function AccountPage() {
   const m = useMessages(accountsMessages)
   const sm = useMessages(accountStateMessages)
   const rm = useMessages(cooldownReasonMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const now = useNow(30_000)
   const { id = '' } = useParams()
   const client = useQueryClient()
@@ -55,8 +56,7 @@ export function AccountPage() {
   const remove = useDeleteAccounts()
   const navigate = useNavigate()
   const verify = useMutation({
-    mutationFn: () =>
-      api('/api/accounts/' + encodeURIComponent(id) + '/verify', { method: 'POST' }),
+    mutationFn: () => runAccountAction(id, { kind: 'verify' }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: accountsKey })
       toast({ tone: 'success', title: m.verified })
@@ -66,8 +66,7 @@ export function AccountPage() {
     },
   })
   const toggle = useMutation({
-    mutationFn: (enabled: boolean) =>
-      api('/api/accounts/' + encodeURIComponent(id), { method: 'PUT', json: { enabled } }),
+    mutationFn: (enabled: boolean) => runAccountAction(id, { kind: 'enabled', enabled }),
     onSuccess: () => void client.invalidateQueries({ queryKey: accountsKey }),
     onError: (error) => {
       toast({ tone: 'error', title: error.message })
@@ -75,9 +74,7 @@ export function AccountPage() {
   })
   const saveProxy = useMutation({
     mutationFn: ({ proxy, current }: { proxy: string; current: string }) =>
-      proxy === current
-        ? Promise.resolve()
-        : api('/api/accounts/' + encodeURIComponent(id), { method: 'PUT', json: { proxy } }),
+      runAccountAction(id, { kind: 'proxy', proxy, current }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: accountsKey })
       setProxyOpen(false)
@@ -222,7 +219,7 @@ export function AccountPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-warning-soft px-4 py-3 text-sm text-warning-text">
           <p>
             {fill(m.accountCooldown, {
-              time: formatDateTime(new Date(account.cooldown_until), now, locale),
+              time: formatDateTime(new Date(account.cooldown_until), now, language),
               reason: cooldownReason(rm, account.cooldown_reason ?? ''),
             })}
           </p>
@@ -245,7 +242,7 @@ export function AccountPage() {
             usage && (
               <span className="text-xs text-foreground-muted">
                 {fill(m.fetchedAt, {
-                  time: formatDateTime(new Date(usage.fetched_at), now, locale),
+                  time: formatDateTime(new Date(usage.fetched_at), now, language),
                 })}
               </span>
             )
@@ -261,7 +258,7 @@ export function AccountPage() {
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-base font-medium">{label}</span>
                     <span className="text-xs text-foreground-muted">
-                      {fill(m.usedPercent, { percent: formatPercent(window.used_ratio, locale) })}
+                      {fill(m.usedPercent, { percent: formatPercent(window.used_ratio, language) })}
                     </span>
                   </div>
                   <Meter
@@ -271,7 +268,7 @@ export function AccountPage() {
                   />
                   <span className="text-xs text-foreground-muted">
                     {fill(m.resetAt, {
-                      time: formatDateTime(new Date(window.reset_at), now, locale),
+                      time: formatDateTime(new Date(window.reset_at), now, language),
                     })}
                   </span>
                 </li>
@@ -281,7 +278,7 @@ export function AccountPage() {
           {usage && (usage.remaining_credits !== undefined || usage.use_overage_ai_credits) && (
             <div className="flex flex-wrap gap-2">
               {usage.remaining_credits !== undefined && (
-                <Tag>{m.credits + ' ' + formatNumber(usage.remaining_credits, locale)}</Tag>
+                <Tag>{m.credits + ' ' + formatNumber(usage.remaining_credits, language)}</Tag>
               )}
               {usage.use_overage_ai_credits && <Tag>{m.overage}</Tag>}
             </div>
@@ -303,7 +300,7 @@ export function AccountPage() {
                     <>
                       <Badge tone="warning">
                         {fill(m.cooling, {
-                          time: formatDateTime(new Date(cooldown.until), now, locale),
+                          time: formatDateTime(new Date(cooldown.until), now, language),
                         })}
                       </Badge>
                       <Button
@@ -333,7 +330,7 @@ export function AccountPage() {
           <div className="flex flex-col gap-1">
             <dt className="text-foreground-muted">{m.contextWindow}</dt>
             <dd className="font-medium">
-              {account.context_window ? formatNumber(account.context_window, locale) : m.none}
+              {account.context_window ? formatNumber(account.context_window, language) : m.none}
             </dd>
           </div>
           <div className="flex flex-col gap-1">
@@ -351,14 +348,16 @@ export function AccountPage() {
           <div className="flex flex-col gap-1">
             <dt className="text-foreground-muted">{m.readyAt}</dt>
             <dd className="font-medium">
-              {account.ready_at ? formatDateTime(new Date(account.ready_at), now, locale) : m.none}
+              {account.ready_at
+                ? formatDateTime(new Date(account.ready_at), now, language)
+                : m.none}
             </dd>
           </div>
           <div className="flex flex-col gap-1">
             <dt className="text-foreground-muted">{m.lastUsed}</dt>
             <dd className="font-medium">
               {account.last_used
-                ? formatDateTime(new Date(account.last_used), now, locale)
+                ? formatDateTime(new Date(account.last_used), now, language)
                 : m.never}
             </dd>
           </div>
@@ -371,7 +370,7 @@ export function AccountPage() {
               <dt className="text-foreground-muted">
                 {m.lastError}
                 {account.last_error_at &&
-                  ' · ' + formatDateTime(new Date(account.last_error_at), now, locale)}
+                  ' · ' + formatDateTime(new Date(account.last_error_at), now, language)}
               </dt>
               <dd className="font-medium break-words">{serverText(account.last_error)}</dd>
             </div>
@@ -380,7 +379,7 @@ export function AccountPage() {
       </Card>
       {proxyOpen && (
         <ProxyDialog
-          title={m.proxyTitle}
+          title={m.editProxy}
           initial={account.fixed_proxy ?? ''}
           pending={saveProxy.isPending}
           onSave={(proxy) => {

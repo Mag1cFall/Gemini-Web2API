@@ -88,12 +88,6 @@ export function UsageCharts({
   const { buckets, totals } = report
   const multiDay = new Date(report.to).getTime() - new Date(report.from).getTime() > 86_400_000
   const labels = buckets.map((bucket) => f.bucketLabel(bucket.at, report.bucket_seconds, multiDay))
-  const dimensionLabels: Record<UsageDimension, string> = {
-    model: m.model,
-    account: m.account,
-    protocol: m.protocol,
-    state: m.state,
-  }
   const palette = assignColors(report.series.filter((item) => !item.other).map((item) => item.key))
   const traffic: ChartSeries[] = report.series.map((item) => ({
     name: item.other === true ? m.other : f.label(report.stack_by, item.key),
@@ -216,7 +210,7 @@ export function UsageCharts({
               label={m.stackBy}
               value={stack}
               onValueChange={onStack}
-              options={dimensions.map((item) => ({ value: item, label: dimensionLabels[item] }))}
+              options={dimensions.map((item) => ({ value: item, label: f.dimensionLabels[item] }))}
               size="sm"
               className="min-w-[128px]"
             />

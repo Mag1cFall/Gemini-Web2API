@@ -287,12 +287,6 @@ export function UsagePage() {
     return [...options].sort((left, right) => rank(left) - rank(right))
   }
 
-  const dimensionLabels: Record<UsageDimension, string> = {
-    model: m.model,
-    account: m.account,
-    protocol: m.protocol,
-    state: m.state,
-  }
   const chips = dimensions.flatMap((dimension) =>
     (view.filters[dimension] ?? []).map((value) => ({ dimension, value })),
   )
@@ -377,7 +371,7 @@ export function UsagePage() {
         {dimensions.map((dimension) => (
           <FilterMenu
             key={dimension}
-            label={dimensionLabels[dimension]}
+            label={f.dimensionLabels[dimension]}
             options={filterOptions(dimension)}
             selected={view.filters[dimension] ?? []}
             format={(value) => f.label(dimension, value)}
@@ -407,7 +401,7 @@ export function UsagePage() {
                 key={chip.dimension + '\n' + chip.value}
                 className="flex h-6 max-w-full items-center gap-1 rounded-sm bg-primary-soft pr-1 pl-2 text-xs text-primary"
               >
-                <span className="shrink-0 opacity-70">{dimensionLabels[chip.dimension]}:</span>
+                <span className="shrink-0 opacity-70">{f.dimensionLabels[chip.dimension]}:</span>
                 <Tooltip overflow label={label}>
                   <span className="min-w-0 truncate">{label}</span>
                 </Tooltip>

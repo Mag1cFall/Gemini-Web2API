@@ -63,12 +63,9 @@ func (r *chromeRenewal) refresh(ctx context.Context) ([]gemini.Cookie, error) {
 	cookies, bound, err := chromeauth.Refresh(ctx, r.material, r.chrome, r.language, r.proxy)
 	if err == nil {
 		r.bound = bound
-		if r.file != nil {
-			err = r.file.SetBoundSession(bound)
-		}
-		return cookies, err
+		return cookies, r.file.SetBoundSession(bound)
 	}
-	if !errors.Is(err, chromeauth.ErrCredentialsRejected) || r.file == nil {
+	if !errors.Is(err, chromeauth.ErrCredentialsRejected) {
 		return nil, err
 	}
 	current, findErr := chromeauth.FindChromeMaterial(r.material.GaiaID, r.profile)

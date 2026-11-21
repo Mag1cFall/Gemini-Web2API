@@ -34,7 +34,6 @@ type FrameDecoder struct {
 	citations   map[int][]Citation
 	// markerCitations 是各候选正文中引用标记指向的网页来源
 	markerCitations map[int][]Citation
-	phases          map[int]Phase
 	imageProgress   Phase
 	media           map[string]struct{}
 	lastSession     ConversationSnapshot
@@ -201,6 +200,8 @@ func bardProtocolError(code int) *ProtocolError {
 		err.HTTPStatus = 400
 		err.Retryable = false
 		err.Message = "Gemini Web 无法读取请求中的附件，例如附件为 0 字节 (1100)"
+	case 1152, 1185:
+		err.Message = fmt.Sprintf("Gemini Web 本轮回答在官网侧失败 (%d)", code)
 	default:
 		err.Message = fmt.Sprintf("Gemini Web 返回错误码 %d", code)
 	}
@@ -214,7 +215,6 @@ func (d *FrameDecoder) reset() {
 	d.codes = make(map[codeEventKey]codeSnapshot)
 	d.citations = make(map[int][]Citation)
 	d.markerCitations = make(map[int][]Citation)
-	d.phases = make(map[int]Phase)
 	d.imageProgress = PhaseUnknown
 	d.media = make(map[string]struct{})
 	d.lastSession = ConversationSnapshot{}
@@ -292,12 +292,6 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 				return err
 			}
 			d.sawComplete = d.sawComplete || candidateIndex == 0
-		}
-		if phase != PhaseUnknown && phase != d.phases[candidateIndex] {
-			d.phases[candidateIndex] = phase
-			if err := emit(Event{Kind: EventPhase, Candidate: candidateIndex, Phase: phase}); err != nil {
-				return err
-			}
 		}
 		if err := d.decodeCitations(candidate, candidateIndex, emit); err != nil {
 			return err
@@ -523,6 +517,9 @@ func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, session 
 		}
 	}
 	if raw, ok := richContentField(candidate, 59); ok {
+		if err := videoQuotaErrorFromRichContent(raw); err != nil {
+			return err
+		}
 		file, _ := valuePath(raw, 0, 0, 0, 0)
 		placeholder, _ := stringPath(candidate, 1, 0)
 		placeholder = generatedVideoPattern.FindString(placeholder)
@@ -562,7 +559,7 @@ func (d *FrameDecoder) emitGeneratedFile(candidate []any, candidateIndex int, me
 }
 
 func (d *FrameDecoder) emitMedia(candidateIndex int, media *Media, emit func(Event) error) error {
-	if media == nil || media.URL == "" {
+	if media.URL == "" {
 		return nil
 	}
 	key := string(media.Type) + "\x00" + media.URL
@@ -971,28 +968,43 @@ func expandDocuments(candidate []any, raw string) string {
 	})
 }
 
-// autolinkPattern 匹配 Markdown 链接 [文字](地址)
-var autolinkPattern = regexp.MustCompile(`\[([^\[\]\s]+)\]\(([^()\s]+)\)`)
+// autolinkPattern 匹配 Markdown 链接 [文字](地址)，地址中可以有一层成对的括号
+var autolinkPattern = regexp.MustCompile(`\[([^\[\]\s]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)`)
 
 // pendingLinkPattern 匹配正文末尾尚未写完的 Markdown 链接
-var pendingLinkPattern = regexp.MustCompile(`\[[^\[\]\s]*(?:\](?:\([^()\s]*)?)?$`)
+var pendingLinkPattern = regexp.MustCompile(`\[[^\[\]\s]*(?:\](?:\((?:[^()\s]|\([^()\s]*\)?)*)?)?$`)
 
-// restoreAutolinks 把围栏代码块以外官网自动改写的 [http 或 https 地址](地址)、[域名路径](https://域名路径) 与 [邮箱](mailto:邮箱) 还原为原文，行内代码中的地址官网同样改写
+// restoreAutolinks 把围栏代码块以外官网自动改写的 [http 或 https 地址](地址)、[域名路径](https://域名路径) 与 [邮箱](mailto:邮箱) 还原为原文，行内代码中的地址官网同样改写；Markdown 图片 ![文字](地址) 保持原样
 func restoreAutolinks(text string) string {
 	if !strings.Contains(text, "](") {
 		return text
 	}
 	return transformRanges(text, markdownRanges(text, false), func(prose string) string {
-		return autolinkPattern.ReplaceAllStringFunc(prose, func(link string) string {
-			match := autolinkPattern.FindStringSubmatch(link)
-			for _, scheme := range []string{"https://", "http://", "mailto:"} {
-				if address, ok := strings.CutPrefix(match[2], scheme); ok && (match[1] == match[2] || match[1] == address) {
-					return match[1]
-				}
+		var result strings.Builder
+		cursor := 0
+		for _, match := range autolinkPattern.FindAllStringSubmatchIndex(prose, -1) {
+			label, target := prose[match[2]:match[3]], prose[match[4]:match[5]]
+			if match[0] > 0 && prose[match[0]-1] == '!' || !autolinked(label, target) {
+				continue
 			}
-			return link
-		})
+			result.WriteString(prose[cursor:match[0]])
+			result.WriteString(label)
+			cursor = match[1]
+		}
+		result.WriteString(prose[cursor:])
+		return result.String()
 	})
+}
+
+// autolinked 报告链接是否为官网对文字中地址的自动改写：文字与目标或去掉协议的目标相同，比较时 \/ 视为 /，不计末尾的 /
+func autolinked(label, target string) bool {
+	normal := func(value string) string { return strings.TrimSuffix(strings.ReplaceAll(value, `\/`, "/"), "/") }
+	for _, scheme := range []string{"https://", "http://", "mailto:"} {
+		if address, ok := strings.CutPrefix(target, scheme); ok && (normal(label) == normal(target) || normal(label) == normal(address)) {
+			return true
+		}
+	}
+	return false
 }
 
 // pendingLinkStart 返回代码以外正文末尾尚未写完的 Markdown 链接的起点，写完后它可能还原为原文，没有时返回正文长度

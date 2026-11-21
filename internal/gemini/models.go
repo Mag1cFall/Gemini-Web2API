@@ -78,8 +78,14 @@ type toolOption struct {
 	source   bool
 }
 
-// aspectRatioPattern 匹配 16:9、1536x1024 形式的宽高比
-var aspectRatioPattern = regexp.MustCompile(`(\d+)\s*[:x×]\s*(\d+)`)
+// aspectRatioPattern 匹配文本中第一个 16:9、1536x1024 形式的宽高比
+var aspectRatioPattern = regexp.MustCompile(`(\d+)\s*[:xX×]\s*(\d+)`)
+
+// exactSizePattern 匹配完整的 1536x1024、16:9 形式尺寸或宽高比
+var exactSizePattern = regexp.MustCompile(`^(\d+)\s*[:xX×]\s*(\d+)$`)
+
+// exactRatioPattern 匹配完整的 16:9 形式宽高比
+var exactRatioPattern = regexp.MustCompile(`^(\d+)\s*:\s*(\d+)$`)
 
 // parseToolOptions 读取 payload[19] 中各工具的选项组
 func parseToolOptions(payload []any) map[Feature][]toolOption {
@@ -110,6 +116,9 @@ func parseToolOptions(payload []any) map[Feature][]toolOption {
 
 // nativeImageRatios 是官网菜单之外上游按原值生成的图片宽高比
 var nativeImageRatios = []string{"2:3", "21:9", "1:8", "8:1"}
+
+// imageAspectRatios 是生图支持的全部宽高比（官网菜单与原生比例），用于比对 size 与 aspect_ratio 的目标比例
+var imageAspectRatios = []string{"1:1", "9:16", "3:4", "4:3", "16:9", "2:3", "21:9", "1:8", "8:1"}
 
 // toolChoice 是生成请求选中的工具选项：options 写入 55 槽，sources 为其中 Sources 组的选项，aspectRatio 为请求宽高比时选中的标签，aspectOrder 与 durationOrder 为选中的宽高比与视频时长在官网菜单中的序号（从 1 起）
 type toolChoice struct {
@@ -174,6 +183,41 @@ func parseAspectRatio(value string) (float64, bool) {
 		return 0, false
 	}
 	return width / height, true
+}
+
+// ParseAspectRatio 解析完整字符串中的宽高比，requireColon 为真时只接受 W:H，否则接受 WxH 与 W:H；返回浮点比例、约分后的 W:H 写法与是否有效
+func ParseAspectRatio(value string, requireColon bool) (float64, string, bool) {
+	trimmed := strings.TrimSpace(value)
+	pattern := exactSizePattern
+	if requireColon {
+		pattern = exactRatioPattern
+	}
+	match := pattern.FindStringSubmatch(trimmed)
+	if match == nil {
+		return 0, "", false
+	}
+	width, errW := strconv.ParseInt(match[1], 10, 64)
+	height, errH := strconv.ParseInt(match[2], 10, 64)
+	if errW != nil || errH != nil || width <= 0 || height <= 0 {
+		return 0, "", false
+	}
+	divisor, rest := width, height
+	for rest != 0 {
+		divisor, rest = rest, divisor%rest
+	}
+	return float64(width) / float64(height), fmt.Sprintf("%d:%d", width/divisor, height/divisor), true
+}
+
+// NearestImageAspectRatio 返回生图支持比例中对数距离最接近 ratio 的一项
+func NearestImageAspectRatio(ratio float64) string {
+	best, bestDistance := "", math.Inf(1)
+	for _, label := range imageAspectRatios {
+		candidate, _ := parseAspectRatio(label)
+		if distance := math.Abs(math.Log(candidate / ratio)); distance < bestDistance {
+			best, bestDistance = label, distance
+		}
+	}
+	return best
 }
 
 // List 返回稳定排序的模型副本
@@ -321,9 +365,6 @@ func parseModelCatalog(payload []any) (ModelCatalog, error) {
 			}
 			catalog.defaultIndex = index
 		}
-	}
-	if catalog.defaultIndex < 0 {
-		return ModelCatalog{}, fmt.Errorf("官网模型目录没有默认模型")
 	}
 	defaultModel := models[catalog.defaultIndex]
 	accountCapabilities, _ := arrayAt(payload, 17)

@@ -44,10 +44,7 @@ func (r *recorder) Flush() {}
 func (s *server) do(c *gin.Context, method string, path string, body any) (int, http.Header, []byte) {
 	var reader io.Reader = http.NoBody
 	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return http.StatusInternalServerError, nil, []byte(err.Error())
-		}
+		encoded, _ := json.Marshal(body)
 		reader = bytes.NewReader(encoded)
 	}
 	request, err := http.NewRequestWithContext(c.Request.Context(), method, path, reader)
@@ -70,9 +67,6 @@ func (s *server) do(c *gin.Context, method string, path string, body any) (int, 
 	}
 	response := &recorder{header: http.Header{}}
 	s.api.ServeHTTP(response, request)
-	if response.status == 0 {
-		response.status = http.StatusOK
-	}
 	return response.status, response.header, response.body.Bytes()
 }
 

@@ -104,7 +104,6 @@ export function serverText(text: string) {
 
 interface I18nValue {
   language: Language
-  locale: Language
   setLanguage: (language: Language) => Promise<void>
 }
 
@@ -116,7 +115,6 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const value = useMemo<I18nValue>(
     () => ({
       language,
-      locale: language,
       setLanguage: async (next) => {
         await loadServerMessages(next)
         current = next
@@ -134,7 +132,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   return <I18nContext value={value}>{children}</I18nContext>
 }
 
-// useI18n 返回当前语言与区域
+// useI18n 返回当前语言
 export function useI18n() {
   const value = use(I18nContext)
   if (!value) throw new Error('useI18n 必须在 I18nProvider 内使用')

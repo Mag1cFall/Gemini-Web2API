@@ -32,8 +32,6 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | 调度 | `internal/balancer` | 模型能力、上下文窗口、请求槽占用、冷却与会话粘连 |
 | 适配 | `internal/adapter` | OpenAI、Claude 和 Gemini 请求与事件投影 |
 
-`internal/gemini` 负责网页帧解码，各 API 适配器消费统一的规范事件。
-
 每个账号有 `PER_ACCOUNT_CONCURRENCY` 个请求槽（默认 1），每个槽同一时间只执行一条上游请求链：生成请求从上传、发送到流结束，管理端的用量读取，Cookie 轮换与续签都占用请求槽，其余请求排队等待；视频与 Deep Research 的后台轮询阶段让出请求槽，等待上游首事件满 60 秒的生成请求也让出请求槽（同一账号同时一个）。没有会话绑定的请求按 `ROUTING_STRATEGY` 选择有空闲请求槽的账号，其中上下文窗口最大的优先：`round-robin` 按轮询顺序，`fill-first` 优先选择排序靠前的账号；提示词超过所选账号窗口的请求在发送前换用其他账号；可用账号全部占用时排队，模型、会话所在账号与已尝试账号都相同的请求按到达顺序取得请求槽，任一账号空出请求槽、就绪或状态变化时由队首重新选号，跳过排队期间进入冷却或待认证的账号；依赖网页会话续接的请求只等待会话所在账号。
 
 ## 2. Bootstrap 与模型目录
@@ -46,6 +44,16 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 | 2 | `POST /_/BardChatUi/data/batchexecute?rpcids=otAQ7b` | 当前账号可见模型与思考强度 |
 | 3 | `POST ...batchexecute?rpcids=ESY5D` | 账号偏好 |
 | 4 | `POST ...batchexecute?rpcids=jSf9Qc&source-path=/usage` | 套餐、用量窗口、重置时间 |
+
+第 1 步按 Chrome 地址栏导航跟随重定向，每一跳带相同的导航请求头，途中的 `Set-Cookie` 一并写回：
+
+| 重定向 | 处理 |
+| --- | --- |
+| 首页 → `accounts.google.com/ServiceLogin?...&osid=1` → `gemini.google.com/accounts/SetOSID?osidt=...` → `/app?pli=1` | 跟随；`SetOSID` 下发 `gemini.google.com` 的 `OSID` 与 `__Secure-OSID`，没有这两个 Cookie 的会话打开首页时都经过这一往返 |
+| 首页 → 同一路径加查询串（如 `/app?hl=en_GB`） | 跟随 |
+| `accounts.google.com` → 自身的登录页（`/v3/signin/...`） | 会话失效 |
+| `/u/N` 首页 → 不带该前缀的页面 | 该序号的会话已失效 |
+| → `www.google.com/sorry` | 人机验证 |
 
 任一步失败的账号在启动时标为不可用，之后重新执行整条链路，连接失败与超时的重试间隔不超过 10 秒，其余错误按 `ACCOUNT_COOLDOWN`，成功后加入调度并开始轮换 Cookie。
 
@@ -143,7 +151,7 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 
 公开模型 ID 由型号名规范化得到，例如 `4 Hydrogen` 生成 `gemini-4-hydrogen`、`4 Carbon` 生成 `gemini-4-carbon`；官网菜单的用途说明（如 Quick answers、Most complex work、Code & analysis）只作为 `description`。官网更新显示名后，读取的新目录直接生成对应 ID；各账号可以同时处于不同模型版本。
 
-账号每次读完目录（启动、重读与访客会话重读）都与该账号上次同层级的目录按位置键比较：同一位置上的 ID 由 A 变为 B、A 不在新目录且 B 不在旧目录时记一条改名 A → B，已有指向 A 的改名改指 B。各账号最近一次读取的目录（层级、位置键与 ID、上锁的升级项）与改名记录保存在 `data/requests.db` 的 `model_catalogs`、`model_renames` 表，启动时读入。例如 11-13 官网把 mode 1 的 `3.8 Flash` 改名 `4 Hydrogen`（hash 不变），`gemini-3.8-flash` 记为改名到 `gemini-4-hydrogen`；11-11 起 4 Argon 改为 mode 8 的策略变体、mode 8 的行换成 4 Carbon，`gemini-4-argon` 仍在新目录中，不记改名。
+账号每次读完目录（启动、重读与访客会话重读）都与该账号上次同层级的目录按位置键比较：同一位置上的 ID 由 A 变为 B、A 不在新目录且 B 不在旧目录时记一条改名 A → B（B 已记为改名到 A 时不记，访客目录会在两个名称间交替，该账号在这一位置上两个名称都可用），已有指向 A 的改名改指 B。各账号最近一次读取的目录（层级、位置键与 ID、上锁的升级项）与改名记录保存在 `data/requests.db` 的 `model_catalogs`、`model_renames` 表，启动时读入。同一位置 hash 不变而型号名变化时记一条改名，如 `gemini-3.8-flash` → `gemini-4-hydrogen`；ID 仍在新目录中的不记改名。
 
 模型名按以下顺序解析：去掉首尾空白、`models/` 或 `google/` 前缀与思考后缀，按 `MODEL_MAPPING` 映射，在账号当前目录中按公开 ID、显示名称或 hash 查找，按改名记录换成当前 ID 再查找，`gemini-default` 取该账号的官网默认模型；都没有时，某账号目录中该模型为上锁的升级项或它只出现在其他层级账号保存的目录中返回 `403`，写明所需层级与当前账号的层级，否则按下表处理。`/v1/models` 另列出 `gemini-default` 与改名前的旧 ID，旧 ID 以 `alias_of` 写明当前 ID；`MODEL_ACCOUNTS` 与 `FIRST_EVENT_HEDGE_MODELS` 按当前 ID 匹配，请求用量按当前 ID 的单价计价。模型是否存在按全部账号与访客会话已读取的目录判断：
 
@@ -184,27 +192,28 @@ API 响应 ◄── 协议投影 ◄── 规范事件 ◄── 流式解码
 
 `SURFACE` 为 `1`（Chat）或 `2`（Task），没有 `SURFACE` 的项不对应界面。模型行之外，Chat 策略中带变体键、不是升级入口的项也是模型：型号名与说明按上述规则取自 `HEADER` 的短名、标题与副标题，hash 记为变体键，mode 与同 mode 的模型行相同。服务向这类模型发请求时，生成请求头第 4 槽与各请求头第 24 槽写变体键。多个账号的同一公开 ID 合并时，保留思考强度更多的一项。
 
-Ultra 账号目录形态为（能力数字数组记为 `CAPS`，模型 hash 列表记为 `HASHES`，选项正文省略）：
+Ultra 账号目录形态为（界面语言为繁体中文时的现场；能力数字数组记为 `CAPS`，模型 hash 列表记为 `HASHES`，选项正文省略）：
 
 ```jsonc
 payload[0] = 1
 payload[15] = [
-  ["8c46e95b1a07cecc","Flash-Lite","3.5 Flash-Lite",CAPS,2,null,HASHES,false,"",1,"Flash-Lite","Quick answers","3.5 Flash-Lite",null,null,false,"",6,[ICON,true],"Quick answers"],
-  ["56fdd199312815e2","Flash","3.8 Flash",CAPS,2,null,HASHES,false,"",20,"Flash","全方位協助","3.8 Flash",null,null,false,"",1,[ICON,true],"全方位協助"],
-  ["95a4c0abcba24364","Carbon","4 Carbon",CAPS,2,null,null,false,"",4,"Carbon","Most complex work","4 Carbon",null,null,false,"",8,[ICON,true],"Most complex work"]
+  ["1d44b34bcaa1c04d","自動","根據需求調整回覆",CAPS,2,null,HASHES,false,"",1,"自動","自動","根據需求調整回覆",null,null,false,"",6,[ICON,true],"自動"],
+  ["56fdd199312815e2","4 Hydrogen","4 Hydrogen",CAPS,2,null,HASHES,false,"",20,"4 Hydrogen","全天候貼心協助","4 Hydrogen",null,null,false,"",1,[ICON,true],"4 Hydrogen"],
+  ["797f3d0293f288ad","Neon","4 Neon",CAPS,2,null,HASHES,true,"Neon4p0",4,"Neon","深入分析","4 Neon",null,null,true,"Neon4p0",3,[ICON,true],"4 Neon"],
+  ["95a4c0abcba24364","Carbon","4 Carbon",CAPS,2,null,null,false,"",4,"Carbon","程式編寫與複雜任務","4 Carbon",null,null,false,"",8,[ICON,true],"4 Carbon"]
 ]
-payload[24] = ["carbon_multi_ultra_neon_policy",[
-  [["",6,false,null,"Flash-Lite","3.5 Flash-Lite",null,false,null,null,false,null,"Quick answers",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
-  [["",1,false,null,"Flash","3.8 Flash",null,false,null,null,false,null,"全方位協助",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
-  [["",1,false,null,"Flash","3.8 Flash",null,false,null,null,false,null,"全方位協助",CAPS,null,1],[[1,...]],1,[2]],
-  [["",8,false,"argon","Argon","4 Argon",null,false,null,null,false,null,"Code & analysis",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
-  [["",8,false,null,"Carbon","4 Carbon",null,false,null,null,false,null,"Most complex work",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
-  [["",8,false,"argon","Argon","4 Argon",null,false,null,null,false,null,"Code & analysis",CAPS,null,1],[[1,...]],1,[2]],
-  [["",8,false,null,"Carbon","4 Carbon",null,false,null,null,false,null,"Most complex work",CAPS,null,1],[[1,...]],1,[2]]
+payload[24] = ["neon_launch_ultra_policy",[
+  [["",6,false,null,"自動","根據需求調整回覆",null,false,null,null,false,null,"自動",CAPS,null,1],null,1,[1]],
+  [["",1,false,null,"4 Hydrogen","4 Hydrogen","4 Hydrogen",false,null,null,false,null,"全天候貼心協助",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
+  [["",1,false,null,"4 Hydrogen","4 Hydrogen","4 Hydrogen",false,null,null,false,null,"全天候貼心協助",CAPS,null,1],[[1,...]],1,[2]],
+  [["",3,false,null,"Neon","4 Neon",null,true,"Neon4p0",null,true,"Neon4p0","深入分析",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
+  [["",3,false,null,"Neon","4 Neon",null,true,"Neon4p0",null,true,"Neon4p0","深入分析",CAPS,null,1],[[1,...]],1,[2]],
+  [["",8,false,null,"Carbon","4 Carbon",null,false,null,null,false,null,"程式編寫與複雜任務",CAPS,null,2,"思考程度"],[[1,...],[4,...],[2,...]],null,[1]],
+  [["",8,false,null,"Carbon","4 Carbon",null,false,null,null,false,null,"程式編寫與複雜任務",CAPS,null,1],[[1,...]],1,[2]]
 ]]
 ```
 
-该目录公开 `gemini-3.5-flash-lite`、`gemini-3.8-flash`（默认）、`gemini-4-carbon`、`gemini-4-argon` 与 `gemini-3.8-flash-task`、`gemini-4-argon-task`、`gemini-4-carbon-task`。4 Carbon 与 4 Argon 的 mode 都为 `8`，4 Argon 的变体键为 `argon`。
+服务以英文读取目录，该目录公开 `gemini-auto`、`gemini-4-hydrogen`（默认）、`gemini-4-neon`、`gemini-4-carbon` 与 `gemini-4-hydrogen-task`、`gemini-4-neon-task`、`gemini-4-carbon-task`。
 
 免费账号目录只有一行 `cf41b0e0dd7d53e5`（mode `6`，标题 `Auto`、副标题 `Adapts to your needs`），公开 ID 为 `gemini-auto`；策略中的 4 Argon 带升级入口 `[1,"gemini-4-argon"]`，不进入目录。访客目录只有一行 `3.5 Flash-Lite`（mode `6`），策略各项没有 `SURFACE`。
 
@@ -232,7 +241,7 @@ payload[24] = ["carbon_multi_ultra_neon_policy",[
 | `gemini-deep-research` | Deep Research | `1` | `50` |
 | `gemini-guided-learning` | Guided Learning | `24` | `117` |
 
-`payload[24]` 中界面号为 `2` 的策略行是 Task 模式可选的模型与思考强度（Ultra 账号为 3.8 Flash、4 Argon 与 4 Carbon，只有编号 `1`）。目录为这些模型生成 `<模型 ID>-task`，按 mode 与变体键对应 Chat 模型，生成请求写 featureMode `40`。
+`payload[24]` 中界面号为 `2` 的策略行是 Task 模式可选的模型与思考强度（Ultra 账号为 4 Hydrogen、4 Neon 与 4 Carbon，只有编号 `1`）。目录为这些模型生成 `<模型 ID>-task`，按 mode 与变体键对应 Chat 模型，生成请求写 featureMode `40`。
 
 账号初始化时按官网页面加载顺序以 `CNgdBe` 读取类型 `2` 与 `1` 的 Gem 列表，再读取 Gems 管理页的类型 `3`（Google 预置 Gem，如 `gem-chess-champ`、`gem-coding-partner`），每个 Gem 生成公开 ID `gem-<Gem ID>`，同一 Gem 出现在多个列表中时只生成一个模型，显示名称与说明取 Gem 行 `[ID,[名称,说明],[指令]]`，协调模型取账号默认模型，生成请求在 `inner[19]` 写 Gem ID。重读时 Gem 列表读取失败（如 `CNgdBe` 返回 1096“无法加载对话”）沿用上次读到的 Gem，首次初始化就失败的账号不提供 Gem，其余模型照常可用。
 
@@ -275,10 +284,7 @@ Task、Deep Research 只在普通会话中提供，视频成品在生成流结�
 | `222` | 布尔，已完成 Task 首次使用确认 | 首次发送 Task 前写入 |
 | `261` | 布尔 | `inner[91]`：真为 `1`，否则 `0` |
 
-网关的全局 `default` 按当前 ready 账号的官网默认票数、模型覆盖账号数、公开 ID 字典序生成。各模型的账号覆盖数由 `available_account_count` 返回。
-
-
-**真实模型校验：** 模型 hash 可以晚于正文到达，标识确认前的事件按原顺序暂存；匹配后依次发布，不匹配或流结束时仍缺标识则终止响应。策略变体模型的响应 `payload[39]` 为账号默认模型的 hash，这类模型按 `payload[42]` 的模型名核对。
+服务的全局 `default` 按当前 ready 账号的官网默认票数、模型覆盖账号数、公开 ID 字典序生成。各模型的账号覆盖数由 `available_account_count` 返回。
 
 ### 上下文窗口
 
@@ -512,13 +518,12 @@ Cookie Header 导入将普通 Cookie 绑定到 `.google.com`，将 `__Host-*` �
 
 | 请求 | 自动续签条件 |
 | --- | --- |
-| Bootstrap | HTTP `401/403`；首页缺少 `SNlM0e`；重定向到 `www.google.com/sorry` |
-| 模型目录、账号偏好 | HTTP `401/403`；模型目录 `payload[14]` 为 `1016`；重定向到 `www.google.com/sorry` |
+| Bootstrap | HTTP `401/403`；首页缺少 `SNlM0e`；登录服务转到登录页；重定向到 `www.google.com/sorry` |
+| 模型目录、账号偏好 | HTTP `401/403`；模型目录 `payload[14]` 为 `1016`；重定向到 `accounts.google.com`；重定向到 `www.google.com/sorry` |
 | Usage | HTTP `401/403`；登录页；空或缺失 `jSf9Qc`；重定向到 `www.google.com/sorry` |
 | 生成会话 | HTTP `401/403`；长轮询返回状态 16；重定向到 `www.google.com/sorry`；免费账号生成前 `ListAccounts` 报告会话失效 |
 | Cookie 轮换 | 轮换页或 `RotateCookies` 返回 HTTP `401/403`；轮换后 `ListAccounts` 报告会话失效 |
 | 上传条款、上传、ProcessFile | HTTP `401/403`；`wrb.fr` 状态 7；已上传的附件在重试时不重传 |
-| 媒体下载 | 当前没有自动续签分支 |
 
 OAuthMultilogin 连接或读取响应失败时按网络层失败处理：账号保持就绪并触发代理检测，下一条请求重新续签；OAuthMultilogin 返回其他失败时账号待认证。
 
@@ -919,7 +924,7 @@ FILES = [
 0,1,3,4,6,7,10,11,17,18,27,30,41,45,49,53,59,61,67,68,79,80,91,96,98
 ```
 
-`inner[3]` 是页面生成的以 `!` 开头、约 2000 字符的不透明令牌，服务写 `null`；带页面令牌的官网载荷与服务载荷在同一批计算题上的固定失败文字比例相同。保存历史的首轮与 Temporary Chat 首轮的非 `null` 槽只差 `45`；续接最新一轮另有 `71`，从较早回答继续另有 `2`、`72`。官网“重新生成”另写 `inner[32]=1`、`inner[63]=[1001,null,0]`、`inner[72]=5`。
+`inner[3]` 是页面生成的以 `!` 开头、约 2000 字符的不透明令牌，服务写 `null`。保存历史的首轮与 Temporary Chat 首轮的非 `null` 槽只差 `45`；续接最新一轮另有 `71`，从较早回答继续另有 `2`、`72`。官网“重新生成”另写 `inner[32]=1`、`inner[63]=[1001,null,0]`、`inner[72]=5`。
 
 ### 附件上传
 
@@ -977,7 +982,7 @@ x-goog-ext-525001261-jspb = [1,null,null,null,"MODEL_HASH",null,"LANG",null,[4,3
 
 成功图片响应同时披露三层身份：
 
-| 身份 | 原始位置 | Pro 账号 3.8 Flash | 免费账号默认模型 |
+| 身份 | 原始位置 | Pro 账号 4 Hydrogen | 免费账号默认模型 |
 | --- | --- | --- | --- |
 | 聊天协调模型 hash | `payload[39]` | `56fdd199312815e2` | `cf41b0e0dd7d53e5` |
 | 图片产品名称 | `payload[42]` | `Nano Banana 2.1` | `Nano Banana 2` |
@@ -1003,7 +1008,7 @@ candidate[12][7] = [[[
 
 同一 payload 的镜像结构也在 `payload[26][0][0][0][9][0][0][3][18]` 重复 generator tag；当前解码器以候选 rich content 为主读取路径。
 
-网关公开的 `gemini-3.1-flash-image` 见「工具条目」，协调模型为账号默认模型。该 ID 支持对话入口、Gemini `generateContent` 与 `/v1/images/generations`、`/v1/images/edits`；Responses 的 `image_generation` 工具对所选模型发送 Create image。OpenAI Chat/Responses 通过 `provider_model` 返回实际 generator tag。
+服务公开的 `gemini-3.1-flash-image` 见「工具条目」，协调模型为账号默认模型。该 ID 支持对话入口、Gemini `generateContent` 与 `/v1/images/generations`、`/v1/images/edits`；Responses 的 `image_generation` 工具对所选模型发送 Create image。OpenAI Chat/Responses 通过 `provider_model` 返回实际 generator tag。
 
 图片生成期间还会先出现根级稀疏进度：
 
@@ -1033,7 +1038,7 @@ payload[6] = [null,["data_analysis_tool",[null,null,"Creating your image",""],ST
 ]
 ```
 
-`IMAGE_ID` 为媒体项 [9]；缺省时由页面规则算出：对字符串 `RCID_VARIANT_序号` 做 32 位 `h=h*31+c` 哈希，取绝对值的 36 进制后 12 位，重复截成 16 位，也是下载文件名 `Gemini_Generated_Image_<IMAGE_ID>`。响应 `[0]` 为 `lh3.googleusercontent.com/gg-dl/…`（免费账号为 `/gg/…`），追加 `=d-I` 后按预览相同的下载链跟随：`?alr=yes` 首跳返回 `text/plain` 下一跳，Pro 账号中继为 `work.fife.usercontent.google.com/rd-gg-dl/`，免费账号为 `lh3.google.com/rd-gg/`，末跳返回原图（现场 2752×1536 JPEG、1800×1073 PNG）。
+`IMAGE_ID` 为媒体项 [9]；缺省时由页面规则算出：对字符串 `RCID_VARIANT_序号` 做 32 位 `h=h*31+c` 哈希，取绝对值的 36 进制后 12 位，重复截成 16 位，也是下载文件名 `Gemini_Generated_Image_<IMAGE_ID>`。响应 `[0]` 为 `lh3.googleusercontent.com/gg-dl/…`（免费账号为 `/gg/…`），追加 `=d-I` 后按预览相同的下载链跟随：`?alr=yes` 首跳返回 `text/plain` 下一跳，Pro 账号中继为 `work.fife.usercontent.google.com/rd-gg-dl/`，免费账号为 `lh3.google.com/rd-gg/`，末跳返回原图。
 
 ### 视频与音乐
 
@@ -1043,11 +1048,11 @@ Create video 写 featureMode `11`、`inner[55]=[[16]]`（Landscape 默认），`
 payload[6] = ["I'm generating your video…",["video_generation",[null,null,"Video Generation",ICON],1,[null,[null×8,[1]]]]]
 ```
 
-视频在后台生成（现场约 3 分钟）。服务每 30 秒以 `hNvQHb` 读取会话轮次（新到旧，`payload[0][i]` 的 `[0]` 为 `[CID,RID]`，候选在 `[3][0][0]`），本轮候选 `phase=2` 后按生成流规则解析；某次轮询遇到连接、TLS 或代理错误时在下一个周期继续轮询；轮询期间让出账号请求槽，同一账号可处理其他请求。成品在 `candidate[12]` 稀疏键 `"60"`：`[0][0][0][0]` 为文件项，`[2]` 文件名，`[7][1]` 下载地址，`[11]` MIME，`[17]` 为 `[[秒],宽,高]`。
+视频在后台生成。服务每 30 秒以 `hNvQHb` 读取会话轮次（新到旧，`payload[0][i]` 的 `[0]` 为 `[CID,RID]`，候选在 `[3][0][0]`），本轮候选 `phase=2` 后按生成流规则解析；某次轮询遇到连接、TLS 或代理错误时在下一个周期继续轮询；轮询期间让出账号请求槽，同一账号可处理其他请求。成品在 `candidate[12]` 稀疏键 `"60"`：`[0][0][0][0]` 为文件项，`[2]` 文件名，`[7][1]` 下载地址，`[11]` MIME，`[17]` 为 `[[秒],宽,高]`。
 
-视频完成后在同一会话追问时沿用 Create video：`inner[49]`、`inner[55]` 与 `inner[0]` 下标 9 与首轮相同，`inner[71]` 为 `[CID,null×6,""]`，`inner[17]` 的轮次数递增，成品同样经 `hNvQHb` 读取。上游按提示词决定生成方式：要求修改时重新生成一段 10 秒视频，要求续写时返回拼接后的完整视频，此时 `"60"` 的 `[0][0][0][17][0][0]` 为总时长（现场 20 秒），`[0][0][1][28][0][4][0]` 为本段时长（10 秒），`[0][0][1][0]` 为本轮提示词。追问的回答正文可能是固定失败文字，视频仍在同一候选中给出。
+视频完成后在同一会话追问时沿用 Create video：`inner[49]`、`inner[55]` 与 `inner[0]` 下标 9 与首轮相同，`inner[71]` 为 `[CID,null×6,""]`，`inner[17]` 的轮次数递增，成品同样经 `hNvQHb` 读取。上游按提示词决定生成方式：要求修改时重新生成一段 10 秒视频，要求续写时返回拼接后的完整视频，此时 `"60"` 的 `[0][0][0][17][0][0]` 为总时长，`[0][0][1][28][0][4][0]` 为本段时长（10 秒），`[0][0][1][0]` 为本轮提示词。追问的回答正文可能是固定失败文字，视频仍在同一候选中给出。
 
-Create music 写 featureMode `21`、`inner[55]=[]`，成品在生成流内完成（现场 44 秒，`payload[42]` 为 `Lyria 3.5`）。成品在 `candidate[12]` 稀疏键 `"87"`：`[0][1]` 为 mp3 文件项（`audio/mpeg`），`[1][1]` 为带封面的 mp4，`[6][0]` 为正文占位链接。
+Create music 写 featureMode `21`、`inner[55]=[]`，成品在生成流内完成（`payload[42]` 为 `Lyria 3.5`）。成品在 `candidate[12]` 稀疏键 `"87"`：`[0][1]` 为 mp3 文件项（`audio/mpeg`），`[1][1]` 为带封面的 mp4，`[6][0]` 为正文占位链接。
 
 视频与音乐的下载地址为 `contribution.usercontent.google.com/download?...`，页面以带 Cookie 的 fetch 一次取得文件。正文中的 `generated_video_content`、`generated_music_content` 占位链接与图片占位一样从正文移除，媒体按占位位置插入。
 
@@ -1073,7 +1078,7 @@ Deep Research 写 featureMode `1`，`inner[54]=[[[[[1]]]]]`、`inner[55]=[[1]]`�
 | 确认 | 以卡片 `[3][0]` 的按钮文字为提问续接；`inner[67]=null`、`inner[97]=[0,0]`，请求头第 7 槽为 `null` | 正文含文档占位；研究卡片在稀疏键 `"58"`，流结束时候选仍为 `phase=1` |
 | 报告 | `hNvQHb` 轮询 | 本轮候选 `phase=2` 时正文为完成说明，报告 Markdown 在 `candidate[30][0][4]`，由 `"57"` 的占位映射插入正文 |
 
-研究卡片 `"58"` 的 `[1][4][2]` 为步骤列表，每步 `[null×4,[1,"Researching websites...",来源,[]]]`，来源为 `[图标,URL,标题,...]`。报告中的 ` [cite: N]` 标记由文档 `candidate[30][i][5]` 稀疏键 `"44"` 的引用表给出来源，结构见 [Search 与 citations 原始数组](#search-与-citations-原始数组)。现场确认后 12.5 分钟完成。报告轮询与视频相同，轮询期间让出账号请求槽。服务把计划、确认回复与研究步骤作为思考输出，报告作为正文输出；计划轮没有计划卡片时（例如上游直接回答），该轮回答即为结果，作为正文输出。
+研究卡片 `"58"` 的 `[1][4][2]` 为步骤列表，每步 `[null×4,[1,"Researching websites...",来源,[]]]`，来源为 `[图标,URL,标题,...]`。报告中的 ` [cite: N]` 标记由文档 `candidate[30][i][5]` 稀疏键 `"44"` 的引用表给出来源，结构见 [Search 与 citations 原始数组](#search-与-citations-原始数组)。报告轮询与视频相同，轮询期间让出账号请求槽。服务把计划、确认回复与研究步骤作为思考输出，报告作为正文输出；计划轮没有计划卡片时（例如上游直接回答），该轮回答即为结果，作为正文输出。
 
 ### Task
 
@@ -1316,7 +1321,7 @@ GET https://lh3.googleusercontent.com/rd-gg-dl/...
 
 `1037` 与会话有效时的模型不符先读取该账号的 `jSf9Qc`：五小时或周窗口已用满时该模型冷却到窗口重置时间，否则按 `ACCOUNT_COOLDOWN` 冷却。选号时账号已读取的用量有用满的窗口，该账号到窗口重置前不接收用量受限的模型，访客会话也解析出同一模型的请求（3.5 Flash-Lite）不受影响。五小时窗口用满后官网改由 3.5 Flash-Lite 回答，响应模型因此与请求模型不一致，同一帧 `payload[52]` 为额度提示，服务按 `429` 返回该提示与到重置时间的 `Retry-After`。
 
-Gemini Web 也会在 HTTP 200、无错误帧的正常候选中以正文返回固定失败文字，例如 `Sorry, something went wrong. Please try your request again.`、`I encountered an error doing what you asked. Could you try again?`、`I seem to be encountering an error. Can I try something else for you?`、`I'm having a hard time fulfilling your request. Can I help you with something else instead?`，以及 Create image 偶发的 `Normally I can help with things like this, but I don't seem to have access to that content. You can try again or ask me for something else.`；中文界面账号会返回轮换出现的语言模型短句，例如 `我无法提供这方面的帮助，因为我只是一个语言模型。`、`我只会生成文本，你提出的问题超出了我的程序逻辑范畴。`、`我幫不上忙，因為我只是個語言模型。`。完整列表位于 `internal/gemini/failure_text.go`。文字表之外的失败回复由载荷 `payload[31]` 为 `1` 标出，服务按固定失败文字同样处理。上游临时故障时主候选正文也可能整段为错误卡片链接 `http://googleusercontent.com/card_content/<n>`，提示文字在 `candidate[22][0]`，官网显示重试按钮；服务按固定失败文字同样处理。主候选正文仍是其中某条文字的前缀时，服务暂缓转发该正文及其后的事件，正文出现前的思考等事件照常转发；正文一旦偏离即按原顺序放行。上游也会先输出其他正文（例如工具调用 JSON 的开头），再把整段快照改写为固定失败文字；服务在流结束时以最终正文判断，整段相等且主候选没有媒体时转为上表的上游错误；主候选带媒体（官网视频追问的现场）时按正常回答放行。
+Gemini Web 也会在 HTTP 200、无错误帧的正常候选中以正文返回固定失败文字，例如 `Sorry, something went wrong. Please try your request again.`、`I encountered an error doing what you asked. Could you try again?`、`I seem to be encountering an error. Can I try something else for you?`、`I'm having a hard time fulfilling your request. Can I help you with something else instead?`，以及 Create image 偶发的 `Normally I can help with things like this, but I don't seem to have access to that content. You can try again or ask me for something else.`；中文界面账号会返回轮换出现的语言模型短句，例如 `我无法提供这方面的帮助，因为我只是一个语言模型。`、`我只会生成文本，你提出的问题超出了我的程序逻辑范畴。`、`我幫不上忙，因為我只是個語言模型。`。完整列表位于 `internal/gemini/failure_text.go`。文字表之外的失败回复由载荷 `payload[31]` 为 `1` 标出，服务按固定失败文字同样处理。上游临时故障时主候选正文也可能整段为错误卡片链接 `http://googleusercontent.com/card_content/<n>`，提示文字在 `candidate[22][0]`，官网显示重试按钮；服务按固定失败文字同样处理。主候选正文仍是其中某条文字的前缀时，服务暂缓转发该正文及其后的事件，正文出现前的思考等事件照常转发；正文一旦偏离即按原顺序放行。上游也会先输出其他正文（例如工具调用 JSON 的开头），再把整段快照改写为固定失败文字；服务在流结束时以最终正文判断，整段相等且主候选没有媒体时转为上表的上游错误；主候选带媒体时按正常回答放行。
 
 上游按输入拦截时，回答的第一个正文帧为过滤提示 `This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. …`（不带 `payload[31]`），之后的帧把正文改写为轮换出现的拒答（如 `I can help with many kinds of requests, but it appears this one would go against my [guidelines](https://gemini.google/policy-guidelines/). …`）并带 `payload[31]` 为 `1`，官网页面只显示拒答。服务在正文仍是过滤提示的前缀或以它开头时暂缓转发，结束时按上表的输入拦截返回；过滤提示之后改写为固定失败文字时仍按可重试的失败回复处理。
 
@@ -1356,7 +1361,7 @@ Responses 的 `truncation` 为 `auto` 时，提示词超过账号的上下文窗
 
 ### 自定义工具
 
-只有一条用户消息时，适配器与官网一样直接发送原文并接上协议说明；多条消息写成 ChatML 角色块（`<|im_start|>角色` 至 `<|im_end|>`，模型在回答末尾仿写的 `<|im_end|>` 由解码器去掉），角色为 `system`、`user`、`assistant` 与 `tool`，消息正文按原文写入，协议说明作为最后一个 `system` 块，末尾留出 `<|im_start|>assistant` 轮。Responses 的 `namespace` 工具组展开为组内函数，模型返回的调用项回填所属 `namespace`。该桥接运行在网页普通提示词层，工具可靠性取决于模型服从能力。
+只有一条用户消息时，适配器与官网一样直接发送原文并接上协议说明；多条消息写成 ChatML 角色块（`<|im_start|>角色` 至 `<|im_end|>`，模型在回答末尾仿写的 `<|im_end|>` 由解码器去掉），角色为 `system`、`user`、`assistant` 与 `tool`，消息正文按原文写入，协议说明作为最后一个 `system` 块，末尾留出 `<|im_start|>assistant` 轮。Responses 的 `namespace` 工具组展开为组内函数，模型返回的调用项回填所属 `namespace`。
 
 实际提示形态为：
 
@@ -1387,7 +1392,7 @@ a.txt
 工具协议：
 可用工具：[CLIENT_TOOL_DEFINITION]
 工具选择：auto
-这些工具由客户端在用户的环境中执行。在回答中按下面的格式写出调用就是调用工具的唯一方式：写出调用即完成调用，由客户端执行，你自己不需要具备这些工具，也不要改为把要写的内容或要运行的命令直接展示给用户。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。需要调用工具时，在回答末尾按下面的格式写出调用……
+这些工具由客户端在用户的环境中执行。在回答中按下面的格式写出调用就是调用工具的唯一方式：写出调用即完成调用，由客户端执行，你自己不需要具备这些工具，也不要改为把要写的内容或要运行的命令直接展示给用户。官网对 Gemini 内置工具给出的调用次数或剩余额度提示只针对内置工具，不适用于这些工具，这些工具的调用没有次数限制。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。需要调用工具时，在回答末尾按下面的格式写出调用……
 [Call:工具名称]
 [Arg:参数名]
 ```
@@ -1417,7 +1422,7 @@ Chat 与 Responses 的 `parallel_tool_calls` 为 `false` 或 Anthropic 的 `disa
 
 Gemini Web 会改写正文中的组件标签（`<TemplateWidget>`、`<GenerateWidget>`、`<Image>`）并把地址改写为 Markdown 链接，围栏代码块中的内容保持原样；`[cite: N]` 形式的引用标记在正文与代码块中都会被删除。参数值因此都写在代码块中。账户关闭 Gemini 应用活动记录时，Gemini Web 对写文件一类的请求在提示词前注入 Google 云端硬盘与文档不可用的说明，模型偶尔因此不写调用块，改为在正文中直接给出内容。适配器在回答中找到第一个位于代码以外的调用块（围栏代码块内与同一行前面有未配对反引号的是示例，按正文处理），按出现顺序解析其后连续的调用块，调用块组之前的文字作为调用前的正文返回，调用块组之后的内容丢弃：Chat 为 `content`，Responses 为 `function_call` 之前的 `message`，Anthropic 为 `tool_use` 之前的 `text` 块，Gemini 为 `functionCall` 之前的 `text` part。解析时接受上游以反斜杠转义的方括号、工具名两侧的空白与多出的前导下划线、缺少的 `[/Arg]` 与不在代码块中的参数值；代码块的结束标记取其后紧跟参数结尾、下一参数、调用结尾、下一调用或回答结尾的第一行，外层代码块比参数中的反引号串短时同样完整取值。参数原文按参数 Schema 还原类型，参数的 Schema 依次从 `properties`、根 `$ref`、`allOf` 与 `additionalProperties` 查找：只允许字符串的参数取原文，数字、布尔值、数组与对象取 JSON，未声明类型的参数是 JSON 时取值、否则取原文。调用块没有写完、调用未声明的工具或参数不符合参数结构时，该次回答按 502 上游错误处理，日志记录原因与回答开头：没有显式会话的请求在首个可见输出前换另一个账号新建会话重试，显式会话直接返回该错误。
 
-流式请求带自定义工具时，调用块之前的正文实时发出；可能是调用块开头的正文尾部与末尾空白暂缓到能确定为止，从调用块开头起的内容不作为正文发出，回答结束后按解析结果发出剩余正文与工具调用。围栏代码块与同一行闭合的行内代码中的 `[Call:…]` 是示例，按正文输出；没有闭合的反引号串是普通字符，其后的调用块照常解析，所在行写完前暂缓发出。
+流式请求带自定义工具时，回答开头的 600 字节暂缓发出，其中出现声称工具调用次数用尽或无法使用工具的语句时暂缓到回答结束；其后调用块之前的正文实时发出；可能是调用块开头的正文尾部与末尾空白暂缓到能确定为止，从调用块开头起的内容不作为正文发出，回答结束后按解析结果发出剩余正文与工具调用。围栏代码块与同一行闭合的行内代码中的 `[Call:…]` 是示例，按正文输出；没有闭合的反引号串是普通字符，其后的调用块照常解析，所在行写完前暂缓发出。回答没有调用且声称工具调用次数用尽或无法调用工具、或以无法访问用户环境为由拒绝时，在首个可见输出前优先换用其他账号重新生成，最多 3 次，提示词末尾附带列出可用工具名的纠正说明。
 
 以上内容整体写入 Gemini Web 的普通提示词槽。`none` 使用对话与已有工具结果直接作答，提示中省略函数定义和调用格式，显式响应 JSON Schema 继续生效；`required`/`any` 要求调用任一声明工具，显式函数选择要求调用指定工具。`GEMINI_CONTINUE_SESSION=true` 时，支持 `previous_response_id` 或显式 conversation ID 的客户端会继续同一网页 session，回传完整历史的客户端按会话键续接；续接时工具协议沿用会话前文的函数定义与 JSON Schema，只重申调用规则与格式。未续接的无会话请求默认创建彼此独立的 Temporary Chat。
 
@@ -1584,15 +1589,6 @@ Anthropic Messages 的 `messages` 可以为空，只有 `system` 时按 system �
 
 ## 7. 协议现状与更新
 
-| 项目 | 当前结论 |
-| --- | --- |
-| Gemini 产品级 system prompt | 网页协议没有已确认的清除字段 |
-| API system message | 编码为 `messages` 中的 `system` 记录，仍属于网页普通提示词 |
-| 任意客户端工具声明 | 通过提示协议桥接 |
-| 官网历史 | 默认 Temporary Chat；可配置保存 |
-| 语言与地区 | Profile 语言进入 `Accept-Language`；`hl` 与 `inner[1]` 使用首页 `TuX5cc` 账号界面语言；权限仍由账号决定 |
-| 前端更新 | 重新采集 Bootstrap、模型目录、账号偏好和最短生成流 |
-
 ### 已知与未知字段
 
 | 状态 | 内容 |
@@ -1602,36 +1598,6 @@ Anthropic Messages 的 `messages` 可以为空，只有 `system` 时按 system �
 | 仅检查存在 | `token_binding_directed_response` |
 | 视为不透明 | `inner[3]` 页面令牌、上传路径 |
 | 适配层合成 | 自定义工具调用、Responses `web_search_call` 与 `compaction` 项、Anthropic `server_tool_use` 与 `web_search_tool_result`、Gemini `groundingMetadata`、签名与本地 token usage |
-| 尚未解码 | 官网搜索 query/lifecycle、隐藏思考、官方 thought signature、任意 function declaration 槽 |
+| 尚未解码 | 官网搜索 query/lifecycle、隐藏思考、官方 thought signature、任意 function declaration 槽、清除 Gemini 产品级 system prompt 的字段 |
 
-### 原始证据覆盖
-
-| 协议面 | 保存的逐字 raw | 当前可确定内容 | 明确缺口 |
-| --- | --- | --- | --- |
-| `/app` Bootstrap | 有 | `SNlM0e`、`cfb2h`、`FdrFJe`、`TuX5cc`、`d2zJAe`、`PI9WOb`、上传参数、上传条款有效期 | 页面其余前端状态未逐字段命名 |
-| `otAQ7b` | 有 | `payload[0]` 默认 mode、`payload[15]` 模型行、`payload[24]` 思考强度 | 能力数字数组与其余顶层槽语义未知 |
-| `ESY5D`、`L5adhe` | 有 | 偏好消息字段号布局、字段 25/100/145/222/261、写入载荷 | 其余字段语义未知 |
-| `jSf9Qc` | 有 | tier、窗口 kind、ratio、seconds/nanos、overage bool | 未出现的 credits 行保持可选 |
-| OAuthMultilogin | 无完整响应 | 两阶段状态、challenge、JWS、Cookie HPKE 流程已实网通过 | challenge/OK 完整 JSON 与 directed response 内部字段 |
-| 附件上传 | 有 | 断点续传两步、上传路径、ProcessFile 文件 UUID | 上传路径与文件 UUID 的内部结构 |
-| 生成会话 | 有 | 握手、`$httpHeaders`、会话配置与输入消息、长轮询帧、官网 raw 与服务 encoder 两套 99 槽 | 大量保留槽尚无语义名 |
-| Thought | 有 | `candidate[37][0][0]` 累计快照 | 隐藏 thought 与官方签名不可观测 |
-| Code Execution | 无完整上游帧 | marker 语法与协议投影已端到端通过 | 当次 upstream 原始帧 |
-| Search | 有 | citations 位于 `candidate[2][1]` | query、开始、结束与 status 不在 raw 中 |
-| Generated media | 有 | `payload[6]` 进度、`candidate[12][7]`、`"60"` 视频、`"87"` 音乐、尺寸、MIME、URL、placeholder、generator tag、`c8o8Fe` 原图 | Pro redo、Maximum size 原图 |
-| Canvas、Deep Research | 有 | `candidate[30]` 文档、`"56"` 计划卡片、`"57"` 占位映射、`"58"` 研究卡片、`hNvQHb` 轮次 | 研究卡片状态枚举 |
-| Task | 有 | featureMode 40、偏好 222、`UVb0T` | 需要用户输入的长任务 |
-| Session/model/error | 有 | CID/RID/RCID、payload 39/42、`er[5]`、`wrb.fr[5]` BardErrorInfo、`e` | 1037 限额耗尽的原始帧 |
-
-协议变化时按以下顺序定位：
-
-1. **Bootstrap：** 检查 `SNlM0e`、`cfb2h`、`FdrFJe`、上传参数
-2. **模型：** 检查 `otAQ7b` 行结构、hash、mode、默认 mode 与思考强度
-3. **请求：** 对比 header 数组和 99 槽载荷
-4. **响应：** 对比记录分隔、候选快照、phase 与模型元数据
-5. **认证：** 检查响应 Cookie、登录跳转与 OAuthMultilogin
-6. **回归：** 使用官方 SDK 或 Coding Agent 完成一次真实流式请求
-
-原始请求包含账号和认证材料，只保存在本地实验目录。公开 Issue 提供脱敏后的数组形状、事件顺序、模型 ID 与错误状态。
-
-欢迎复用请求编码器、帧解码器和协议适配器进行二次开发。若项目有帮助，请给仓库一个 Star。
+官网前端或接口变化时的采集与定位步骤见 [官网采集与重新对齐](upstream.md)。

@@ -93,9 +93,6 @@ func (r *conversationRegistry) isLatest(snapshot gemini.ConversationSnapshot) bo
 }
 
 func (r *conversationRegistry) put(state *gemini.ConversationState, accountID string, contextTokens int, keys ...string) {
-	if state == nil {
-		return
-	}
 	r.mu.Lock()
 	now := time.Now()
 	r.cleanupLocked(now)
@@ -108,11 +105,9 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 		}
 	}
 	store := r.store
-	if _, temporary := r.temporary[entry.snapshot.CID]; temporary {
-		store = nil
-	}
+	_, temporary := r.temporary[entry.snapshot.CID]
 	r.mu.Unlock()
-	if store == nil {
+	if temporary {
 		return
 	}
 	sessions := make([]requestdb.StoredSession, 0, len(keys))
@@ -190,9 +185,6 @@ func DeleteTemporaryChats(ctx context.Context, pool *balancer.AccountPool) {
 
 // configureCooldownStore 让账号与模型冷却写入账本库，并恢复上次运行保存的未结束冷却
 func configureCooldownStore(pool *balancer.AccountPool, store *requestdb.Store) {
-	if store == nil {
-		return
-	}
 	stored, err := store.Cooldowns(context.Background(), time.Now())
 	if err != nil {
 		logging.Warn(logging.SourceService, "读取冷却失败", "错误", err)
@@ -218,9 +210,6 @@ func configureCooldownStore(pool *balancer.AccountPool, store *requestdb.Store) 
 
 // configureSessionStore 让会话登记写入账本库，并恢复上次运行保存的未过期会话
 func configureSessionStore(pool *balancer.AccountPool, store *requestdb.Store) {
-	if store == nil {
-		return
-	}
 	conversations.mu.Lock()
 	if conversations.store != nil {
 		conversations.mu.Unlock()

@@ -4,85 +4,61 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 )
 
-// StreamingState 保存 Claude SSE 的输出状态
-type StreamingState struct {
-	MessageID        string
-	Model            string
-	MessageStartSent bool
-	MessageStopSent  bool
-	BlockIndex       int
-	CurrentBlockType string
-	Usage            *gemini.Usage
-	ConversationID   string
-	// ProviderModel 是上游实际回答的模型 ID，写在 message_delta 中
-	ProviderModel string
-	// WebSearchRequests 与 WebFetchRequests 为 message_delta usage.server_tool_use 的搜索与读取网页次数
-	WebSearchRequests int
-	WebFetchRequests  int
-	// StopSequence 为 message_delta 中命中的停止序列
-	StopSequence *string
-	// ContextManagement 与 Iterations 为 message_delta 中生效的上下文编辑与各次采样的用量
-	ContextManagement map[string]any
-	Iterations        []map[string]any
-}
-
-// NewStreamingState 创建 Claude SSE 状态
-func NewStreamingState(model string) *StreamingState {
-	return &StreamingState{
-		MessageID: fmt.Sprintf("msg_%d", time.Now().UnixNano()),
-		Model:     model,
-		Usage:     &gemini.Usage{},
-	}
-}
-
 // StreamProcessor 将规范事件编码为 Claude SSE
 type StreamProcessor struct {
-	state  *StreamingState
-	writer io.Writer
+	writer           io.Writer
+	messageID        string
+	model            string
+	messageStartSent bool
+	messageStopSent  bool
+	blockIndex       int
+	currentBlockType string
+	usage            *gemini.Usage
+	conversationID   string
+	// providerModel 是上游实际回答的模型 ID，写在 message_delta 中
+	providerModel string
+	// webSearchRequests 与 webFetchRequests 为 message_delta usage.server_tool_use 的搜索与读取网页次数
+	webSearchRequests int
+	webFetchRequests  int
+	// stopSequence 为 message_delta 中命中的停止序列
+	stopSequence *string
+	// contextManagement 与 iterations 为 message_delta 中生效的上下文编辑与各次采样的用量
+	contextManagement map[string]any
+	iterations        []map[string]any
 }
 
-// NewStreamProcessor 创建 Claude SSE 编码器
-func NewStreamProcessor(model string, writer io.Writer, messageIDs ...string) *StreamProcessor {
-	state := NewStreamingState(model)
-	if len(messageIDs) > 0 && messageIDs[0] != "" {
-		state.MessageID = messageIDs[0]
-	}
-	return &StreamProcessor{state: state, writer: writer}
+// NewStreamProcessor 创建 Claude SSE 编码器，messageID 为 message_start 中的消息 ID
+func NewStreamProcessor(model string, writer io.Writer, messageID string) *StreamProcessor {
+	return &StreamProcessor{writer: writer, messageID: messageID, model: model, usage: &gemini.Usage{}}
 }
 
 // SetConversationID 设置最终消息携带的显式会话标识
 func (p *StreamProcessor) SetConversationID(conversationID string) {
-	p.state.ConversationID = conversationID
+	p.conversationID = conversationID
 }
 
 // SetProviderModel 设置 message_delta 携带的上游实际模型
 func (p *StreamProcessor) SetProviderModel(model string) {
-	p.state.ProviderModel = model
+	p.providerModel = model
 }
 
 // SetModel 设置校验后的实际模型
 func (p *StreamProcessor) SetModel(model string) {
-	if !p.state.MessageStartSent && model != "" {
-		p.state.Model = model
+	if !p.messageStartSent && model != "" {
+		p.model = model
 	}
-}
-
-// MessageID 返回当前 Claude 消息标识
-func (p *StreamProcessor) MessageID() string {
-	return p.state.MessageID
 }
 
 // ProcessEvent 消费一个 Gemini 规范事件
 func (p *StreamProcessor) ProcessEvent(event gemini.Event) error {
 	if event.Usage != nil {
-		p.state.Usage = event.Usage
+		p.usage = event.Usage
 		if event.Kind == gemini.EventMetadata {
 			return p.ensureStarted()
 		}
@@ -93,24 +69,6 @@ func (p *StreamProcessor) ProcessEvent(event gemini.Event) error {
 		return p.emitContent("text", event)
 	case gemini.EventThought:
 		return p.emitContent("thinking", event)
-	case gemini.EventMedia:
-		if event.Media != nil && event.Media.URL != "" {
-			text := fmt.Sprintf("[%s](%s)", event.Media.Title, event.Media.URL)
-			if event.Media.Type == gemini.MediaGeneratedImage {
-				text = fmt.Sprintf("![%s](%s)", event.Media.Alt, event.Media.URL)
-			}
-			return p.emitContent("text", gemini.Event{
-				Kind:      gemini.EventText,
-				Operation: gemini.SnapshotAppend,
-				Delta:     text,
-			})
-		}
-	case gemini.EventError:
-		if event.Err != nil {
-			return event.Err
-		}
-	case gemini.EventDone:
-		return p.Finish(mapFinishReason(event.FinishReason))
 	}
 	return nil
 }
@@ -125,17 +83,17 @@ func (p *StreamProcessor) EmitToolCall(id string, name string, arguments json.Ra
 	}
 	if err := p.emit("content_block_start", map[string]interface{}{
 		"type":  "content_block_start",
-		"index": p.state.BlockIndex,
+		"index": p.blockIndex,
 		"content_block": map[string]interface{}{
 			"type": "tool_use", "id": id, "name": name, "input": map[string]interface{}{},
 		},
 	}); err != nil {
 		return err
 	}
-	p.state.CurrentBlockType = "tool_use"
+	p.currentBlockType = "tool_use"
 	if err := p.emit("content_block_delta", map[string]interface{}{
 		"type":  "content_block_delta",
-		"index": p.state.BlockIndex,
+		"index": p.blockIndex,
 		"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": string(arguments)},
 	}); err != nil {
 		return err
@@ -155,7 +113,7 @@ func (p *StreamProcessor) EmitThinking(thinking string, signature string) error 
 func (p *StreamProcessor) FinishThinking(signature string) error {
 	if err := p.emit("content_block_delta", map[string]interface{}{
 		"type":  "content_block_delta",
-		"index": p.state.BlockIndex,
+		"index": p.blockIndex,
 		"delta": map[string]interface{}{"type": "signature_delta", "signature": signature},
 	}); err != nil {
 		return err
@@ -165,7 +123,7 @@ func (p *StreamProcessor) FinishThinking(signature string) error {
 
 // SetContextManagement 设置 message_delta 携带的上下文编辑结果与各次采样的用量
 func (p *StreamProcessor) SetContextManagement(management map[string]any, iterations []map[string]any) {
-	p.state.ContextManagement, p.state.Iterations = management, iterations
+	p.contextManagement, p.iterations = management, iterations
 }
 
 // EmitCompaction 输出本次请求压缩上下文得到的 compaction 块，摘要以 compaction_delta 发送
@@ -177,14 +135,14 @@ func (p *StreamProcessor) EmitCompaction(summary string) error {
 		return err
 	}
 	if err := p.emit("content_block_start", map[string]interface{}{
-		"type": "content_block_start", "index": p.state.BlockIndex,
+		"type": "content_block_start", "index": p.blockIndex,
 		"content_block": map[string]interface{}{"type": "compaction", "content": nil, "encrypted_content": nil},
 	}); err != nil {
 		return err
 	}
-	p.state.CurrentBlockType = "compaction"
+	p.currentBlockType = "compaction"
 	if err := p.emit("content_block_delta", map[string]interface{}{
-		"type": "content_block_delta", "index": p.state.BlockIndex,
+		"type": "content_block_delta", "index": p.blockIndex,
 		"delta": map[string]interface{}{"type": "compaction_delta", "content": summary, "encrypted_content": nil},
 	}); err != nil {
 		return err
@@ -194,13 +152,13 @@ func (p *StreamProcessor) EmitCompaction(summary string) error {
 
 // FinishStopSequence 以命中的停止序列完成 Claude SSE 消息
 func (p *StreamProcessor) FinishStopSequence(sequence string) error {
-	p.state.StopSequence = &sequence
+	p.stopSequence = &sequence
 	return p.Finish("stop_sequence")
 }
 
 // Finish 完成 Claude SSE 消息
 func (p *StreamProcessor) Finish(stopReason string) error {
-	if p.state.MessageStopSent {
+	if p.messageStopSent {
 		return nil
 	}
 	if err := p.ensureStarted(); err != nil {
@@ -212,35 +170,30 @@ func (p *StreamProcessor) Finish(stopReason string) error {
 
 	messageDelta := map[string]interface{}{
 		"type":  "message_delta",
-		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": p.state.StopSequence},
+		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": p.stopSequence},
 	}
-	if p.state.ConversationID != "" {
-		messageDelta["conversation_id"] = p.state.ConversationID
+	if p.conversationID != "" {
+		messageDelta["conversation_id"] = p.conversationID
 	}
-	if p.state.ProviderModel != "" {
-		messageDelta["provider_model"] = p.state.ProviderModel
+	if p.providerModel != "" {
+		messageDelta["provider_model"] = p.providerModel
 	}
-	usage := map[string]any{"output_tokens": p.state.Usage.OutputTokens()}
-	if p.state.WebSearchRequests > 0 || p.state.WebFetchRequests > 0 {
-		usage["server_tool_use"] = map[string]int{"web_search_requests": p.state.WebSearchRequests, "web_fetch_requests": p.state.WebFetchRequests}
+	usage := map[string]any{"output_tokens": p.usage.OutputTokens()}
+	if p.webSearchRequests > 0 || p.webFetchRequests > 0 {
+		usage["server_tool_use"] = map[string]int{"web_search_requests": p.webSearchRequests, "web_fetch_requests": p.webFetchRequests}
 	}
-	if p.state.Iterations != nil {
-		usage["iterations"] = p.state.Iterations
+	if p.iterations != nil {
+		usage["iterations"] = p.iterations
 	}
 	messageDelta["usage"] = usage
-	if p.state.ContextManagement != nil {
-		messageDelta["context_management"] = p.state.ContextManagement
+	if p.contextManagement != nil {
+		messageDelta["context_management"] = p.contextManagement
 	}
 	if err := p.emit("message_delta", messageDelta); err != nil {
 		return err
 	}
-	p.state.MessageStopSent = true
+	p.messageStopSent = true
 	return p.emit("message_stop", map[string]interface{}{"type": "message_stop"})
-}
-
-// EmitError 输出 Claude 流式错误
-func (p *StreamProcessor) EmitError(err error) error {
-	return p.EmitErrorType("api_error", err)
 }
 
 // EmitErrorType 以指定错误类型输出 Claude 流式错误
@@ -263,27 +216,27 @@ func (p *StreamProcessor) EmitServerToolUse(id string, name string, input any) e
 		return err
 	}
 	if err := p.emit("content_block_start", map[string]interface{}{
-		"type": "content_block_start", "index": p.state.BlockIndex,
+		"type": "content_block_start", "index": p.blockIndex,
 		"content_block": map[string]interface{}{"type": "server_tool_use", "id": id, "name": name, "input": map[string]interface{}{}},
 	}); err != nil {
 		return err
 	}
-	p.state.CurrentBlockType = "server_tool_use"
+	p.currentBlockType = "server_tool_use"
 	arguments, err := json.Marshal(input)
 	if err != nil {
 		return err
 	}
 	if err := p.emit("content_block_delta", map[string]interface{}{
-		"type": "content_block_delta", "index": p.state.BlockIndex,
+		"type": "content_block_delta", "index": p.blockIndex,
 		"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": string(arguments)},
 	}); err != nil {
 		return err
 	}
 	switch name {
 	case "web_search":
-		p.state.WebSearchRequests++
+		p.webSearchRequests++
 	case "web_fetch":
-		p.state.WebFetchRequests++
+		p.webFetchRequests++
 	}
 	return p.closeBlock()
 }
@@ -297,11 +250,11 @@ func (p *StreamProcessor) EmitBlock(block map[string]any) error {
 		return err
 	}
 	if err := p.emit("content_block_start", map[string]interface{}{
-		"type": "content_block_start", "index": p.state.BlockIndex, "content_block": block,
+		"type": "content_block_start", "index": p.blockIndex, "content_block": block,
 	}); err != nil {
 		return err
 	}
-	p.state.CurrentBlockType = fmt.Sprint(block["type"])
+	p.currentBlockType = fmt.Sprint(block["type"])
 	return p.closeBlock()
 }
 
@@ -318,21 +271,21 @@ func (p *StreamProcessor) EmitCitedText(text string, citations []map[string]any)
 		block["citations"] = []any{}
 	}
 	if err := p.emit("content_block_start", map[string]interface{}{
-		"type": "content_block_start", "index": p.state.BlockIndex, "content_block": block,
+		"type": "content_block_start", "index": p.blockIndex, "content_block": block,
 	}); err != nil {
 		return err
 	}
-	p.state.CurrentBlockType = "cited_text"
+	p.currentBlockType = "cited_text"
 	for _, citation := range citations {
 		if err := p.emit("content_block_delta", map[string]interface{}{
-			"type": "content_block_delta", "index": p.state.BlockIndex,
+			"type": "content_block_delta", "index": p.blockIndex,
 			"delta": map[string]interface{}{"type": "citations_delta", "citation": citation},
 		}); err != nil {
 			return err
 		}
 	}
 	if err := p.emit("content_block_delta", map[string]interface{}{
-		"type": "content_block_delta", "index": p.state.BlockIndex,
+		"type": "content_block_delta", "index": p.blockIndex,
 		"delta": map[string]interface{}{"type": "text_delta", "text": text},
 	}); err != nil {
 		return err
@@ -344,7 +297,7 @@ func (p *StreamProcessor) emitContent(blockType string, event gemini.Event) erro
 	if err := p.ensureStarted(); err != nil {
 		return err
 	}
-	if p.state.CurrentBlockType != blockType {
+	if p.currentBlockType != blockType {
 		if err := p.closeBlock(); err != nil {
 			return err
 		}
@@ -356,11 +309,11 @@ func (p *StreamProcessor) emitContent(blockType string, event gemini.Event) erro
 			block["text"] = ""
 		}
 		if err := p.emit("content_block_start", map[string]interface{}{
-			"type": "content_block_start", "index": p.state.BlockIndex, "content_block": block,
+			"type": "content_block_start", "index": p.blockIndex, "content_block": block,
 		}); err != nil {
 			return err
 		}
-		p.state.CurrentBlockType = blockType
+		p.currentBlockType = blockType
 	}
 
 	deltaType := "text_delta"
@@ -371,32 +324,32 @@ func (p *StreamProcessor) emitContent(blockType string, event gemini.Event) erro
 	}
 	delta := map[string]interface{}{"type": deltaType, field: event.Delta}
 	return p.emit("content_block_delta", map[string]interface{}{
-		"type": "content_block_delta", "index": p.state.BlockIndex, "delta": delta,
+		"type": "content_block_delta", "index": p.blockIndex, "delta": delta,
 	})
 }
 
 func (p *StreamProcessor) ensureStarted() error {
-	if p.state.MessageStartSent {
+	if p.messageStartSent {
 		return nil
 	}
-	p.state.MessageStartSent = true
+	p.messageStartSent = true
 	message := map[string]interface{}{
-		"id": p.state.MessageID, "type": "message", "role": "assistant", "model": p.state.Model,
+		"id": p.messageID, "type": "message", "role": "assistant", "model": p.model,
 		"content": []interface{}{}, "stop_reason": nil, "stop_sequence": nil,
 	}
-	message["usage"] = map[string]int{"input_tokens": p.state.Usage.PromptTokens, "output_tokens": 0}
+	message["usage"] = map[string]int{"input_tokens": p.usage.PromptTokens, "output_tokens": 0}
 	return p.emit("message_start", map[string]interface{}{"type": "message_start", "message": message})
 }
 
 func (p *StreamProcessor) closeBlock() error {
-	if p.state.CurrentBlockType == "" {
+	if p.currentBlockType == "" {
 		return nil
 	}
 	err := p.emit("content_block_stop", map[string]interface{}{
-		"type": "content_block_stop", "index": p.state.BlockIndex,
+		"type": "content_block_stop", "index": p.blockIndex,
 	})
-	p.state.BlockIndex++
-	p.state.CurrentBlockType = ""
+	p.blockIndex++
+	p.currentBlockType = ""
 	return err
 }
 
@@ -409,13 +362,4 @@ func (p *StreamProcessor) emit(eventType string, payload interface{}) error {
 		return err
 	}
 	return streamio.Flush(p.writer)
-}
-
-func mapFinishReason(reason gemini.FinishReason) string {
-	switch reason {
-	case gemini.FinishCancelled, gemini.FinishError:
-		return "stop_sequence"
-	default:
-		return "end_turn"
-	}
 }

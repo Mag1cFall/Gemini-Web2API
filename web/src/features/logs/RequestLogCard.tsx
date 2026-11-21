@@ -4,8 +4,10 @@ import { type ReactNode, useId, useState } from 'react'
 import { Collapse } from '@/components/ui/collapse'
 import { ClampText } from '@/features/logs/ClampText'
 import { type LogRow, logText } from '@/features/logs/filter'
+import { timeFormat } from '@/features/logs/format'
 import { LogField } from '@/features/logs/LogField'
 import { logsMessages } from '@/features/logs/messages'
+import { runningElapsed } from '@/features/requests/Elapsed'
 import { bodyMessages, finishMessages } from '@/features/requests/messages'
 import { RequestBodyView } from '@/features/requests/RequestParts'
 import type { Attempt, RequestInfo, RequestState } from '@/features/requests/types'
@@ -22,14 +24,6 @@ const stateClass: Record<RequestState, string> = {
   failed: 'border-error text-error-text bg-error-soft',
   cancelled: 'border-warning text-warning-text bg-warning-soft',
 }
-
-// timeFormat 是时间线的 24 小时制时分秒
-const timeFormat = new Intl.DateTimeFormat('en-GB', {
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: false,
-})
 
 // Disclosure 是可展开的一节，首次展开后才渲染内容
 function Disclosure({
@@ -75,10 +69,10 @@ function Disclosure({
 
 // RunningElapsed 是进行中请求从开始到现在的耗时，每秒更新
 function RunningElapsed({ request }: { request: RequestInfo }) {
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const now = useNow(1000)
-  const elapsed = Math.max(request.duration_ms, now.getTime() - Date.parse(request.started_at))
-  return <LogField value={formatDuration(Math.floor(elapsed / 1000) * 1000, locale)} />
+  const elapsed = runningElapsed(request, now)
+  return <LogField value={formatDuration(Math.floor(elapsed / 1000) * 1000, language)} />
 }
 
 // AttemptList 按顺序列出被换下的账号与原因，备用请求带标记
@@ -117,11 +111,11 @@ export function RequestLogCard({ row, account }: { row: LogRow; account: string 
   const m = useMessages(logsMessages)
   const body = useMessages(bodyMessages)
   const finish: Record<string, string> = useMessages(finishMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const request = row.entry.request
   if (!request) return null
   const number = (value: number, digits = 0) =>
-    formatNumber(Math.round(value * 10 ** digits) / 10 ** digits, locale)
+    formatNumber(Math.round(value * 10 ** digits) / 10 ** digits, language)
   const usage = request.usage
   const seconds =
     request.first_event_ms === undefined ? 0 : (request.duration_ms - request.first_event_ms) / 1000
@@ -170,7 +164,7 @@ export function RequestLogCard({ row, account }: { row: LogRow; account: string 
         {request.state === 'running' ? (
           <RunningElapsed request={request} />
         ) : (
-          <LogField value={formatDuration(request.duration_ms, locale)} />
+          <LogField value={formatDuration(request.duration_ms, language)} />
         )}
         {request.state === 'running' && request.stage && (
           <LogField label={m.stage} value={serverText(request.stage)} />
@@ -191,7 +185,10 @@ export function RequestLogCard({ row, account }: { row: LogRow; account: string 
             />
           )}
           {request.first_event_ms !== undefined && (
-            <LogField label={m.firstToken} value={formatDuration(request.first_event_ms, locale)} />
+            <LogField
+              label={m.firstToken}
+              value={formatDuration(request.first_event_ms, language)}
+            />
           )}
         </div>
       )}

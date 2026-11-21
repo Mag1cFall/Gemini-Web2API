@@ -13,7 +13,7 @@ import { useStatus } from '@/features/service/queries'
 import { firstApiKey } from '@/features/settings/apiKeys'
 import { useConfig } from '@/features/settings/queries'
 import { useHadRequests, useUsage } from '@/features/usage/queries'
-import { serviceURL } from '@/lib/api'
+import { cliCommand, serviceURL } from '@/lib/api'
 import { formatCompact, formatDuration, formatNumber, formatPercent, formatUsd } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { markEndpointCopied, readEndpointCopied } from '@/lib/onboarding'
@@ -86,7 +86,7 @@ function Step({
 // DashboardPage 是概览：未走完时的使用流程，服务、接入与近 1 小时三张卡片
 export function DashboardPage() {
   const m = useMessages(dashboardMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const status = useStatus()
   const models = useModels()
   const config = useConfig()
@@ -109,15 +109,15 @@ export function DashboardPage() {
   const imported = (accounts?.total ?? 0) > 0
   const tried = hadRequests.data === true || (totals?.requests ?? 0) > 0
   const showSteps = !imported || ((accounts?.available ?? 0) > 0 && !tried)
-  const command =
-    (navigator.userAgent.includes('Windows') ? '.\\gemini-web2api.exe' : './gemini-web2api') +
-    ' setup'
+  const command = cliCommand + ' setup'
   const clients = [
     { name: 'OpenAI', url: base + '/v1' },
     { name: 'Anthropic', url: base },
     { name: 'Gemini', url: base },
   ]
   const ready = status.data?.ready ?? false
+  const unavailable =
+    imported && (accounts?.available ?? 0) === 0 && (accounts?.initializing ?? 0) === 0
   const started = status.data ? Date.parse(status.data.started_at) : Number.NaN
   const listen = status.data?.listen_addr ?? ''
   const port = listen.lastIndexOf(':')
@@ -199,9 +199,17 @@ export function DashboardPage() {
             <span className="inline-flex items-center gap-2">
               <span
                 aria-hidden
-                className={'size-2 rounded-full ' + (ready ? 'bg-success' : 'bg-warning')}
+                className={
+                  'size-2 rounded-full ' + (ready && !unavailable ? 'bg-success' : 'bg-warning')
+                }
               />
-              {ready ? m.ready : m.notReady}
+              {unavailable
+                ? status.data?.guest?.state === 'ready'
+                  ? m.allUnavailableGuest
+                  : m.allUnavailable
+                : ready
+                  ? m.ready
+                  : m.notReady}
             </span>
           </Field>
           <Field label={m.listen}>
@@ -212,18 +220,18 @@ export function DashboardPage() {
             </span>
           </Field>
           <Field label={m.uptime}>
-            {Number.isNaN(started) ? '—' : formatDuration(now.getTime() - started, locale)}
+            {Number.isNaN(started) ? '—' : formatDuration(now.getTime() - started, language)}
           </Field>
           <Field label={m.accounts}>
             <Link to="/accounts" className="text-primary hover:underline">
               {fill(m.accountsReady, {
-                ready: formatNumber(accounts?.available ?? 0, locale),
-                total: formatNumber(accounts?.total ?? 0, locale),
+                ready: formatNumber(accounts?.available ?? 0, language),
+                total: formatNumber(accounts?.total ?? 0, language),
               })}
             </Link>
           </Field>
           <Field label={m.availableModels}>
-            {formatNumber(models.data?.models.length ?? 0, locale)}
+            {formatNumber(models.data?.models.length ?? 0, language)}
           </Field>
         </FieldGrid>
       </Card>
@@ -297,12 +305,12 @@ export function DashboardPage() {
           }
         />
         <FieldGrid>
-          <Field label={m.requests}>{formatNumber(requests, locale)}</Field>
+          <Field label={m.requests}>{formatNumber(requests, language)}</Field>
           <Field label={m.successRate}>
-            {requests > 0 ? formatPercent((totals?.succeeded ?? 0) / requests, locale) : '—'}
+            {requests > 0 ? formatPercent((totals?.succeeded ?? 0) / requests, language) : '—'}
           </Field>
-          <Field label={m.tokens}>{formatCompact(totals?.total_tokens ?? 0, locale)}</Field>
-          <Field label={m.cost}>{formatUsd(usage.data?.cost ?? 0, locale)}</Field>
+          <Field label={m.tokens}>{formatCompact(totals?.total_tokens ?? 0, language)}</Field>
+          <Field label={m.cost}>{formatUsd(usage.data?.cost ?? 0, language)}</Field>
         </FieldGrid>
       </Card>
     </>

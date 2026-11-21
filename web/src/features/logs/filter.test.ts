@@ -34,23 +34,23 @@ function request(overrides: Partial<RequestInfo>): RequestInfo {
 const lifecycle: LogEntry[] = [
   sample({
     source: 'request',
-    message: '请求开始 | chat | gemini-3.8-flash',
+    message: '请求开始 | chat | gemini-4-hydrogen',
     event: 'request.started',
-    request: request({ model: 'gemini-3.8-flash' }),
+    request: request({ model: 'gemini-4-hydrogen' }),
   }),
   sample({
     level: 'WARN',
     source: 'alice-gmail-com',
     message: '上游首事件等待 | 已等待=15s',
     event: 'request.progress',
-    request: request({ model: 'gemini-3.8-flash', account: 'alice-gmail-com' }),
+    request: request({ model: 'gemini-4-hydrogen', account: 'alice-gmail-com' }),
   }),
   sample({
     source: 'alice-gmail-com',
-    message: '请求完成 | 200 | gemini-3.8-flash',
+    message: '请求完成 | 200 | gemini-4-hydrogen',
     event: 'request.finished',
     request: request({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-4-hydrogen',
       account: 'alice-gmail-com',
       state: 'completed',
       status: 200,
@@ -76,7 +76,7 @@ describe('groupLogs', () => {
     const rows = groupLogs(logs)
     expect(rows.map((row) => row.entry.message)).toEqual([
       'a',
-      '请求完成 | 200 | gemini-3.8-flash',
+      '请求完成 | 200 | gemini-4-hydrogen',
       'b',
     ])
     expect(rows[1]?.key).toBe('req_1')
@@ -114,7 +114,7 @@ describe('matchRow', () => {
   it('搜索消息、请求 ID、模型与状态码', () => {
     expect(matchRow(row, { level: 'all', source: '', q: '首事件' })).toBe(true)
     expect(matchRow(row, { level: 'all', source: '', q: 'REQ_1' })).toBe(true)
-    expect(matchRow(row, { level: 'all', source: '', q: '3.8-flash' })).toBe(true)
+    expect(matchRow(row, { level: 'all', source: '', q: '4-hydrogen' })).toBe(true)
     expect(matchRow(row, { level: 'all', source: '', q: '200' })).toBe(true)
     expect(matchRow(row, { level: 'all', source: '', q: 'absent' })).toBe(false)
   })

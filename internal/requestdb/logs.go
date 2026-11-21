@@ -59,7 +59,7 @@ func (store *Store) Logs(ctx context.Context, query LogQuery) (LogPage, error) {
 	}
 	if query.Search != "" {
 		clause += ` AND text LIKE ? ESCAPE '\'`
-		args = append(args, "%"+strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query.Search)+"%")
+		args = append(args, "%"+likeEscaper.Replace(query.Search)+"%")
 	}
 	if query.Before > 0 {
 		clause += ` AND seq < ?`

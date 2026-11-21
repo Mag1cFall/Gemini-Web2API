@@ -71,15 +71,8 @@ export function RankingTable({
     descending: true,
   })
   const [expanded, setExpanded] = useState<string[]>([])
-  const tabLabels: Record<UsageGroupDimension, string> = {
-    model: m.model,
-    account: m.account,
-    protocol: m.protocol,
-    state: m.state,
-    status: m.status,
-  }
   const columns: { key: SortKey; label: string }[] = [
-    { key: 'key', label: tabLabels[tab] },
+    { key: 'key', label: f.dimensionLabels[tab] },
     { key: 'requests', label: m.requests },
     { key: 'rate', label: m.successRate },
     { key: 'tokens', label: m.tokens },
@@ -152,7 +145,7 @@ export function RankingTable({
           <TabsList aria-label={m.ranking}>
             {tabs.map((item) => (
               <TabsTrigger key={item} value={item} className="h-control-sm text-sm">
-                {tabLabels[item]}
+                {f.dimensionLabels[item]}
                 <span className="font-normal text-foreground-muted tabular-nums">
                   {report.groups[item].length}
                 </span>

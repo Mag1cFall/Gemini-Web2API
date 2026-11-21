@@ -340,7 +340,7 @@ func (f *File) writeLocked() error {
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("关闭认证状态: %w", err)
 	}
-	if err := replaceFile(tempPath, f.path); err != nil {
+	if err := os.Rename(tempPath, f.path); err != nil {
 		return fmt.Errorf("替换认证状态 %s: %w", f.path, err)
 	}
 	return nil

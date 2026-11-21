@@ -20,6 +20,9 @@ const recordColumns = `r.id, r.response_id, r.time, r.protocol, r.path, r.model,
 // searchColumns 是关键字匹配的请求记录列
 var searchColumns = []string{"id", "response_id", "model", "provider_model", "account", "error"}
 
+// likeEscaper 转义关键字中的 LIKE 通配符，配合 ESCAPE '\' 使用
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 // recordFilter 返回请求记录的范围、维度筛选、状态码与关键字条件
 func recordFilter(query UsageRecordQuery) (string, []any) {
 	clause, args := filterSQL(query.Filters)
@@ -30,7 +33,7 @@ func recordFilter(query UsageRecordQuery) (string, []any) {
 		args = append(args, query.Status)
 	}
 	if query.Search != "" {
-		pattern := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query.Search) + "%"
+		pattern := "%" + likeEscaper.Replace(query.Search) + "%"
 		conditions := make([]string, len(searchColumns))
 		for index, column := range searchColumns {
 			conditions[index] = `r.` + column + ` LIKE ? ESCAPE '\'`

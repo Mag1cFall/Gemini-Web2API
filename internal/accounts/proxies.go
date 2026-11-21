@@ -21,12 +21,13 @@ const proxyCheckInterval = 5 * time.Minute
 func (m *Manager) accountProxy(account auth.LoadedAccount) (string, string) {
 	switch fixed := fixedProxy(account); fixed {
 	case "":
+		m.proxies.SetFixed(account.ID, "")
 		return m.poolProxy(account.ID)
 	case proxypool.Direct:
 		m.proxies.Release(account.ID)
 		return "", "direct"
 	default:
-		m.proxies.Release(account.ID)
+		m.proxies.SetFixed(account.ID, fixed)
 		return fixed, "fixed"
 	}
 }
@@ -41,9 +42,6 @@ func (m *Manager) poolProxy(id string) (string, string) {
 
 // fixedProxy 返回账号状态中的固定代理
 func fixedProxy(account auth.LoadedAccount) string {
-	if account.File == nil {
-		return ""
-	}
 	return strings.TrimSpace(account.File.Metadata().Proxy)
 }
 

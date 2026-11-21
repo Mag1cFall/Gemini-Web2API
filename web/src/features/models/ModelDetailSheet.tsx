@@ -57,7 +57,7 @@ function priceItems(model: Model, m: (typeof modelsMessages)['zh-CN']) {
 // ModelDetailSheet 是一个模型的详情对话框：概要与该模型可用的账号，勾选账号后立即写入 MODEL_ACCOUNTS
 export function ModelDetailSheet({ model, onClose }: { model: Model | null; onClose: () => void }) {
   const m = useMessages(modelsMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const client = useQueryClient()
   const config = useConfig()
   const accountLabel = useAccountLabel()
@@ -82,10 +82,10 @@ export function ModelDetailSheet({ model, onClose }: { model: Model | null; onCl
   const selected = parseAccountBindings(config.data?.model_accounts ?? '').get(model.id) ?? []
   const contextWindow =
     model.min_context_window === model.max_context_window
-      ? formatNumber(model.max_context_window, locale)
-      : formatNumber(model.min_context_window, locale) +
+      ? formatNumber(model.max_context_window, language)
+      : formatNumber(model.min_context_window, language) +
         '–' +
-        formatNumber(model.max_context_window, locale)
+        formatNumber(model.max_context_window, language)
   return (
     <Dialog
       open

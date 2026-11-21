@@ -73,9 +73,6 @@ func (c ModelCatalog) gems() []Gem {
 
 // addGems 以账号默认模型为底把 Gem 加入目录，公开 ID 为 gem-<Gem ID>，同一 Gem 出现在多个列表时只加入第一次
 func (c *ModelCatalog) addGems(gems []Gem) {
-	if c.defaultIndex < 0 || c.defaultIndex >= len(c.models) {
-		return
-	}
 	base := c.models[c.defaultIndex]
 	for _, gem := range gems {
 		if _, exists := c.lookup[strings.ToLower(GemModelPrefix+gem.ID)]; exists {

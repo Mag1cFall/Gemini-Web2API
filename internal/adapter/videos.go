@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,7 +35,7 @@ func videoModel(pool *balancer.AccountPool, id string) bool {
 
 // defaultVideoModel 返回目录中的视频模型
 func defaultVideoModel(pool *balancer.AccountPool) string {
-	for _, model := range availableModels(pool) {
+	for _, model := range Catalog(pool) {
 		if model.Feature == gemini.FeatureVideo && model.AliasOf == "" {
 			return model.ID
 		}
@@ -148,24 +147,29 @@ func generateVideo(ctx context.Context, pool *balancer.AccountPool, store *reque
 		}
 		return videoResult{file: file, width: media.Width, height: media.Height, seconds: mp4Seconds(data), err: err}
 	}
-	text := strings.TrimSpace(result.Accumulator.Primary().Text)
-	if text == "" {
-		text = "Gemini Web returned no video"
+	return videoResult{err: &gemini.ProtocolError{HTTPStatus: http.StatusBadGateway, Message: noVideoMessage(result.Accumulator)}}
+}
+
+// noVideoMessage 返回上游未产出视频时的中文错误说明
+func noVideoMessage(accumulator *EventAccumulator) string {
+	if text := strings.TrimSpace(accumulator.Primary().Text); text != "" {
+		return "官网未生成视频，返回了文字回复：" + text
 	}
-	return videoResult{err: &gemini.ProtocolError{HTTPStatus: http.StatusBadGateway, Message: text}}
+	return "官网未返回生成的视频，请稍后重试"
+}
+
+// videoErrorCode 返回 OpenAI 视频任务失败对象的错误码，限流为 rate_limit_exceeded，其余为 video_generation_failed
+func videoErrorCode(err error) string {
+	if upstreamStatus(err) == http.StatusTooManyRequests {
+		return "rate_limit_exceeded"
+	}
+	return "video_generation_failed"
 }
 
 // mp4Seconds 返回 MP4 mvhd 盒记录的时长，四舍五入为整秒，找不到 mvhd 时返回 0
 func mp4Seconds(data []byte) int {
-	at := bytes.Index(data, []byte("mvhd"))
-	if at < 0 || len(data) < at+36 {
-		return 0
-	}
-	box := data[at+4:]
-	if box[0] == 1 {
-		return int(math.Round(float64(binary.BigEndian.Uint64(box[24:])) / float64(binary.BigEndian.Uint32(box[20:]))))
-	}
-	return int(math.Round(float64(binary.BigEndian.Uint32(box[16:])) / float64(binary.BigEndian.Uint32(box[12:]))))
+	seconds, _ := mvhdSeconds(data)
+	return int(math.Round(seconds))
 }
 
 // openAIVideoRequest 是 OpenAI 视频创建请求的字段
@@ -245,9 +249,6 @@ func saveVideoSession(store *requestdb.Store, id string, session videoSession) {
 
 // failInterruptedVideos 把上次运行未完成的视频任务保存为失败
 func failInterruptedVideos(store *requestdb.Store) {
-	if store == nil {
-		return
-	}
 	videos, err := store.UnfinishedVideos(context.Background())
 	if err != nil {
 		logging.Warn(logging.SourceService, "读取未完成的视频任务失败", "错误", err)
@@ -377,7 +378,7 @@ func startOpenAIVideo(c *gin.Context, pool *balancer.AccountPool, store *request
 			}
 		case "failed":
 			object["completed_at"] = time.Now().Unix()
-			object["error"] = gin.H{"code": "video_generation_failed", "message": publicMessage(scope, result.err.Error())}
+			object["error"] = gin.H{"code": videoErrorCode(result.err), "message": publicMessage(scope, result.err.Error())}
 		}
 		saveVideoObject(store, job.id, "openai", created, status, object, fileID)
 	})
@@ -628,7 +629,7 @@ func geminiVideoOperation(c *gin.Context, pool *balancer.AccountPool, store *req
 	created := time.Now()
 	operation := gin.H{"name": name}
 	saveVideoObject(store, operationID, "gemini", created, "queued", operation, "")
-	base := requestBaseURL(c)
+	base := RequestBaseURL(c)
 	scope := c.Copy()
 	runVideoJob(c, pool, store, videoJob{id: operationID, protocol: "gemini", model: model, prompt: instance.Prompt, size: aspectRatio, files: files},
 		func(status string, result *videoResult) {

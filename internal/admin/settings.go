@@ -3,6 +3,7 @@ package admin
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"slices"
 	"strconv"
@@ -156,7 +157,7 @@ type hedgeStat struct {
 
 // hedgeStats 返回设置中各备用请求模型近 24 小时原请求首事件等待的 p95
 func (h *handler) hedgeStats() []hedgeStat {
-	models := config.SplitList(h.settings.View().FirstEventHedgeModels)
+	models := config.SplitList(h.Settings.View().FirstEventHedgeModels)
 	stats := make([]hedgeStat, 0, len(models))
 	for _, model := range models {
 		p95, samples, ready := adapter.FirstEventP95(model)
@@ -279,12 +280,7 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		env["LISTEN_ADDR"] = address
 	}
 	if update.AuthStates != nil {
-		next.AuthStatePaths = nil
-		for _, path := range strings.Split(*update.AuthStates, ",") {
-			if path = strings.TrimSpace(path); path != "" {
-				next.AuthStatePaths = append(next.AuthStatePaths, path)
-			}
-		}
+		next.AuthStatePaths = config.SplitList(*update.AuthStates)
 		if len(next.AuthStatePaths) == 0 {
 			problems = append(problems, errors.New("GEMINI_AUTH_STATES 不能为空"))
 		}
@@ -359,15 +355,9 @@ func (s *Settings) Update(update ConfigUpdate) error {
 	s.mu.Unlock()
 
 	s.apply(next)
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	logging.Info(logging.SourceService, "设置已保存", "项", strings.Join(sortStrings(keys), ","))
+	logging.Info(logging.SourceService, "设置已保存", "项", strings.Join(slices.Sorted(maps.Keys(env)), ","))
 	if previous.AdminUsername != next.AdminUsername || previous.AdminPassword != next.AdminPassword || previous.AdminAuthEnabled != next.AdminAuthEnabled {
-		if changed != nil {
-			changed()
-		}
+		changed()
 	}
 	return nil
 }

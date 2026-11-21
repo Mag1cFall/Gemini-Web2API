@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"io"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -21,7 +22,7 @@ func decodeGeminiRequest(c *gin.Context, target interface{}) error {
 	if err != nil {
 		return err
 	}
-	if body, _, err = geminiCamelKeys(body); err != nil {
+	if body, err = geminiCamelKeys(body); err != nil {
 		return err
 	}
 	return json.Unmarshal(body, target)
@@ -31,16 +32,5 @@ func setUnsupportedParameters(c *gin.Context, parameters []string) {
 	if len(parameters) == 0 {
 		return
 	}
-	c.Header("X-Gemini-Web2API-Unsupported-Parameters", joinParameters(parameters))
-}
-
-func joinParameters(parameters []string) string {
-	result := ""
-	for index, parameter := range parameters {
-		if index > 0 {
-			result += ","
-		}
-		result += parameter
-	}
-	return result
+	c.Header("X-Gemini-Web2API-Unsupported-Parameters", strings.Join(parameters, ","))
 }

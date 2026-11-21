@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/gin-gonic/gin"
 )
@@ -140,9 +139,4 @@ func (s *server) dispatch(c *gin.Context, message *request) *response {
 		reply.Error = &rpcError{Code: -32601, Message: "method not found: " + message.Method}
 	}
 	return reply
-}
-
-// catalog 返回当前公开模型目录
-func (s *server) catalog() []adapter.CatalogModel {
-	return adapter.Catalog(s.pool)
 }

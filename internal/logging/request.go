@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -152,9 +151,6 @@ func NewRequest(parent context.Context, method string, path string, clientIP str
 
 // FromContext 返回 context 中的请求跟踪，没有时返回 nil，nil 上的方法不执行任何操作
 func FromContext(ctx context.Context) *Request {
-	if ctx == nil {
-		return nil
-	}
 	request, _ := ctx.Value(requestContextKey{}).(*Request)
 	return request
 }
@@ -414,7 +410,7 @@ func (r *Request) Background(kind string) {
 
 // AttemptFailed 记录一次失败的上游尝试，retry 表示随后换账号重试
 func (r *Request) AttemptFailed(account string, status int, err error, retry bool) {
-	if r == nil || err == nil {
+	if r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -658,8 +654,8 @@ func (r *Request) setPhaseLocked(phase requestPhase, now time.Time) {
 }
 
 func (r *Request) publishLocked(level string, source string, name string, message string, fields []Field) {
-	parsed, err := ParseLevel(level)
-	if err != nil || !Enabled(parsed) {
+	parsed, _ := ParseLevel(level)
+	if !Enabled(parsed) {
 		return
 	}
 	var info RequestInfo
@@ -820,14 +816,4 @@ func newRequestID() string {
 	var value [6]byte
 	_, _ = rand.Read(value[:])
 	return "req_" + hex.EncodeToString(value[:])
-}
-
-// Truncate 把文本截断到 limit 个字符
-func Truncate(text string, limit int) string {
-	text = strings.TrimSpace(text)
-	runes := []rune(text)
-	if len(runes) <= limit {
-		return text
-	}
-	return string(runes[:limit]) + "…"
 }

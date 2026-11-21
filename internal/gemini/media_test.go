@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	http "github.com/bogdanfinn/fhttp"
 )
@@ -31,7 +32,7 @@ func TestRemoteMediaConnectsOnlyToPublicAddresses(t *testing.T) {
 	defer listener.Close()
 	port := listener.Addr().(*net.TCPAddr).Port
 	for _, proxyURL := range []string{"", "http://" + listener.Addr().String()} {
-		client, err := newMediaClient(5, proxyURL, 0)
+		client, err := newMediaClient(5*time.Second, proxyURL, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

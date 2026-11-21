@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/chromeauth"
@@ -73,7 +74,7 @@ func (h *handler) updateAccount(c *gin.Context) {
 	}
 	var err error
 	if input.Proxy != nil {
-		err = h.Accounts.SetProxy(id, trimmed(*input.Proxy))
+		err = h.Accounts.SetProxy(id, strings.TrimSpace(*input.Proxy))
 	}
 	if err == nil && input.Enabled != nil {
 		err = h.Accounts.SetEnabled(id, *input.Enabled)
@@ -163,7 +164,7 @@ func (h *handler) importChrome(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_request", "emails 不能为空")
 		return
 	}
-	importAccount := h.Accounts.ChromeImporter(trimmed(input.Proxy))
+	importAccount := h.Accounts.ChromeImporter(strings.TrimSpace(input.Proxy))
 	task := h.tasks.start(c.Request.Context(), "chrome", input.Emails, func(ctx context.Context, index int) error {
 		return importAccount(ctx, input.Emails[index])
 	})
@@ -179,7 +180,7 @@ func (h *handler) discoverCookie(c *gin.Context) {
 	if !bindJSON(c, &input) {
 		return
 	}
-	found, err := h.Accounts.DiscoverCookie(c.Request.Context(), input.Cookies, trimmed(input.Proxy))
+	found, err := h.Accounts.DiscoverCookie(c.Request.Context(), input.Cookies, strings.TrimSpace(input.Proxy))
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "cookie_discover_failed", err.Error())
 		return
@@ -208,7 +209,7 @@ func (h *handler) importCookie(c *gin.Context) {
 	for index, account := range input.Accounts {
 		labels[index] = account.Email
 	}
-	proxy := trimmed(input.Proxy)
+	proxy := strings.TrimSpace(input.Proxy)
 	task := h.tasks.start(c.Request.Context(), "cookie", labels, func(ctx context.Context, index int) error {
 		account := input.Accounts[index]
 		_, err := h.Accounts.ImportCookie(ctx, input.Cookies, account.Email, proxy, account.AuthUser)

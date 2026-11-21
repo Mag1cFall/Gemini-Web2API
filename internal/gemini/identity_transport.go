@@ -20,6 +20,9 @@ import (
 // chromeTLSHandshakeTimeout 是 Chromium SSLConnectJob 的 kSSLHandshakeTimeout
 const chromeTLSHandshakeTimeout = 30 * time.Second
 
+// chromeConnectTimeoutSeconds 是建立 TCP 连接与代理隧道的时限，单位秒
+const chromeConnectTimeoutSeconds = 30
+
 // chromeIdleConnTimeout 是空闲 HTTP/2 连接保留的时长
 const chromeIdleConnTimeout = 90 * time.Second
 
@@ -37,17 +40,18 @@ func chromeStreamPriority(priority string) http2.PriorityParam {
 	return http2.PriorityParam{Exclusive: true, Weight: chromeWeights[urgency]}
 }
 
-// chromeClient 是按 Chrome 网络栈发出请求的客户端：https 请求经 client 的 Chrome HTTP/2 连接池，明文 http 请求与 Chrome 一样以 HTTP/1.1 经内嵌的 tls-client 客户端发出，两者共用 Cookie jar 与代理拨号器
+// chromeClient 是按 Chrome 网络栈发出请求的客户端：https 请求经 client 的 Chrome HTTP/2 连接池，明文 http 请求与 Chrome 一样以 HTTP/1.1 经内嵌的 tls-client 客户端发出，两者共用 Cookie jar 与代理拨号器，请求连续 idle 没有收发数据时取消
 type chromeClient struct {
 	tls_client.HttpClient
 	client http.Client
+	idle   time.Duration
 }
 
 func (c *chromeClient) Do(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme == "http" {
-		return c.HttpClient.Do(req)
+		return doIdle(c.HttpClient.Do, req, c.idle)
 	}
-	return c.client.Do(req)
+	return doIdle(c.client.Do, req, c.idle)
 }
 
 func (c *chromeClient) CloseIdleConnections() {

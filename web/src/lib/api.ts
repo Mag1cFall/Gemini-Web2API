@@ -17,6 +17,11 @@ export const basePath = new URL(document.baseURI).pathname
 // serviceURL 是浏览器访问本服务的根地址，不以 / 结尾
 export const serviceURL = new URL(document.baseURI).origin + basePath.slice(0, -1)
 
+// cliCommand 是按浏览器操作系统给出的本程序命令行前缀
+export const cliCommand = navigator.userAgent.includes('Windows')
+  ? '.\\gemini-web2api.exe'
+  : './gemini-web2api'
+
 // appURL 把以 / 开头的服务路径换成 basePath 下的路径，其他地址原样返回
 export function appURL(path: string) {
   return path.startsWith('/') ? basePath + path.slice(1) : path

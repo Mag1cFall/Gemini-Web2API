@@ -100,7 +100,7 @@ func convertGeminiSchema(node any) any {
 			}
 		case "nullable":
 			continue
-		case "properties":
+		case "properties", "$defs", "definitions":
 			if properties, ok := value.(map[string]any); ok {
 				mapped := make(map[string]any, len(properties))
 				for name, property := range properties {
@@ -108,9 +108,9 @@ func convertGeminiSchema(node any) any {
 				}
 				value = mapped
 			}
-		case "items":
+		case "items", "additionalProperties":
 			value = convertGeminiSchema(value)
-		case "anyOf":
+		case "anyOf", "oneOf", "allOf":
 			if items, ok := value.([]any); ok {
 				mapped := make([]any, len(items))
 				for index, item := range items {
@@ -138,19 +138,19 @@ var geminiOpaqueFields = map[string]bool{
 }
 
 // geminiCamelKeys 按 proto3 JSON 规则把各层消息字段名转为 lowerCamelCase，同层两种写法并存时保留驼峰字段，自由 JSON 字段的取值原样保留；只扫描一遍定位要改名的键，其余字节原样复制
-func geminiCamelKeys(raw []byte) ([]byte, bool, error) {
+func geminiCamelKeys(raw []byte) ([]byte, error) {
 	value := bytes.TrimSpace(raw)
 	if len(value) == 0 || value[0] != '{' && value[0] != '[' {
-		return raw, false, nil
+		return raw, nil
 	}
 	if !json.Valid(value) {
 		var invalid json.RawMessage
-		return nil, false, json.Unmarshal(value, &invalid)
+		return nil, json.Unmarshal(value, &invalid)
 	}
 	scanner := camelScanner{data: value}
 	scanner.value(0, false)
 	if len(scanner.renames) == 0 {
-		return raw, false, nil
+		return raw, nil
 	}
 	slices.SortFunc(scanner.renames, func(a, b keyRename) int { return a.start - b.start })
 	output := make([]byte, 0, len(value))
@@ -162,7 +162,7 @@ func geminiCamelKeys(raw []byte) ([]byte, bool, error) {
 		output = append(output, '"')
 		last = rename.end
 	}
-	return append(output, value[last:]...), true, nil
+	return append(output, value[last:]...), nil
 }
 
 // keyRename 是一个要改名的键：data[start:end] 是带引号的原键，name 是新键名

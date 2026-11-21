@@ -1,8 +1,8 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -132,8 +132,6 @@ func InteractionsHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			err = fmt.Errorf("input is required")
 		case request.Background && request.Store != nil && !*request.Store:
 			err = fmt.Errorf("store=false is incompatible with background=true")
-		case (request.Background || request.PreviousID != "") && store == nil:
-			err = fmt.Errorf("background interactions and previous_interaction_id need the request ledger")
 		}
 		if err != nil {
 			writeGeminiError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
@@ -492,10 +490,13 @@ func (content interactionContent) part() (GeminiPart, []string, error) {
 			return GeminiPart{FileData: &GeminiFileData{MimeType: content.MIMEType, FileURI: content.URI}}, unsupported, nil
 		}
 		mimeType := content.MIMEType
+		if prefixed, data, ok := splitDataURL(content.Data); ok {
+			mimeType, content.Data = cmp.Or(mimeType, prefixed), data
+		}
 		if mimeType == "" {
 			head := content.Data[:min(len(content.Data), 1024)]
 			head = head[:len(head)/4*4]
-			decoded, err := base64.StdEncoding.DecodeString(head)
+			decoded, err := decodeBase64(head)
 			if err != nil {
 				return GeminiPart{}, nil, fmt.Errorf("%s data is not valid base64: %w", content.Type, err)
 			}
@@ -807,7 +808,7 @@ func interactionAnnotations(text string, offset int, citations []gemini.Citation
 
 // saveInteraction 在 store 不为 false 时保存交互对象与输入步骤，后台交互另记 background
 func saveInteraction(ctx context.Context, store *requestdb.Store, run interactionRun, object gin.H) {
-	if store == nil || run.request.Store != nil && !*run.request.Store {
+	if run.request.Store != nil && !*run.request.Store {
 		return
 	}
 	encoded, err := json.Marshal(fieldorder.Official("interactions", object))

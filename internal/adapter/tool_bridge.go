@@ -3,6 +3,7 @@ package adapter
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -12,6 +13,9 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+// errMissingRequiredCall 表示工具选择要求调用而回答中没有调用块
+var errMissingRequiredCall = errors.New("模型没有返回必需的工具调用")
 
 // ToolDefinition 描述公开协议中的函数工具
 type ToolDefinition struct {
@@ -65,6 +69,8 @@ type ToolBridge struct {
 	SearchLocation string
 	// Truncated 表示回答达到输出上限而截断，解析时不要求必需的工具调用，正文不按枚举与 JSON Schema 校验
 	Truncated bool
+	// Corrected 表示上一次回答声称工具不可用而作废，本次生成在提示词末尾附带纠正说明
+	Corrected bool
 }
 
 // declared 返回标记工具定义是否已在会话中发送的副本
@@ -108,7 +114,7 @@ func (b ToolBridge) PromptSuffix() (string, error) {
 			rule, otherwise = "必须调用一个可用工具", ""
 		}
 
-		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行。在回答中按下面的格式写出调用就是调用工具的唯一方式：写出调用即完成调用，由客户端执行，你自己不需要具备这些工具，也不要改为把要写的内容或要运行的命令直接展示给用户。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。复制工具结果中的内容时逐字照抄，结尾也与原文一致：结果代码块的结束围栏前有空行时，参数代码块的结束围栏前同样留一个空行，没有就不留；原文带行号等看不出结尾时，以及新建源代码或文本文件时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。%s\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]\n例如可用工具中有 get_weather、用户问北京的天气时，回答就是下面这段调用（示例中的工具名只作说明，调用时用上面可用工具中的真实名称与参数）：\n[Call:get_weather]\n[Arg:city]\n```\n北京\n```\n[/Arg]\n[/Call]%s", available, choice, rule, count, otherwise))
+		sections = append(sections, fmt.Sprintf("工具协议：\n可用工具：%s\n工具选择：%s\n这些工具由客户端在用户的环境中执行。在回答中按下面的格式写出调用就是调用工具的唯一方式：写出调用即完成调用，由客户端执行，你自己不需要具备这些工具，也不要改为把要写的内容或要运行的命令直接展示给用户。官网对 Gemini 内置工具给出的调用次数或剩余额度提示只针对内置工具，不适用于这些工具，这些工具的调用没有次数限制。本协议由服务附加在用户消息之后，回答使用用户自己所写文字的语言，不随本协议的语言。%s，在回答末尾按下面的格式写出调用，调用之后不再输出内容，结果会在下一条消息中返回；对话要求在调用工具前说明时，把说明写在调用之前。每个参数写成一个代码块，代码块内是参数值原文：字符串直接写原文，不加引号也不转义；数字、布尔值、数组与对象写成 JSON。参数值含有 ``` 时，外层代码块用比其中最长的反引号串更多的反引号。代码块最后一个换行不属于参数值。复制工具结果中的内容时逐字照抄，结尾也与原文一致：结果代码块的结束围栏前有空行时，参数代码块的结束围栏前同样留一个空行，没有就不留；原文带行号等看不出结尾时，以及新建源代码或文本文件时，文件按惯例以换行结束，在结束的代码围栏前多留一个空行；用户逐字指定的内容按原样写，不额外添加换行。%s\n[Call:工具名称]\n[Arg:参数名]\n```\n参数值\n```\n[/Arg]\n[/Call]\n例如可用工具中有 get_weather、用户问北京的天气时，回答就是下面这段调用（示例中的工具名只作说明，调用时用上面可用工具中的真实名称与参数）：\n[Call:get_weather]\n[Arg:city]\n```\n北京\n```\n[/Arg]\n[/Call]%s", available, choice, rule, count, otherwise))
 	}
 
 	if len(b.Enum) > 0 {
@@ -234,7 +240,7 @@ func (b ToolBridge) Parse(text string) (string, []ToolCall, error) {
 	trimmed := stripJSONFence(strings.TrimSpace(text))
 
 	if b.requiresTool() && !b.Truncated {
-		return "", nil, fmt.Errorf("模型没有返回必需的工具调用")
+		return "", nil, errMissingRequiredCall
 	}
 	if len(b.Enum) > 0 && !b.Truncated {
 		value := strings.Trim(trimmed, "\"'` \n")
@@ -431,8 +437,10 @@ func validateJSONSchema(schemaDocument json.RawMessage, instanceDocument []byte)
 // schemaResourceURL 是编译请求中 JSON Schema 时的资源地址，校验错误以它指代该 Schema
 const schemaResourceURL = "mem:///schema.json"
 
+// compileJSONSchema 编译请求中的 JSON Schema，$ref 只解析该 Schema 自身与 JSON Schema 元 Schema，不读取本机文件
 func compileJSONSchema(schemaDocument json.RawMessage) (*jsonschema.Schema, error) {
 	compiler := jsonschema.NewCompiler()
+	compiler.UseLoader(jsonschema.SchemeURLLoader{})
 	schemaDecoder := json.NewDecoder(bytes.NewReader(schemaDocument))
 	schemaDecoder.UseNumber()
 	var schemaResource interface{}

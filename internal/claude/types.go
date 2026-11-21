@@ -20,7 +20,6 @@ type ClaudeRequest struct {
 	Thinking           *ThinkingConfig `json:"thinking,omitempty"`
 	OutputConfig       *OutputConfig   `json:"output_config,omitempty"`
 	OutputFormat       *OutputFormat   `json:"output_format,omitempty"`
-	Metadata           *Metadata       `json:"metadata,omitempty"`
 	ConversationID     string          `json:"conversation_id,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 	// ContextManagement 为本服务在本地执行的上下文编辑策略
@@ -68,10 +67,6 @@ type OutputFormat struct {
 	Schema json.RawMessage `json:"schema"`
 }
 
-type Metadata struct {
-	UserID string `json:"user_id,omitempty"`
-}
-
 type Message struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
@@ -88,17 +83,9 @@ type ContentBlock struct {
 	ToolUseID string                  `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage         `json:"content,omitempty"`
 	IsError   *bool                   `json:"is_error,omitempty"`
-	Source    *ImageSource            `json:"source,omitempty"`
-	Data      string                  `json:"data,omitempty"`
 	Citations []map[string]any        `json:"citations,omitempty"`
 	// EncryptedContent 是 compaction 块的加密内容，本服务写为 null
 	EncryptedContent json.RawMessage `json:"encrypted_content,omitempty"`
-}
-
-type ImageSource struct {
-	Type      string `json:"type"`
-	MediaType string `json:"media_type"`
-	Data      string `json:"data"`
 }
 
 type Tool struct {

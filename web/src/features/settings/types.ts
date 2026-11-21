@@ -47,36 +47,40 @@ export interface InvalidValue {
   reason: string
 }
 
+// editableKeys 是可写回 .env 的配置项
+export const editableKeys = [
+  'proxy_api_key',
+  'proxy',
+  'save_history',
+  'continue_session',
+  'nonstream_keepalive',
+  'fake_stream',
+  'model_mapping',
+  'account_cooldown',
+  'session_ttl',
+  'init_timeout',
+  'per_account_concurrency',
+  'routing_strategy',
+  'log_level',
+  'request_body_log',
+  'log_file',
+  'log_max_total_mb',
+  'admin_auth_enabled',
+  'admin_username',
+  'listen_addr',
+  'auth_states',
+  'log_format',
+  'api_key_accounts',
+  'account_order',
+  'model_accounts',
+  'first_event_hedge',
+  'first_event_hedge_models',
+] as const
+
 // ConfigPatch 是提交给 PUT /api/config 的可写字段
-export type ConfigPatch = Partial<{
-  proxy_api_key: string
-  proxy: string
-  save_history: boolean
-  continue_session: boolean
-  nonstream_keepalive: boolean
-  fake_stream: boolean
-  model_mapping: string
-  account_cooldown: string
-  session_ttl: string
-  init_timeout: string
-  per_account_concurrency: number
-  routing_strategy: ServiceConfig['routing_strategy']
-  log_level: ServiceConfig['log_level']
-  request_body_log: boolean
-  log_file: boolean
-  log_max_total_mb: number
-  admin_auth_enabled: boolean
-  admin_username: string
-  admin_password: string
-  listen_addr: string
-  auth_states: string
-  log_format: ServiceConfig['log_format']
-  api_key_accounts: string
-  account_order: string
-  model_accounts: string
-  first_event_hedge: string
-  first_event_hedge_models: string
-}>
+export type ConfigPatch = Partial<
+  Pick<ServiceConfig, (typeof editableKeys)[number]> & { admin_password: string }
+>
 
 // ProxyStatus 对应 GET /api/proxies 的 proxy，checked_at 在首次检测前省略
 export interface ProxyStatus {

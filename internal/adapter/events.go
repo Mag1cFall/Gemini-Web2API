@@ -56,26 +56,19 @@ func (a *EventAccumulator) Apply(event gemini.Event) error {
 		candidate := a.candidate(event.Candidate)
 		candidate.Thought = applySnapshot(candidate.Thought, event)
 	case gemini.EventCode:
-		if event.Code != nil {
-			candidate := a.candidate(event.Candidate)
-			candidate.applyCode(event)
-		}
+		a.candidate(event.Candidate).applyCode(event)
 	case gemini.EventCitations:
 		candidate := a.candidate(event.Candidate)
 		candidate.Citations = append(candidate.Citations[:0], event.Citations...)
 	case gemini.EventMedia:
-		if event.Media != nil {
-			candidate := a.candidate(event.Candidate)
-			candidate.Media = append(candidate.Media, *event.Media)
-		}
+		candidate := a.candidate(event.Candidate)
+		candidate.Media = append(candidate.Media, *event.Media)
 	case gemini.EventSession:
 		a.Session = event.Session
 	case gemini.EventMetadata:
 		a.Metadata = event.Metadata
 	case gemini.EventError:
-		if event.Err != nil {
-			return event.Err
-		}
+		return event.Err
 	case gemini.EventDone:
 		a.FinishReason = event.FinishReason
 	}
@@ -197,9 +190,6 @@ func hasGeneratedImage(output CandidateOutput) bool {
 const mediaDownloadLimit = 4
 
 func inlineResultMedia(ctx context.Context, result *generationResult) error {
-	if result == nil || result.Client == nil || result.Accumulator == nil {
-		return nil
-	}
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(mediaDownloadLimit)
 	for _, candidate := range result.Accumulator.Candidates {
@@ -287,9 +277,6 @@ func renderCitationSources(citations []gemini.Citation) string {
 // Primary 返回首个候选项
 func (a *EventAccumulator) Primary() CandidateOutput {
 	if candidate, ok := a.Candidates[0]; ok {
-		return *candidate
-	}
-	for _, candidate := range a.Candidates {
 		return *candidate
 	}
 	return CandidateOutput{}

@@ -320,7 +320,7 @@ interface TestResult {
 // ConnectionTest 用当前 API key 读取 /v1/models，成功后向所选模型发一次最短的 Chat Completions 请求，逐条显示请求、结果与耗时，models 是该 key 能请求的模型
 function ConnectionTest({ apiKey, models }: { apiKey: string; models: Model[] }) {
   const m = useMessages(connectMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const [chosen, setChosen] = useState<string>()
   const [testing, setTesting] = useState(false)
   const [results, setResults] = useState<TestResult[]>([])
@@ -446,7 +446,7 @@ function ConnectionTest({ apiKey, models }: { apiKey: string; models: Model[] })
                 {item.detail}
               </span>
               <span className="text-xs leading-5 text-foreground-muted tabular-nums max-sm:col-start-3 max-sm:row-start-1">
-                {formatDuration(item.elapsed, locale)}
+                {formatDuration(item.elapsed, language)}
               </span>
             </li>
           ))}

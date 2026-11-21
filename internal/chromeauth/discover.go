@@ -3,6 +3,7 @@ package chromeauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -49,7 +50,10 @@ func DiscoverCookieAccounts(ctx context.Context, text string, proxy string, fall
 			break
 		}
 		if err != nil {
-			return nil, err
+			if errors.Is(err, gemini.ErrSignedOut) && !slices.ContainsFunc(cookies, func(cookie auth.StateCookie) bool { return cookie.Name == "__Secure-1PSIDTS" }) {
+				return nil, fmt.Errorf("%w：Cookie 中没有 __Secure-1PSIDTS，官网按未登录应答，复制 Cookie 时带上这一项", err)
+			}
+			return nil, withImportProxyHint(requestProxy, err)
 		}
 		if email == "" {
 			return nil, errors.New("Gemini 首页没有登录账号，Cookie 未登录或已失效")

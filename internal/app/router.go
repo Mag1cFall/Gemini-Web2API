@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Mag1cFall/Gemini-Web2API/internal/accounts"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/admin"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
@@ -18,9 +17,8 @@ import (
 
 // Deps 是路由使用的运行期组件
 type Deps struct {
-	Pool     *balancer.AccountPool
-	Store    *requestdb.Store
-	Accounts *accounts.Manager
+	Pool  *balancer.AccountPool
+	Store *requestdb.Store
 	// APIKey 返回当前生效的公开 API key，多个 key 以逗号分隔
 	APIKey func() string
 	// Admin 为管理端组件，nil 时不注册 /api
@@ -51,6 +49,7 @@ func NewRouter(deps Deps) *gin.Engine {
 
 	api := router.Group("")
 	api.Use(adapter.CORSMiddleware())
+	api.Use(adapter.DecompressMiddleware())
 	api.Use(adapter.RequestMiddleware(deps.Store))
 	api.Use(adapter.AuthMiddleware(deps.APIKey))
 	api.Use(adapter.AccountMiddleware(pool))
@@ -90,6 +89,7 @@ func NewRouter(deps Deps) *gin.Engine {
 	api.DELETE("/v1/files/:file", adapter.GeminiOr(adapter.GeminiFileDeleteHandler(deps.Store), adapter.FileDeleteHandler(deps.Store)))
 	api.GET("/v1/files/:file/content", adapter.FileContentHandler(deps.Store))
 	api.POST("/upload/v1/files", adapter.GeminiFileUploadHandler(deps.Store))
+	api.PUT("/upload/v1/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.POST("/upload/v1beta/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.PUT("/upload/v1beta/files", adapter.GeminiFileUploadHandler(deps.Store))
 	api.GET("/v1beta/files", adapter.GeminiFileListHandler(deps.Store))

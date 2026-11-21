@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/adapter"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/gin-gonic/gin"
 )
@@ -131,7 +132,7 @@ func toolByName(name string) (tool, bool) {
 
 // tools 返回 tools/list 的工具定义，带模型功能的工具在参数 model 中列出目录里该功能的模型
 func (s *server) tools() []gin.H {
-	catalog := s.catalog()
+	catalog := adapter.Catalog(s.pool)
 	definitions := make([]gin.H, 0, len(toolList))
 	for _, item := range toolList {
 		properties := gin.H{}
@@ -165,7 +166,7 @@ func (s *server) model(args arguments, feature gemini.Feature) (string, error) {
 	if model := args.str("model"); model != "" {
 		return model, nil
 	}
-	for _, model := range s.catalog() {
+	for _, model := range adapter.Catalog(s.pool) {
 		if model.Feature == feature && model.AliasOf == "" && (feature != 0 || model.Default) {
 			return model.ID, nil
 		}
@@ -468,11 +469,7 @@ func objectResult(object map[string]any) gin.H {
 
 // publicURL 返回本服务对外地址下的路径
 func publicURL(c *gin.Context, path string) string {
-	scheme := "http"
-	if c.Request.TLS != nil {
-		scheme = "https"
-	}
-	return scheme + "://" + c.Request.Host + path
+	return adapter.RequestBaseURL(c) + path
 }
 
 // fetch 读取公开 API 返回的二进制内容，返回 base64 内容与 MIME 类型

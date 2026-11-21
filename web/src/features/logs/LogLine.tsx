@@ -1,6 +1,7 @@
 import { memo } from 'react'
 
 import type { LogRow } from '@/features/logs/filter'
+import { timeFormat } from '@/features/logs/format'
 import { LogMessage } from '@/features/logs/LogField'
 import { RequestLogCard } from '@/features/logs/RequestLogCard'
 import type { LogLevel } from '@/features/logs/types'
@@ -23,21 +24,13 @@ const levelText: Record<LogLevel, string> = {
   ERROR: 'text-error-text',
 }
 
-// timeFormat 是实时日志行的 24 小时制时分秒
-const timeFormat = new Intl.DateTimeFormat('en-GB', {
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: false,
-})
-
 // LogTime 是日志行的时间，dated 为真时不是今天的日志带上月日
 function LogTime({ time, dated }: { time: string; dated: boolean }) {
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const date = new Date(time)
   return (
     <time dateTime={time} className="font-mono text-sm text-foreground-subtle tabular-nums">
-      {dated ? formatDateTime(date, new Date(), locale) : timeFormat.format(date)}
+      {dated ? formatDateTime(date, new Date(), language) : timeFormat.format(date)}
     </time>
   )
 }

@@ -4,12 +4,75 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
+
+	http "github.com/bogdanfinn/fhttp"
 )
 
-// requestCeilingSeconds 是单个上游 HTTP 请求的总时限上限
-const requestCeilingSeconds = 3600
+// upstreamIdleTimeout 是上游请求连续没有收发数据的最长时长，等待响应头同样计入，收到响应头重新计时，持续收发数据的请求不限总时长
+var upstreamIdleTimeout = 600 * time.Second
+
+// errUpstreamIdle 表示上游请求长时间没有收发数据
+var errUpstreamIdle = errors.New("官网连接长时间没有收发数据")
+
+// doIdle 以 do 发出请求，请求连续 idle 没有收发数据时取消
+func doIdle(do func(*http.Request) (*http.Response, error), req *http.Request, idle time.Duration) (*http.Response, error) {
+	ctx, cancel := context.WithCancelCause(req.Context())
+	timer := time.AfterFunc(idle, func() { cancel(errUpstreamIdle) })
+	req = req.WithContext(ctx)
+	if req.Body != nil && req.Body != http.NoBody {
+		req.Body = &idleReader{ReadCloser: req.Body, ctx: ctx, timer: timer, idle: idle}
+	}
+	resp, err := do(req)
+	if err != nil {
+		timer.Stop()
+		cancel(nil)
+		return nil, idleError(ctx, idle, err)
+	}
+	timer.Reset(idle)
+	resp.Body = &idleReader{ReadCloser: resp.Body, ctx: ctx, timer: timer, idle: idle, done: func() {
+		timer.Stop()
+		cancel(nil)
+	}}
+	return resp, nil
+}
+
+// idleReader 是每读到数据就重新计时的请求或响应正文，done 在响应正文关闭时结束计时
+type idleReader struct {
+	io.ReadCloser
+	ctx   context.Context
+	timer *time.Timer
+	idle  time.Duration
+	done  func()
+}
+
+func (r *idleReader) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if n > 0 {
+		r.timer.Reset(r.idle)
+	}
+	if err != nil && err != io.EOF {
+		err = idleError(r.ctx, r.idle, err)
+	}
+	return n, err
+}
+
+func (r *idleReader) Close() error {
+	if r.done != nil {
+		r.done()
+	}
+	return r.ReadCloser.Close()
+}
+
+// idleError 在请求因长时间没有收发数据被取消时返回写明时长的错误，其余错误原样返回
+func idleError(ctx context.Context, idle time.Duration, err error) error {
+	if !errors.Is(context.Cause(ctx), errUpstreamIdle) {
+		return err
+	}
+	return fmt.Errorf("%w（%s）", errUpstreamIdle, idle)
+}
 
 // rpcTimeout 是单个 batchexecute RPC 的时限
 const rpcTimeout = 600 * time.Second

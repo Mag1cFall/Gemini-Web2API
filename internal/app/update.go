@@ -82,10 +82,8 @@ func updateMode(version string) string {
 	if !semver.IsValid(version) || semver.Prerelease(version) != "" || semver.Build(version) != "" {
 		return "development"
 	}
-	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
-		if _, err := os.Stat(marker); err == nil {
-			return "container"
-		}
+	if proxypool.InContainer() {
+		return "container"
 	}
 	return "binary"
 }

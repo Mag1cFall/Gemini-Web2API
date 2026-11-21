@@ -168,11 +168,11 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 	if err != nil {
 		return nil, err
 	}
-	httpClient, err := chrome.httpClient(requestCeilingSeconds, tls_client.WithProxyUrl(proxyURL))
+	httpClient, err := chrome.httpClient(upstreamIdleTimeout, tls_client.WithProxyUrl(proxyURL))
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
-	mediaClient, err := newMediaClient(requestCeilingSeconds, proxyURL, chrome.major)
+	mediaClient, err := newMediaClient(upstreamIdleTimeout, proxyURL, chrome.major)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP client: %w", err)
 	}
@@ -211,11 +211,11 @@ func NewClient(source AccountSource, proxyURL string, saveHistory bool) (*Client
 // GuestID 是访客会话在账号池、日志与账本中的 ID
 const GuestID = "guest"
 
-// maxPromptLength 是官网输入框在高级模式下的字符上限，上游对更长的提示词不返回候选
-const maxPromptLength = 1_000_000
+// MaxPromptLength 是官网输入框在高级模式下的字符上限，上游对更长的提示词不返回候选
+const MaxPromptLength = 1_000_000
 
-// longPromptInstruction 是超长提示词改为 message.txt 附件后生成请求中的提示词
-const longPromptInstruction = "The complete input for this turn is in the attached message.txt. Treat its content as the user's message and respond to it directly."
+// LongPromptInstruction 是超长提示词改为 message.txt 附件后生成请求中的提示词
+const LongPromptInstruction = "The complete input for this turn is in the attached message.txt. Treat its content as the user's message and respond to it directly."
 
 // ErrGuestAttachments 表示带附件的请求落到访客会话，官网访客页面的上传入口全部禁用
 var ErrGuestAttachments = &ProtocolError{HTTPStatus: 503, Message: "访客会话不能上传附件，需要可用的登录账号"}
@@ -258,6 +258,50 @@ func (c *Client) tierCode() int {
 	return 0
 }
 
+// maxNavigationHops 是首页导航跟随重定向的上限，与 Chrome 相同
+const maxNavigationHops = 20
+
+// navigate 以 Chrome 地址栏导航打开 target 并跟随重定向，返回最后一个响应，途中各跳的 Set-Cookie 写入账号 Cookie
+// 跟随的重定向见 followsRedirect，其余重定向的响应原样返回
+func (c *Client) navigate(ctx context.Context, target string) (*http.Response, error) {
+	for hop := 0; ; hop++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.applyNavigationHeaders(req)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, transportProtocolError("打开 Gemini 页面", err)
+		}
+		location, err := resp.Location()
+		if err != nil || hop == maxNavigationHops || !followsRedirect(req.URL, location) {
+			return resp, nil
+		}
+		resp.Body.Close()
+		if err := c.absorbResponseCookies(req.URL, resp); err != nil {
+			return nil, err
+		}
+		target = location.String()
+	}
+}
+
+// followsRedirect 判断首页导航是否跟随从 from 到 to 的重定向：Gemini 与 accounts.google.com 之间签发 OSID 的往返、Gemini 站内保留 /u/N 前缀的跳转跟随；
+// accounts.google.com 转到自己的登录页、/u/N 页面丢掉前缀、其他主机（含 /sorry 人机验证页）不跟随
+func followsRedirect(from *url.URL, to *url.URL) bool {
+	gemini := strings.TrimPrefix(geminiOrigin, "https://")
+	switch {
+	case from.Hostname() == gemini && to.Hostname() == gemini:
+		index, _, _ := strings.Cut(strings.TrimPrefix(from.Path, "/u/"), "/")
+		return !strings.HasPrefix(from.Path, "/u/") || strings.HasPrefix(to.Path, "/u/"+index+"/")
+	case from.Hostname() == gemini:
+		return to.Hostname() == "accounts.google.com"
+	case from.Hostname() == "accounts.google.com":
+		return to.Hostname() == gemini
+	}
+	return false
+}
+
 // Init 刷新首页动态参数并获取当前账号模型目录与偏好
 func (c *Client) Init(ctx context.Context) error {
 	return c.init(ctx, true)
@@ -265,15 +309,11 @@ func (c *Client) Init(ctx context.Context) error {
 
 func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	version := c.cookieVersion.Load()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.pageURL(pathInit), nil)
+	resp, err := c.navigate(ctx, c.pageURL(pathInit))
 	if err != nil {
 		return err
 	}
-	c.applyNavigationHeaders(req)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return transportProtocolError("打开 Gemini 页面", err)
-	}
+	req := resp.Request
 	if resp.StatusCode != http.StatusOK {
 		protocolErr := responseStatusError(resp, "打开 Gemini 页面")
 		if allowRefresh && renewable(protocolErr) && c.refresh != nil {
@@ -326,18 +366,18 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	}
 	if !c.guest {
 		if status, err := c.fetchAbuseStatus(ctx, bootstrap); err != nil {
-			logging.Warn(c.displayAccountID(), "读取账号异常状态失败", "原因", err)
+			logging.Warn(c.accountID, "读取账号异常状态失败", "原因", err)
 		} else {
 			c.abuse.Store(&status)
 			if status.Restricted {
-				logging.Warn(c.displayAccountID(), "Google 对该账号给出异常标记，账号可能受限，可在浏览器打开 Gemini 查看提示", "状态码", status.Code, "信号", status.Signal)
+				logging.Warn(c.accountID, "Google 对该账号给出异常标记，账号可能受限，可在浏览器打开 Gemini 查看提示", "状态码", status.Code, "信号", status.Signal)
 			}
 		}
 	}
 	if c.guest {
 		catalog.removeTools()
 	} else if gems, err := c.fetchGems(ctx, bootstrap); err != nil {
-		logging.Warn(c.displayAccountID(), "读取 Gem 列表失败", "原因", err)
+		logging.Warn(c.accountID, "读取 Gem 列表失败", "原因", err)
 		if previous, err := c.bootstrapSnapshot(); err == nil {
 			catalog.addGems(previous.Catalog.gems())
 		}
@@ -396,9 +436,9 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 		}
 	}
 	request.Files = append([]FileData(nil), request.Files...)
-	if utf8.RuneCountInString(request.Prompt) > maxPromptLength {
+	if utf8.RuneCountInString(request.Prompt) > MaxPromptLength {
 		request.Files = append(request.Files, FileData{Data: []byte(request.Prompt), FileName: "message.txt", MimeType: "text/plain"})
-		request.Prompt = longPromptInstruction
+		request.Prompt = LongPromptInstruction
 	}
 	if c.guest && len(request.Files) > 0 {
 		return ErrGuestAttachments
@@ -601,7 +641,7 @@ func (c *Client) cancelGeneration(session *channel, bootstrap Bootstrap, cid str
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
 	if err := session.end(ctx); err != nil {
-		logging.Warn(c.displayAccountID(), "通知上游停止生成失败", "原因", err)
+		logging.Warn(c.accountID, "通知上游停止生成失败", "原因", err)
 	}
 	c.stopGeneration(bootstrap, cid, rid, token, model, level)
 	session.terminate()
@@ -623,10 +663,10 @@ func (c *Client) stopGeneration(bootstrap Bootstrap, cid string, rid string, tok
 		rpcID: "NkpXw", payload: string(payload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: model.Mode, variant: model.Variant, level: level,
 	})
 	if err != nil {
-		logging.Warn(c.displayAccountID(), "通知上游停止生成失败", "原因", err)
+		logging.Warn(c.accountID, "通知上游停止生成失败", "原因", err)
 		return
 	}
-	logging.Info(c.displayAccountID(), "已通知上游停止生成", "耗时", time.Since(started))
+	logging.Info(c.accountID, "已通知上游停止生成", "耗时", time.Since(started))
 }
 
 // TemporaryChats 报告账号的生成请求是否默认使用 Temporary Chat，不写入网页历史
@@ -671,7 +711,18 @@ func (c *Client) ResolveModel(id string) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	return bootstrap.Catalog.Resolve(id)
+	return c.resolve(bootstrap.Catalog, id)
+}
+
+// resolve 按目录查找模型，目录中没有时按该账号目录同一位置上交替出现的当前 ID 查找
+func (c *Client) resolve(catalog ModelCatalog, id string) (Model, error) {
+	model, err := catalog.Resolve(id)
+	if err != nil {
+		if current, ok := alternateModel(c.accountID, id); ok {
+			return catalog.Resolve(current)
+		}
+	}
+	return model, err
 }
 
 func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (ModelCatalog, error) {
@@ -704,7 +755,7 @@ func (c *Client) acceptTerms(ctx context.Context, bootstrap Bootstrap, mode int)
 	version := 0
 	payload, err := c.batchExecute(ctx, bootstrap, batchRequest{rpcID: "F6qrid", payload: "[]", sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: mode})
 	if err != nil {
-		logging.Warn(c.displayAccountID(), "读取服务条款版本失败，按版本 0 同意", "原因", err)
+		logging.Warn(c.accountID, "读取服务条款版本失败，按版本 0 同意", "原因", err)
 	} else {
 		version, _ = intAt(payload, 0)
 	}
@@ -715,7 +766,7 @@ func (c *Client) acceptTerms(ctx context.Context, bootstrap Bootstrap, mode int)
 	if _, err := c.batchExecute(ctx, bootstrap, batchRequest{rpcID: "UVb0T", payload: string(request), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: mode}); err != nil {
 		return err
 	}
-	logging.Info(c.displayAccountID(), "已同意服务条款", "版本", version)
+	logging.Info(c.accountID, "已同意服务条款", "版本", version)
 	return nil
 }
 
@@ -803,10 +854,10 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		logging.Debug(c.displayAccountID(), "上游 RPC 失败", "rpc", rpcID, "耗时", time.Since(started), "错误", err)
+		logging.Debug(c.accountID, "上游 RPC 失败", "rpc", rpcID, "耗时", time.Since(started), "错误", err)
 		return nil, transportProtocolError(rpcActions[rpcID], err)
 	}
-	logging.Debug(c.displayAccountID(), "上游 RPC", "rpc", rpcID, "状态", resp.StatusCode, "耗时", time.Since(started))
+	logging.Debug(c.accountID, "上游 RPC", "rpc", rpcID, "状态", resp.StatusCode, "耗时", time.Since(started))
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		resp.Body.Close()
 		return nil, err
@@ -847,7 +898,7 @@ func (c *Client) resolveRequestModel(catalog ModelCatalog, id string) (Model, er
 	if strings.TrimSpace(id) == "" {
 		return catalog.Default()
 	}
-	return catalog.Resolve(id)
+	return c.resolve(catalog, id)
 }
 
 func (c *Client) bootstrapSnapshot() (Bootstrap, error) {
@@ -982,13 +1033,6 @@ func (c *Client) pageURL(path string) string {
 	return geminiOrigin + c.pathPrefix + path
 }
 
-func (c *Client) displayAccountID() string {
-	if strings.TrimSpace(c.accountID) == "" {
-		return "default"
-	}
-	return c.accountID
-}
-
 // refreshCookies 串行续签账号 Cookie，请求发出时读到的 version 之后已有续签成功时复用其结果
 func (c *Client) refreshCookies(ctx context.Context, version uint64) error {
 	if err := c.refreshSlot.Acquire(ctx, 1); err != nil {
@@ -1002,13 +1046,13 @@ func (c *Client) refreshCookies(ctx context.Context, version uint64) error {
 		return retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
 	}
 	started := time.Now()
-	logging.Info(c.displayAccountID(), "账号认证续签")
+	logging.Info(c.accountID, "账号认证续签")
 	cookies, err := c.refresh(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		logging.Error(c.displayAccountID(), "账号认证续签失败", "耗时", time.Since(started), "错误", err)
+		logging.Error(c.accountID, "账号认证续签失败", "耗时", time.Since(started), "错误", err)
 		if errors.Is(err, ErrTransport) {
 			return retryableProtocolError(fmt.Sprintf("续签 Cookie 失败: %v", err), err)
 		}
@@ -1021,7 +1065,7 @@ func (c *Client) refreshCookies(ctx context.Context, version uint64) error {
 		return retryableProtocolError(fmt.Sprintf("安装续签的 Cookie 失败: %v", err), err)
 	}
 	c.cookieVersion.Add(1)
-	logging.Info(c.displayAccountID(), "账号认证续签完成", "耗时", time.Since(started))
+	logging.Info(c.accountID, "账号认证续签完成", "耗时", time.Since(started))
 	c.cookieMu.Lock()
 	snapshot := c.cookieSnapshotLocked()
 	c.cookieMu.Unlock()
@@ -1064,7 +1108,7 @@ func (c *Client) CloseIdleConnections() {
 
 // ProbeProxy 经代理以浏览器导航请求官网首页，首页返回 200 时报告耗时
 func ProbeProxy(ctx context.Context, proxyURL string) (time.Duration, error) {
-	httpClient, err := NewHTTPClient(requestCeilingSeconds, proxyURL, 0)
+	httpClient, err := NewHTTPClient(upstreamIdleTimeout, proxyURL, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -1131,7 +1175,7 @@ func newContextID() (string, error) {
 // ErrCaptcha 表示 Google 以人机验证页（/sorry）拦截了请求，出口 IP 与账号会话被判定为异常流量
 var ErrCaptcha = errors.New("请求被 Google 人机验证页拦截")
 
-// responseStatusError 把非 200 响应转为协议错误，重定向到 google.com/sorry 时为人机验证拦截，按 429 处理；/u/N 页面重定向到 Gemini 其他页面时表示 Cookie 会话中没有第 N 个账号，按会话失效处理
+// responseStatusError 把非 200 响应转为协议错误，重定向到 google.com/sorry 时为人机验证拦截，按 429 处理；重定向到 accounts.google.com 的登录页时表示会话已失效；/u/N 页面重定向到 Gemini 其他页面时表示 Cookie 会话中没有第 N 个账号，按会话失效处理
 func responseStatusError(resp *http.Response, operation string) *ProtocolError {
 	location, err := resp.Location()
 	if err == nil && strings.HasSuffix(location.Hostname(), "google.com") && strings.HasPrefix(location.Path, "/sorry") {
@@ -1140,10 +1184,16 @@ func responseStatusError(resp *http.Response, operation string) *ProtocolError {
 			Message: fmt.Sprintf("%s时被 Google 人机验证页拦截（HTTP %d 重定向到 %s%s）", operation, resp.StatusCode, location.Host, location.Path),
 		}
 	}
+	if err == nil && location.Hostname() == "accounts.google.com" {
+		return &ProtocolError{
+			HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,
+			Message: fmt.Sprintf("%s时官网重定向到 Google 登录页，账号会话已失效：在浏览器中重新登录 Gemini 后重新导入这个账号", operation),
+		}
+	}
 	if err == nil && location.Hostname() == resp.Request.URL.Hostname() && strings.HasPrefix(resp.Request.URL.Path, "/u/") {
 		return &ProtocolError{
 			HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,
-			Message: fmt.Sprintf("%s时 %s 重定向到 %s，Cookie 会话中没有该账号序号", operation, resp.Request.URL.Path, location.Path),
+			Message: fmt.Sprintf("%s时 %s 重定向到 %s，Cookie 会话中没有该账号序号：在浏览器中确认该账号仍处于登录状态后重新导入这个账号", operation, resp.Request.URL.Path, location.Path),
 		}
 	}
 	return httpStatusError(resp.StatusCode, operation)
@@ -1171,10 +1221,11 @@ func streamInterrupted(err error) bool {
 // ErrTransport 表示连接、TLS 或代理等网络层失败，与账号状态无关
 var ErrTransport = errors.New("网络或上游临时故障")
 
-// TransientError 判断错误是否为与账号状态无关的一次性上游失败：网络层失败、生成流在结束帧前中断或停顿，以及没有具体原因的 5xx（上游 HTTP 5xx、5xx 错误记录、没有完成的候选）
+// TransientError 判断错误是否为与账号状态无关的一次性上游失败：网络层失败、生成流在结束帧前中断或停顿，没有具体原因的 5xx（上游 HTTP 5xx、5xx 错误记录、没有完成的候选），以及官网侧本轮失败的错误码 1152 与 1185
 func TransientError(err error) bool {
 	var protocolErr *ProtocolError
-	return streamInterrupted(err) || errors.Is(err, errStreamIdle) || errors.As(err, &protocolErr) && protocolErr.Code >= 500 && protocolErr.Code < 600 && protocolErr.Cause == nil
+	return streamInterrupted(err) || errors.Is(err, errStreamIdle) || errors.As(err, &protocolErr) && protocolErr.Cause == nil &&
+		(protocolErr.Code >= 500 && protocolErr.Code < 600 || protocolErr.Code == 1152 || protocolErr.Code == 1185)
 }
 
 func transportProtocolError(operation string, err error) error {

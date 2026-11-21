@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// systemRejected 匹配客户端系统提示中整句删去的第三方客户端特征文字与带归属声明的身份句，短语与 Antigravity2API、AIStudio2API 相同
+// systemRejected 匹配客户端系统提示中整句删去的第三方客户端特征文字与带归属声明的身份句
 var systemRejected = []*regexp.Regexp{phrases(
 	"RFC 2119 keywords",
 	"Read xd://<tool> for full docs + JSON schema before first use",

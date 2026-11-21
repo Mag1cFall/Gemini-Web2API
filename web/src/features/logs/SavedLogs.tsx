@@ -15,6 +15,7 @@ import { logsMessages } from '@/features/logs/messages'
 import type { LogPage } from '@/features/logs/types'
 import { api } from '@/lib/api'
 import { useMessages } from '@/lib/i18n'
+import { patchSearchParams } from '@/lib/searchParams'
 
 // savedRanges 是已保存日志可选的时间范围，截止到当前时间
 const savedRanges = {
@@ -57,12 +58,7 @@ export function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
 
   // update 把筛选条件写入 URL，取默认值的条件从 URL 删除
   const update = (next: Record<string, string>) => {
-    const search = new URLSearchParams(params)
-    for (const [key, value] of Object.entries(next)) {
-      if (value) search.set(key, value)
-      else search.delete(key)
-    }
-    setParams(search, { replace: true })
+    patchSearchParams(setParams, next)
   }
 
   const entries = logs.data?.pages.flatMap((page) => page.items) ?? []

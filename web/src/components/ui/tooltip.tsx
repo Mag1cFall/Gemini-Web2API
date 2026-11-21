@@ -10,16 +10,14 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
   )
 }
 
-// Tooltip 在悬停与键盘聚焦时显示说明，shortcut 显示对应快捷键；overflow 为真时只在子元素的文字被截断时显示
+// Tooltip 在悬停与键盘聚焦时显示说明；overflow 为真时只在子元素的文字被截断时显示
 export function Tooltip({
   label,
-  shortcut,
   side = 'bottom',
   overflow = false,
   children,
 }: {
   label: ReactNode
-  shortcut?: string
   side?: 'top' | 'bottom' | 'left' | 'right'
   overflow?: boolean
   children: ReactNode
@@ -45,11 +43,6 @@ export function Tooltip({
           className="z-popover flex max-w-prose items-center gap-2 rounded-sm bg-surface px-3 py-2 text-xs text-foreground shadow-popover data-[state=closed]:animate-fade-out data-[state=delayed-open]:animate-fade-in"
         >
           <span className="break-words">{label}</span>
-          {shortcut && (
-            <kbd className="rounded-sm border border-border px-1 font-mono text-xs text-foreground-muted">
-              {shortcut}
-            </kbd>
-          )}
           <Primitive.Arrow className="fill-surface" width={10} height={5} />
         </Primitive.Content>
       </Primitive.Portal>

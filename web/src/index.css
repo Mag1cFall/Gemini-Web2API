@@ -28,7 +28,6 @@
   --color-destructive: #f53f3f;
   --color-destructive-hover: #e63e2a;
   --color-destructive-active: #c94032;
-  --color-destructive-soft: rgb(240 68 56 / 0.1);
   --color-destructive-border: rgb(240 68 56 / 0.4);
   --color-success: #1adb87;
   --color-success-text: #1d7a4d;
@@ -43,8 +42,6 @@
   --color-error-soft: #fdecea;
   --color-info: #3a7bfc;
   --color-info-soft: #def0ff;
-  --color-chip: #191919;
-  --color-chip-foreground: #ffffff;
   --color-selection: rgb(58 123 252 / 0.2);
   --color-scrollbar: #c7ced6;
   --color-control-edge: #ebebeb;
@@ -79,8 +76,6 @@
   --text-xl--line-height: 28px;
   --text-2xl: 24px;
   --text-2xl--line-height: 32px;
-  --text-3xl: 30px;
-  --text-3xl--line-height: 36px;
 
   --font-weight-*: initial;
   --font-weight-normal: 400;
@@ -102,7 +97,6 @@
   --spacing-12: 48px;
   --spacing-row: 44px;
   --spacing-16: 64px;
-  --spacing-icon: 20px;
   --spacing-control-sm: 32px;
   --spacing-control: 36px;
   --spacing-control-lg: 40px;
@@ -130,13 +124,10 @@
 
   --shadow-*: initial;
   --shadow-raised: 0 2px 8px 0 rgb(0 0 0 / 0.03);
-  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.04);
   --shadow-popover: 0 6px 16px 0 rgb(0 0 0 / 0.12);
   --shadow-modal: 0 9px 30px 0 rgb(0 0 0 / 0.16);
 
   --ease-*: initial;
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-in: cubic-bezier(0.55, 0, 1, 0.45);
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --default-transition-duration: 120ms;
   --default-transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
@@ -200,9 +191,6 @@
 @utility z-sticky {
   z-index: 10;
 }
-@utility z-dropdown {
-  z-index: 20;
-}
 @utility z-overlay {
   z-index: 30;
 }
@@ -240,7 +228,6 @@
 :root {
   --duration-fast: 120ms;
   --duration-base: 180ms;
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* 浅色配色：原生控件与滚动条随选择的浅色绘制 */
@@ -275,7 +262,6 @@
   --color-destructive: #ff5d5d;
   --color-destructive-hover: #ff7676;
   --color-destructive-active: #ff8f8f;
-  --color-destructive-soft: rgb(255 93 93 / 0.14);
   --color-destructive-border: rgb(255 93 93 / 0.45);
   --color-success: #2bd48c;
   --color-success-text: #5edba3;
@@ -288,8 +274,6 @@
   --color-error-soft: rgb(255 93 93 / 0.14);
   --color-info: #4f8cff;
   --color-info-soft: rgb(79 140 255 / 0.16);
-  --color-chip: #e8eaed;
-  --color-chip-foreground: #111316;
   --color-selection: rgb(79 140 255 / 0.32);
   --color-scrollbar: #464a51;
   --color-control-edge: #33373d;
@@ -302,7 +286,6 @@
   --color-switch-border: #80858c;
   --color-switch-knob: #b4b8be;
   --shadow-raised: 0 2px 8px 0 rgb(0 0 0 / 0.3);
-  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --shadow-popover: 0 6px 16px 0 rgb(0 0 0 / 0.5);
   --shadow-modal: 0 9px 30px 0 rgb(0 0 0 / 0.6);
 }

@@ -25,7 +25,6 @@ const updateMessages = defineMessages({
   'zh-CN': {
     title: '在线更新',
     check: '检查更新',
-    latest: '最新版本',
     published: '发布时间',
     checkedAt: '检查时间',
     upToDate: '已是最新版本',
@@ -49,7 +48,6 @@ const updateMessages = defineMessages({
   'zh-TW': {
     title: '線上更新',
     check: '檢查更新',
-    latest: '最新版本',
     published: '發布時間',
     checkedAt: '檢查時間',
     upToDate: '已是最新版本',
@@ -73,7 +71,6 @@ const updateMessages = defineMessages({
   en: {
     title: 'Online update',
     check: 'Check for updates',
-    latest: 'Latest version',
     published: 'Published',
     checkedAt: 'Checked',
     upToDate: 'You are on the latest version',
@@ -99,7 +96,6 @@ const updateMessages = defineMessages({
   ja: {
     title: 'オンライン更新',
     check: '更新を確認',
-    latest: '最新バージョン',
     published: '公開日時',
     checkedAt: '確認日時',
     upToDate: '最新バージョンです',
@@ -126,7 +122,6 @@ const updateMessages = defineMessages({
   ko: {
     title: '온라인 업데이트',
     check: '업데이트 확인',
-    latest: '최신 버전',
     published: '게시 시각',
     checkedAt: '확인 시각',
     upToDate: '최신 버전입니다',
@@ -153,7 +148,6 @@ const updateMessages = defineMessages({
   fr: {
     title: 'Mise à jour en ligne',
     check: 'Rechercher une mise à jour',
-    latest: 'Dernière version',
     published: 'Publiée le',
     checkedAt: 'Vérifiée le',
     upToDate: 'Vous utilisez la dernière version',
@@ -180,7 +174,6 @@ const updateMessages = defineMessages({
   de: {
     title: 'Online-Update',
     check: 'Nach Updates suchen',
-    latest: 'Neueste Version',
     published: 'Veröffentlicht',
     checkedAt: 'Geprüft',
     upToDate: 'Du verwendest die neueste Version',
@@ -214,7 +207,7 @@ const releaseNotesClass =
 export function UpdateCard() {
   const m = useMessages(updateMessages)
   const app = useMessages(appMessages)
-  const { locale } = useI18n()
+  const { language } = useI18n()
   const status = useUpdateStatus()
   const check = useCheckUpdate()
   const apply = useApplyUpdate()
@@ -281,9 +274,9 @@ export function UpdateCard() {
             title={data.available ? fill(m.available, { version: latest }) : m.upToDate}
             description={[
               data.published_at &&
-                m.published + ' ' + formatFullDateTime(new Date(data.published_at), locale),
+                m.published + ' ' + formatFullDateTime(new Date(data.published_at), language),
               data.checked_at &&
-                m.checkedAt + ' ' + formatFullDateTime(new Date(data.checked_at), locale),
+                m.checkedAt + ' ' + formatFullDateTime(new Date(data.checked_at), language),
             ]
               .filter(Boolean)
               .join(' · ')}
@@ -346,8 +339,8 @@ export function UpdateCard() {
                 </span>
                 {progress.stage === 'download' && progress.downloaded > 0 && (
                   <span className="text-foreground-muted tabular-nums">
-                    {formatBytes(progress.downloaded, locale)}
-                    {progress.total > 0 && ' / ' + formatBytes(progress.total, locale)}
+                    {formatBytes(progress.downloaded, language)}
+                    {progress.total > 0 && ' / ' + formatBytes(progress.total, language)}
                   </span>
                 )}
               </div>

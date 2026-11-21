@@ -176,9 +176,6 @@ func Open(path string) (*Store, error) {
 
 // Close 写完已排队的记录后关闭数据库
 func (store *Store) Close() error {
-	if store == nil {
-		return nil
-	}
 	store.mu.Lock()
 	if store.closed {
 		store.mu.Unlock()
@@ -193,14 +190,12 @@ func (store *Store) Close() error {
 
 // SetBodyCapture 设置是否保存请求与响应正文
 func (store *Store) SetBodyCapture(enabled bool) {
-	if store != nil {
-		store.capture.Store(enabled)
-	}
+	store.capture.Store(enabled)
 }
 
 // BodyCapture 返回是否保存请求与响应正文
 func (store *Store) BodyCapture() bool {
-	return store != nil && store.capture.Load()
+	return store.capture.Load()
 }
 
 // Record 排队写入一条已结束请求的用量记录，body 非 nil 时同时保存截断到 BodyLimit 的正文，不等待落盘
@@ -235,9 +230,6 @@ func truncate(data []byte) string {
 
 // enqueue 把记录交给写入协程，队列已满时计入丢弃数而不阻塞请求
 func (store *Store) enqueue(item write) {
-	if store == nil {
-		return
-	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	if store.closed {

@@ -19,6 +19,8 @@ type Pool struct {
 	mu       sync.Mutex
 	proxies  []*proxyState
 	bindings map[string]*proxyState
+	// fixed 记录各账号设为固定代理的地址，统计各代理账号数时一并计入
+	fixed map[string]string
 }
 
 // proxyState 是代理池中一个代理的检测结果
@@ -51,7 +53,7 @@ type Status struct {
 
 // New 创建代理池，代理在首次检测前视为可用
 func New(urls []string) *Pool {
-	pool := &Pool{bindings: make(map[string]*proxyState)}
+	pool := &Pool{bindings: make(map[string]*proxyState), fixed: make(map[string]string)}
 	pool.SetProxies(urls)
 	return pool
 }
@@ -95,6 +97,7 @@ func (p *Pool) SetProxies(urls []string) {
 func (p *Pool) rebalance() {
 	anyHealthy := p.anyHealthy()
 	accounts := make(map[*proxyState][]string, len(p.proxies))
+	fixed := p.fixedCounts()
 	for _, state := range p.proxies {
 		if !anyHealthy || state.usable() {
 			accounts[state] = []string{}
@@ -105,6 +108,7 @@ func (p *Pool) rebalance() {
 			accounts[state] = append(ids, id)
 		}
 	}
+	load := func(state *proxyState) int { return len(accounts[state]) + fixed[state] }
 	for {
 		var most, least *proxyState
 		for _, state := range p.proxies {
@@ -112,14 +116,14 @@ func (p *Pool) rebalance() {
 			if !ok {
 				continue
 			}
-			if most == nil || len(ids) > len(accounts[most]) {
+			if len(ids) > 0 && (most == nil || load(state) > load(most)) {
 				most = state
 			}
-			if least == nil || len(ids) < len(accounts[least]) {
+			if least == nil || lessLoaded(load(state), fixed[state], load(least), fixed[least]) {
 				least = state
 			}
 		}
-		if most == nil || len(accounts[most])-len(accounts[least]) <= 1 {
+		if most == nil || load(most)-load(least) <= 1 {
 			return
 		}
 		ids := accounts[most]
@@ -144,6 +148,7 @@ func (p *Pool) contains(target *proxyState) bool {
 func (p *Pool) Assign(accountID string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	delete(p.fixed, accountID)
 	if len(p.proxies) == 0 {
 		delete(p.bindings, accountID)
 		return System()
@@ -176,9 +181,36 @@ func (p *Pool) anyHealthy() bool {
 	return false
 }
 
-// leastBound 返回除 accountID 外绑定账号最少的代理，有可用代理时只在可用代理中选，同数时取列表中靠前的一个
-func (p *Pool) leastBound(accountID string) *proxyState {
+// fixedCounts 返回池中每个代理当前被设为固定代理的账号数
+func (p *Pool) fixedCounts() map[*proxyState]int {
 	counts := make(map[*proxyState]int, len(p.proxies))
+	byURL := make(map[string]*proxyState, len(p.proxies))
+	for _, state := range p.proxies {
+		byURL[state.url] = state
+	}
+	for _, proxyURL := range p.fixed {
+		if state := byURL[proxyURL]; state != nil {
+			counts[state]++
+		}
+	}
+	return counts
+}
+
+// lessLoaded 报告候选代理负载是否少于当前项，负载相同时固定账号数少者优先
+func lessLoaded(candidateLoad, candidateFixed, currentLoad, currentFixed int) bool {
+	if candidateLoad != currentLoad {
+		return candidateLoad < currentLoad
+	}
+	return candidateFixed < currentFixed
+}
+
+// leastBound 返回除 accountID 外绑定与固定账号合计最少的代理，有可用代理时只在可用代理中选，同数时优先未作固定代理的一项，再取列表中靠前的一个
+func (p *Pool) leastBound(accountID string) *proxyState {
+	fixed := p.fixedCounts()
+	counts := make(map[*proxyState]int, len(p.proxies))
+	for state, n := range fixed {
+		counts[state] = n
+	}
 	for id, state := range p.bindings {
 		if id != accountID {
 			counts[state]++
@@ -190,18 +222,31 @@ func (p *Pool) leastBound(accountID string) *proxyState {
 		if anyHealthy && !state.usable() {
 			continue
 		}
-		if best == nil || counts[state] < counts[best] {
+		if best == nil || lessLoaded(counts[state], fixed[state], counts[best], fixed[best]) {
 			best = state
 		}
 	}
 	return best
 }
 
-// Release 解除账号与代理的绑定
+// SetFixed 登记或清除账号的固定代理：proxyURL 非空且不为 direct 时记为固定代理并解除池绑定，否则清除固定代理登记
+func (p *Pool) SetFixed(accountID string, proxyURL string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if proxyURL == "" || proxyURL == Direct {
+		delete(p.fixed, accountID)
+		return
+	}
+	delete(p.bindings, accountID)
+	p.fixed[accountID] = proxyURL
+}
+
+// Release 解除账号与代理的绑定及固定代理登记
 func (p *Pool) Release(accountID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.bindings, accountID)
+	delete(p.fixed, accountID)
 }
 
 // Empty 报告代理池是否没有代理
@@ -242,7 +287,7 @@ func (p *Pool) Check(ctx context.Context, probe func(context.Context, string) (t
 		state.checked, state.latency, state.err = now, results[index].latency, ""
 		state.healthy = results[index].err == nil
 		if !state.healthy {
-			state.latency, state.err = 0, results[index].err.Error()
+			state.latency, state.err = 0, WithLoopbackHint(state.url, results[index].err).Error()
 		}
 		anyHealthy = anyHealthy || state.usable()
 	}

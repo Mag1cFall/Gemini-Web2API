@@ -11,7 +11,6 @@ const (
 	EventCitations     EventKind = "citations"
 	EventMedia         EventKind = "media"
 	EventImageProgress EventKind = "image_progress"
-	EventPhase         EventKind = "phase"
 	EventMetadata      EventKind = "metadata"
 	EventError         EventKind = "error"
 	EventDone          EventKind = "done"
@@ -40,10 +39,8 @@ const (
 type FinishReason string
 
 const (
-	FinishUnknown   FinishReason = "unknown"
-	FinishStop      FinishReason = "stop"
-	FinishCancelled FinishReason = "cancelled"
-	FinishError     FinishReason = "error"
+	FinishStop  FinishReason = "stop"
+	FinishError FinishReason = "error"
 )
 
 // Usage 表示上游提供的令牌用量
@@ -114,9 +111,6 @@ type ProtocolError struct {
 
 // Error 返回适合日志和公开错误映射的描述
 func (e *ProtocolError) Error() string {
-	if e == nil {
-		return ""
-	}
 	if e.Message != "" {
 		return e.Message
 	}
@@ -128,9 +122,6 @@ func (e *ProtocolError) Error() string {
 
 // Unwrap 返回底层错误
 func (e *ProtocolError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
 	return e.Cause
 }
 

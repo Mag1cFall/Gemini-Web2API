@@ -42,7 +42,6 @@ type Deps struct {
 
 type handler struct {
 	Deps
-	settings *Settings
 	sessions sessionStore
 	attempts loginAttempts
 	pairing  pairingTokens
@@ -51,7 +50,7 @@ type handler struct {
 
 // Mount 在 /api 下注册管理端接口
 func Mount(router *gin.Engine, deps Deps) {
-	h := &handler{Deps: deps, settings: deps.Settings}
+	h := &handler{Deps: deps}
 	deps.Settings.changed = h.sessions.clear
 	router.POST("/api/pairing/accounts", h.pairingAccount)
 	api := router.Group("/api", h.guard)
@@ -100,7 +99,7 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.GET("/usage", requestdb.UsageHandler(deps.Store))
 	api.GET("/usage/records", requestdb.RecordsHandler(deps.Store))
 	api.GET("/usage/records.csv", requestdb.ExportHandler(deps.Store))
-	api.GET("/config", func(c *gin.Context) { c.JSON(http.StatusOK, h.settings.View()) })
+	api.GET("/config", func(c *gin.Context) { c.JSON(http.StatusOK, h.Settings.View()) })
 	api.PUT("/config", h.updateConfig)
 	api.GET("/proxies", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"proxies": h.Accounts.ProxyStatus()}) })
 	api.POST("/proxies/check", func(c *gin.Context) {
@@ -147,7 +146,7 @@ func (h *handler) status() serviceStatus {
 	pool := h.Pool.Status()
 	return serviceStatus{
 		Version: h.Version, Ready: pool.Ready(), StartedAt: h.StartedAt, ListenAddr: h.ListenAddr, ReservedListen: h.ReservedListen,
-		BaseURL: baseURL(h.ListenAddr), APIKeyRequired: h.settings.APIKey() != "", ActiveRequests: logging.ActiveCount(),
+		BaseURL: BaseURL(h.ListenAddr), APIKeyRequired: h.Settings.APIKey() != "", ActiveRequests: logging.ActiveCount(),
 		Accounts: accountCounts{
 			Total: pool.Total, Available: pool.Available, CoolingDown: pool.CoolingDown, Initializing: pool.Initializing,
 			AuthRequired: pool.AuthRequired, Unavailable: pool.Unavailable, Disabled: pool.Disabled,
@@ -157,8 +156,8 @@ func (h *handler) status() serviceStatus {
 	}
 }
 
-// baseURL 返回客户端接入地址，监听全部地址时用本机回环地址
-func baseURL(listen string) string {
+// BaseURL 返回客户端接入地址，监听全部地址时用本机回环地址
+func BaseURL(listen string) string {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return "http://" + listen
@@ -286,13 +285,10 @@ func (h *handler) events(c *gin.Context) {
 
 	lastSent := time.Now()
 	send := func(kind string, data any) bool {
-		payload, err := json.Marshal(struct {
+		payload, _ := json.Marshal(struct {
 			Type string `json:"type"`
 			Data any    `json:"data"`
 		}{kind, data})
-		if err != nil {
-			return true
-		}
 		if _, err := c.Writer.Write([]byte("data: " + string(payload) + "\n\n")); err != nil {
 			return false
 		}
@@ -359,7 +355,7 @@ func (h *handler) updateConfig(c *gin.Context) {
 	if !bindJSON(c, &update) {
 		return
 	}
-	if err := h.settings.Update(update); err != nil {
+	if err := h.Settings.Update(update); err != nil {
 		var invalid *validationError
 		if errors.As(err, &invalid) {
 			writeError(c, http.StatusBadRequest, "invalid_config", invalid.Error())
@@ -368,7 +364,7 @@ func (h *handler) updateConfig(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "config_write_failed", err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, h.settings.View())
+	c.JSON(http.StatusOK, h.Settings.View())
 }
 
 // route 是一个公开接口的方法与 gin 路径
@@ -408,14 +404,4 @@ func nonNil[T any](values []T) []T {
 		return []T{}
 	}
 	return values
-}
-
-func sortStrings(values []string) []string {
-	sort.Strings(values)
-	return values
-}
-
-// trimmed 返回去掉首尾空白的字符串
-func trimmed(value string) string {
-	return strings.TrimSpace(value)
 }
