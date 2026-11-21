@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -48,6 +49,8 @@ func (e adapterEmitError) Unwrap() error { return e.err }
 
 type accountContextError struct {
 	err *gemini.ProtocolError
+	// tokens 是新会话尝试需要的输入 token 数，续接已有会话时为 0
+	tokens int
 }
 
 func (e *accountContextError) Error() string { return e.err.Error() }
@@ -433,6 +436,9 @@ func runGenerationAttempts(
 	}
 
 	excludedAccountIDs := make(map[string]struct{})
+	// promptTokens 是新会话尝试因窗口不足失败时需要的输入 token 数，之后选号跳过上下文窗口装不下它的账号
+	var promptTokens atomic.Int64
+	ctx = balancer.ContextWithPromptTokens(ctx, &promptTokens)
 	availableAccounts := pool.Size()
 	if availableAccounts == 0 {
 		return generationResult{}, "", noAccountError(ctx, pool, modelName)
@@ -478,6 +484,7 @@ func runGenerationAttempts(
 			clear(excludedAccountIDs)
 			continue
 		}
+		attemptRegenerating := regenerating
 		regenerating = false
 		if client == nil {
 			if sessionKey != "" && !newSession && accountID != "" {
@@ -521,6 +528,10 @@ func runGenerationAttempts(
 		if lastErr == nil || !isAccountContextError(err) {
 			lastErr, lastAccountID = err, accountID
 		}
+		if tokens := accountContextTokens(err); tokens > int(promptTokens.Load()) {
+			promptTokens.Store(int64(tokens))
+			trace.Progress("WARN", accountID, "排除上下文窗口装不下请求的账号", "需要", tokens)
+		}
 		if ctx.Err() != nil {
 			return generationResult{}, accountID, err
 		}
@@ -554,6 +565,7 @@ func runGenerationAttempts(
 			}
 			trace.AttemptFailed(accountID, upstreamStatus(err), err, true)
 			excludedAccountIDs[accountID] = struct{}{}
+			regenerating = attemptRegenerating
 			continue
 		}
 		if (gemini.TransientError(err) || isOutputMismatchError(err)) && (sessionKey == "" || newSession) && regenerated < regenerations && !visibleOutput() {
@@ -667,10 +679,14 @@ func runGenerationWithClient(
 	}
 	promptTokens := contextTokens + tokencount.Content(prompt) + mediaTokens(files)
 	if contextWindow := client.ContextWindow(); contextWindow > 0 && promptTokens > contextWindow {
-		return generationResult{}, &accountContextError{err: &gemini.ProtocolError{
+		contextErr := &accountContextError{err: &gemini.ProtocolError{
 			HTTPStatus: 413,
 			Message:    fmt.Sprintf("账号上下文窗口为 %d tokens，当前请求需要 %d tokens", contextWindow, promptTokens),
 		}}
+		if !continuation {
+			contextErr.tokens = promptTokens
+		}
+		return generationResult{}, contextErr
 	}
 	feature := gemini.Feature(0)
 	if media.requireImage {
@@ -962,6 +978,15 @@ func isOutputMismatchError(err error) bool {
 func isAccountContextError(err error) bool {
 	var contextErr *accountContextError
 	return errors.As(err, &contextErr)
+}
+
+// accountContextTokens 返回新会话尝试因账号上下文窗口不足失败时需要的输入 token 数，其余错误为 0
+func accountContextTokens(err error) int {
+	var contextErr *accountContextError
+	if errors.As(err, &contextErr) {
+		return contextErr.tokens
+	}
+	return 0
 }
 
 // publicModelID 返回响应中的模型 ID：别名取映射目标，改名前的旧 ID 取当前 ID，gemini-default 在各就绪账号（没有账号时为访客会话）的默认模型相同时取该模型

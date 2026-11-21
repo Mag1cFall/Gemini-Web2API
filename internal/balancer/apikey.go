@@ -5,6 +5,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
@@ -18,6 +19,14 @@ func ContextWithAPIKey(ctx context.Context, key string) context.Context {
 	return context.WithValue(ctx, apiKeyContextKey{}, key)
 }
 
+// promptTokensContextKey 是请求上下文中请求输入 token 数的键
+type promptTokensContextKey struct{}
+
+// ContextWithPromptTokens 返回带有请求输入 token 数的上下文，tokens 为正时账号池不选上下文窗口装不下它的账号与访客会话
+func ContextWithPromptTokens(ctx context.Context, tokens *atomic.Int64) context.Context {
+	return context.WithValue(ctx, promptTokensContextKey{}, tokens)
+}
+
 // SetAPIKeyAccounts 设置各 API key 可用的账号 ID，未列出的 key 可用全部账号
 func (p *AccountPool) SetAPIKeyAccounts(accounts map[string][]string) {
 	p.mu.Lock()
@@ -26,7 +35,7 @@ func (p *AccountPool) SetAPIKeyAccounts(accounts map[string][]string) {
 	p.notifyLocked()
 }
 
-// scopeExcluded 返回并入请求范围之外账号与访客会话的排除集合：请求指定了处理账号时只留该账号，否则按 API key 与目标模型的绑定排除，都没有绑定时原样返回
+// scopeExcluded 返回并入请求范围之外账号与访客会话的排除集合：请求指定了处理账号时只留该账号，否则按 API key 与目标模型的绑定和上下文窗口能否装下请求排除，都不排除时原样返回
 func (p *AccountPool) scopeExcluded(ctx context.Context, modelID string, excluded map[string]struct{}) map[string]struct{} {
 	key, _ := ctx.Value(apiKeyContextKey{}).(string)
 	p.mu.Lock()
@@ -46,7 +55,11 @@ func (p *AccountPool) scopeExcluded(ctx context.Context, modelID string, exclude
 	keyScope, keyBound := p.apiKeyAccounts[key]
 	keyBound = keyBound && key != ""
 	modelScope, modelBound := p.modelBinding(modelID)
-	if !keyBound && !modelBound {
+	var tokens int64
+	if value, ok := ctx.Value(promptTokensContextKey{}).(*atomic.Int64); ok {
+		tokens = value.Load()
+	}
+	if !keyBound && !modelBound && tokens == 0 {
 		return excluded
 	}
 	result := maps.Clone(excluded)
@@ -54,7 +67,8 @@ func (p *AccountPool) scopeExcluded(ctx context.Context, modelID string, exclude
 		result = make(map[string]struct{})
 	}
 	for _, entry := range p.entries {
-		if keyBound && !slices.Contains(keyScope, entry.AccountID) || modelBound && !slices.Contains(modelScope, entry.AccountID) {
+		narrow := entry.Client != nil && entry.Client.ContextWindow() > 0 && int64(entry.Client.ContextWindow()) < tokens
+		if keyBound && !slices.Contains(keyScope, entry.AccountID) || modelBound && !slices.Contains(modelScope, entry.AccountID) || narrow {
 			result[entry.AccountID] = struct{}{}
 		}
 	}
