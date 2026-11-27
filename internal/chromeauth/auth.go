@@ -342,7 +342,9 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 		accountContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err = client.Init(accountContext)
 		if err == nil {
-			_, err = client.FetchUsage(accountContext)
+			if _, usageErr := client.FetchUsage(accountContext); usageErr != nil && !errors.Is(usageErr, gemini.ErrUsageUnavailable) {
+				err = usageErr
+			}
 		}
 		cancel()
 		client.CloseIdleConnections()

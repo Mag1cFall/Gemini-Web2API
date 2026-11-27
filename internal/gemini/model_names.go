@@ -110,11 +110,7 @@ func (c *Client) ObserveCatalog() {
 	if err != nil {
 		return
 	}
-	tier := ""
-	if usage := c.CachedUsage(); usage != nil {
-		tier = usage.Tier
-	}
-	observeCatalog(c.accountID, tier, bootstrap.Catalog)
+	observeCatalog(c.accountID, c.tierFor(bootstrap), bootstrap.Catalog)
 }
 
 // observeCatalog 记录账号读到的目录：与该账号上次同层级的目录比较，同一位置键上的 ID 由 A 变为 B、A 不在新目录且 B 不在旧目录时记一条改名，已有指向 A 的记录改指 B；B 已记为改名到 A 时是目录在两个名称间交替，不记改名，把 A 记为该位置的交替 ID；再保存本次目录

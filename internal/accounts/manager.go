@@ -350,8 +350,10 @@ func initialize(ctx context.Context, client *gemini.Client, timeout time.Duratio
 	if err := client.Init(initContext); err != nil {
 		return err
 	}
-	_, err := client.FetchUsage(initContext)
-	return err
+	if _, err := client.FetchUsage(initContext); err != nil && !errors.Is(err, gemini.ErrUsageUnavailable) {
+		return err
+	}
+	return nil
 }
 
 // rotationTooSoon 判断轮换失败是否为距上次轮换过近的 429
@@ -362,8 +364,8 @@ func rotationTooSoon(err error) bool {
 
 func logReady(account auth.LoadedAccount, client *gemini.Client, duration time.Duration) {
 	fields := []any{"模型", len(client.Models()), "窗口", client.ContextWindow()}
-	if usage := client.CachedUsage(); usage != nil {
-		fields = append([]any{"层级", usage.Tier}, fields...)
+	if tier := client.Tier(); tier != "" {
+		fields = append([]any{"层级", tier}, fields...)
 	}
 	if email := client.Email(); email != "" {
 		fields = append([]any{"邮箱", email}, fields...)
@@ -382,10 +384,7 @@ type accountCatalog struct {
 }
 
 func catalogOf(client *gemini.Client) accountCatalog {
-	var catalog accountCatalog
-	if usage := client.CachedUsage(); usage != nil {
-		catalog.tier = usage.Tier
-	}
+	catalog := accountCatalog{tier: client.Tier()}
 	for _, model := range client.Models() {
 		catalog.models = append(catalog.models, model.ID)
 	}

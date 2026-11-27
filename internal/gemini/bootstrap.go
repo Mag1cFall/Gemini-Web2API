@@ -30,6 +30,7 @@ type Bootstrap struct {
 	APIKey      string
 	ServerToken string
 	Catalog     ModelCatalog
+	AccountTier AccountTier
 	Preferences Preferences
 }
 

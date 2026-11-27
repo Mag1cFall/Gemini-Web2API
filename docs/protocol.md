@@ -323,7 +323,7 @@ payload = [
 | `tier=3/6` | Ultra |
 | `tier=4` | Plus |
 
-`USED_RATIO` 为已用比例，页面乘 100 取整显示；`payload[3]` 为免费账号的“自动选取模型”设置。空 `record[2]` 或缺失 `jSf9Qc` 记录按未登录处理。官网用量页在设置菜单的 “Usage limits” 入口内路由，发出 `jSf9Qc`；部分账号的 `/usage` 是服务端渲染页面，用量写在页面内嵌的 `getUsageInfo` 中，这些账号的 `jSf9Qc` 仍返回同样的数据。
+`USED_RATIO` 为已用比例，页面乘 100 取整显示；`payload[3]` 为免费账号的“自动选取模型”设置。`payload[1]` 为 `null` 或省略时按零个用量窗口解析并保留套餐与超额开关。空 `record[2]`（不含非 7 的帧内错误状态）或缺失 `jSf9Qc` 记录时以 `ESY5D` 核验登录态：会话有效则按官网不提供用量数据跳过（层级与上下文窗口取自 `otAQ7b` 的 `payload[16]` 与 `payload[17]`），会话失效则走续签或报未登录。官网用量页在设置菜单的 “Usage limits” 入口内路由，发出 `jSf9Qc`；部分账号的 `/usage` 是服务端渲染页面，用量写在页面内嵌的 `getUsageInfo` 中，这些账号的 `jSf9Qc` 仍返回同样的数据。
 
 ## 3. 认证与账号身份
 
@@ -520,7 +520,7 @@ Cookie Header 导入将普通 Cookie 绑定到 `.google.com`，将 `__Host-*` �
 | --- | --- |
 | Bootstrap | HTTP `401/403`；首页缺少 `SNlM0e`；登录服务转到登录页；重定向到 `www.google.com/sorry` |
 | 模型目录、账号偏好 | HTTP `401/403`；模型目录 `payload[14]` 为 `1016`；重定向到 `accounts.google.com`；重定向到 `www.google.com/sorry` |
-| Usage | HTTP `401/403`；登录页；空或缺失 `jSf9Qc`；重定向到 `www.google.com/sorry` |
+| Usage | HTTP `401/403`；登录页；空或缺失 `jSf9Qc` 且 `ESY5D` 核验为会话失效；重定向到 `www.google.com/sorry` |
 | 生成会话 | HTTP `401/403`；长轮询返回状态 16；重定向到 `www.google.com/sorry`；免费账号生成前 `ListAccounts` 报告会话失效 |
 | Cookie 轮换 | 轮换页或 `RotateCookies` 返回 HTTP `401/403`；轮换后 `ListAccounts` 报告会话失效 |
 | 上传条款、上传、ProcessFile | HTTP `401/403`；`wrb.fr` 状态 7；已上传的附件在重试时不重传 |
@@ -658,7 +658,8 @@ X-WebChannel-Content-Type:application/json+protobuf
 | 同上 | `6` | 首页 `TuX5cc` 的界面语言 |
 | 同上 | `7` | Temporary Chat `1`，普通会话 `0`，确认 Deep Research 计划时为 `null` |
 | 同上 | `8` | 功能编号 `[4,33,22,5,6,8,16,19,20,38]`，访客为 `[4,33,22,6,16,19,20,38]` |
-| 同上 | `11` | `jSf9Qc` 的 `TIER_CODE`，访客为 `1` |
+| 同上 | `11` | `jSf9Qc` 或 `otAQ7b` 推导的 `TIER_CODE`，访客为 `1`；企业非 Ultra 账号改写到第 `12` 槽 |
+| 同上 | `12` | 企业非 Ultra 账号的企业层级编码（由 `otAQ7b` `payload[16]` 的 21/22 推导），其余账号为 `null` |
 | 同上 | `14` | 模型 mode |
 | 同上 | `15` | 思考强度编号 |
 | 同上 | `16` | 协议客户端 UUID |

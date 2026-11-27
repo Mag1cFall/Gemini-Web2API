@@ -51,7 +51,6 @@ type Client struct {
 	reqBase     int64
 	// timer 是模型扩展头第 19 槽的页面计时
 	timer       pageTimer
-	contextSize atomic.Int64
 	requestSlot *semaphore.Weighted
 	// yieldSlot 限制同一账号同时让出请求槽的请求数
 	yieldSlot *semaphore.Weighted
@@ -82,7 +81,10 @@ type Client struct {
 
 // ContextWindow 返回账号套餐对应的网页输入窗口
 func (c *Client) ContextWindow() int {
-	return int(c.contextSize.Load())
+	if c.guest {
+		return guestContextWindow
+	}
+	return usageContextWindow(c.Tier())
 }
 
 // Busy 报告账号的请求槽是否已全部占用
@@ -230,7 +232,6 @@ func NewGuestClient(proxyURL string, concurrency int) (*Client, error) {
 		return nil, err
 	}
 	client.guest = true
-	client.contextSize.Store(guestContextWindow)
 	return client, nil
 }
 
@@ -247,13 +248,16 @@ func (c *Client) features() []int {
 	return clientFeatures
 }
 
-// tierCode 返回生成请求模型头中的账号层级编码：账号取用量接口给出的编码，访客为免费层 1
+// tierCode 返回生成请求模型头中的账号层级编码：优先取用量接口，其次取模型目录 otAQ7b 推导出的编码，访客为免费层 1
 func (c *Client) tierCode() int {
 	if c.guest {
 		return 1
 	}
 	if usage := c.usage.Load(); usage != nil {
 		return usage.TierCode
+	}
+	if bootstrap, err := c.bootstrapSnapshot(); err == nil {
+		return bootstrap.AccountTier.TierCode
 	}
 	return 0
 }
@@ -350,7 +354,7 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
 		return err
 	}
-	catalog, err := c.fetchModelCatalog(ctx, bootstrap)
+	catalog, accountTier, err := c.fetchModelCatalog(ctx, bootstrap)
 	var preferences Preferences
 	if err == nil && !c.guest {
 		preferences, err = c.fetchPreferences(ctx, bootstrap)
@@ -385,6 +389,7 @@ func (c *Client) init(ctx context.Context, allowRefresh bool) error {
 		catalog.addGems(gems)
 	}
 	bootstrap.Catalog = catalog
+	bootstrap.AccountTier = accountTier
 	bootstrap.Preferences = preferences
 	c.bootstrapMu.Lock()
 	c.bootstrap = &bootstrap
@@ -516,7 +521,8 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	if request.researchConfirm {
 		chatMode = nil
 	}
-	modelHeader := buildModelHeader(c.features(), model, bootstrap.Language, chatMode, c.tierCode(), request.ThinkingLevel, c.clientID, bootstrap.BL, c.pageTiming())
+	tier, enterprise := c.headerTier(bootstrap)
+	modelHeader := buildAccountModelHeader(c.features(), model, bootstrap.Language, chatMode, tier, enterprise, request.ThinkingLevel, c.clientID, bootstrap.BL, c.pageTiming())
 
 	failed := func(err error) error {
 		if idle := streamIdleError(streamCtx); idle != nil {
@@ -725,29 +731,33 @@ func (c *Client) resolve(catalog ModelCatalog, id string) (Model, error) {
 	return model, err
 }
 
-func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (ModelCatalog, error) {
+func (c *Client) fetchModelCatalog(ctx context.Context, bootstrap Bootstrap) (ModelCatalog, AccountTier, error) {
 	request := batchRequest{rpcID: "otAQ7b", payload: "[1]", sourcePath: "/app", language: catalogLanguage, extension: "[]"}
 	payload, err := c.batchExecute(ctx, bootstrap, request)
 	if err != nil {
-		return ModelCatalog{}, err
+		return ModelCatalog{}, AccountTier{}, err
 	}
 	status, ok := intAt(payload, 14)
 	if ok && !c.guest && (status == 1040 || status == 1042) {
 		mode, _ := intAt(payload, 0)
 		if err := c.acceptTerms(ctx, bootstrap, mode); err != nil {
-			return ModelCatalog{}, fmt.Errorf("%w；同意服务条款失败：%v", c.accountStatusError(status), err)
+			return ModelCatalog{}, AccountTier{}, fmt.Errorf("%w；同意服务条款失败：%v", c.accountStatusError(status), err)
 		}
 		if payload, err = c.batchExecute(ctx, bootstrap, request); err != nil {
-			return ModelCatalog{}, err
+			return ModelCatalog{}, AccountTier{}, err
 		}
 		status, ok = intAt(payload, 14)
 	}
 	if ok && !c.guest {
 		if err := c.accountStatusError(status); err != nil {
-			return ModelCatalog{}, err
+			return ModelCatalog{}, AccountTier{}, err
 		}
 	}
-	return parseModelCatalog(payload)
+	catalog, err := parseModelCatalog(payload)
+	if err != nil {
+		return ModelCatalog{}, AccountTier{}, err
+	}
+	return catalog, parseAccountTier(payload), nil
 }
 
 // acceptTerms 按官网前端在账号状态不可用时的流程同意服务条款：F6qrid 读取条款版本，读取失败时与页面一样按版本 0；UVb0T 发送条款版本、界面语言与首页 thykhd 令牌，mode 为目录默认模型的 mode
@@ -1137,8 +1147,7 @@ func renewable(err error) bool {
 
 // freeTier 报告账号是否为免费账号，免费账号的回答与未登录会话来自同一模型
 func (c *Client) freeTier() bool {
-	usage := c.usage.Load()
-	return usage != nil && usage.Tier == "free"
+	return !c.guest && c.Tier() == "free"
 }
 
 // isAuthenticationError 判断错误是否为上游 HTTP 401、403 或 batchexecute 帧内状态 7；公开状态为 403 的 BardErrorInfo 1060 是出口 IP 限制，不属于认证错误

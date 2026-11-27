@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -155,8 +156,10 @@ func (c *Client) reload(ctx context.Context) error {
 	if err := c.init(ctx, false); err != nil {
 		return err
 	}
-	_, err := c.FetchUsage(ctx)
-	return err
+	if _, err := c.FetchUsage(ctx); err != nil && !errors.Is(err, ErrUsageUnavailable) {
+		return err
+	}
+	return nil
 }
 
 // interval 返回当前轮换间隔，尚未取得轮换页参数时为默认间隔
