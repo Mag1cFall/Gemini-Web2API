@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { Tag } from '@/components/ui/badge'
+import { ClampText } from '@/components/ui/clamp'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useAccountLabel } from '@/features/accounts/queries'
@@ -68,9 +69,9 @@ export function AttemptList({ attempts, empty }: { attempts: Attempt[]; empty: s
             {attempt.hedge && <Tag>{m.attemptHedge}</Tag>}
             {attempt.superseded && <Tag>{m.attemptSuperseded}</Tag>}
           </div>
-          <p className="font-mono text-xs break-words text-error-text">
+          <ClampText className="font-mono text-xs break-words text-error-text">
             {serverText(attempt.error)}
-          </p>
+          </ClampText>
         </li>
       ))}
     </ol>
@@ -101,9 +102,9 @@ export function RequestBodyView({ id }: { id: string }) {
     return body.error instanceof ApiError && body.error.status === 404 ? (
       <p className="text-sm text-foreground-muted">{m.missing}</p>
     ) : (
-      <p role="alert" className="text-sm text-error-text">
-        {body.error.message}
-      </p>
+      <div role="alert">
+        <ClampText className="text-sm break-words text-error-text">{body.error.message}</ClampText>
+      </div>
     )
   }
   const parts = [

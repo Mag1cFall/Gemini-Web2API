@@ -165,7 +165,7 @@ func padRight(text string, width int) string {
 func newJSONConsole(writer io.Writer) func(Event) {
 	handler := slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: slog.LevelDebug})
 	return func(event Event) {
-		level, _ := ParseLevel(event.Level)
+		level := Level(event.Level)
 		record := slog.NewRecord(event.Time, level, event.Message, 0)
 		record.AddAttrs(slog.String("event", event.Event), slog.String("source", event.Source))
 		if len(event.Fields) > 0 {

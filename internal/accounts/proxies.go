@@ -3,6 +3,7 @@ package accounts
 import (
 	"cmp"
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -73,18 +74,31 @@ func (m *Manager) watchProxies() {
 	}
 }
 
-// CheckProxies 检测代理池，把绑定在不可用代理上的账号与访客会话改绑到可用代理并重新初始化，返回检测后的状态
+// CheckProxies 检测未处于人机验证停用期的代理池，把绑定在不可用代理上的账号与访客会话改绑到可用代理并重新初始化，返回检测后的状态；探测本身遇到人机验证拦截时停用该代理并冷却仍经该出口的账号
 func (m *Manager) CheckProxies(ctx context.Context) []proxypool.Status {
-	if m.proxies.Empty() {
-		return m.proxies.Status()
-	}
-	moved := m.proxies.Check(ctx, gemini.ProbeProxy)
+	var blocked []string
+	var mu sync.Mutex
+	moved := m.proxies.Check(ctx, func(probeCtx context.Context, proxyURL string) (time.Duration, error) {
+		latency, err := gemini.ProbeProxy(probeCtx, proxyURL)
+		if errors.Is(err, gemini.ErrCaptcha) {
+			until := time.Now().Add(balancer.CaptchaCooldown)
+			m.proxies.Block(proxyURL, until)
+			logging.Warn(logging.SourceService, "代理探测被人机验证拦截，暂停使用", "出口", proxypool.Redact(proxyURL), "恢复时间", until)
+			mu.Lock()
+			blocked = append(blocked, proxyURL)
+			mu.Unlock()
+		}
+		return latency, err
+	})
 	for _, status := range m.proxies.Status() {
 		if !status.Healthy {
 			logging.Warn(logging.SourceService, "代理不可用", "代理", status.URL, "原因", status.Error)
 		}
 	}
 	m.moveAccounts(moved)
+	for _, proxyURL := range blocked {
+		m.pool.CoolExit(proxyURL, time.Now().Add(balancer.CaptchaCooldown))
+	}
 	return m.proxies.Status()
 }
 
@@ -105,14 +119,13 @@ func (m *Manager) moveAccounts(ids []string) {
 	wait.Wait()
 }
 
-// handleCaptcha 在账号被人机验证页拦截后停用它的出口 balancer.CaptchaCooldown：出口来自代理池且还有其他可用代理时，绑定该出口的账号与访客会话改用其他代理，否则经该出口的账号冷却到同一时刻
+// handleCaptcha 在账号被人机验证页拦截后停用它的出口 balancer.CaptchaCooldown：出口来自代理池且还有其他可用代理时，绑定该出口的账号与访客会话改用其他代理，仍经该出口的账号冷却到同一时刻
 func (m *Manager) handleCaptcha(accountID string, proxy string, pooled bool) {
 	until := time.Now().Add(balancer.CaptchaCooldown)
 	logging.Warn(accountID, "出口被人机验证拦截，暂停使用", "出口", cmp.Or(proxypool.Redact(proxy), "直连"), "恢复时间", until)
 	if pooled {
 		if moved := m.proxies.Block(proxy, until); len(moved) > 0 {
 			m.moveAccounts(moved)
-			return
 		}
 	}
 	m.pool.CoolExit(proxy, until)

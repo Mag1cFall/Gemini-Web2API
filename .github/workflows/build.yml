@@ -18,7 +18,7 @@ defaults:
 
 env:
   GOTOOLCHAIN: local
-  WAILS_VERSION: v3.0.0-beta.29
+  WAILS_VERSION: v3.1.0
 
 jobs:
   checks:

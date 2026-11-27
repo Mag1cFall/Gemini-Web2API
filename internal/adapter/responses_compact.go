@@ -273,7 +273,6 @@ func retainedUserMessages(items []json.RawMessage) []json.RawMessage {
 
 // ResponsesCompactHandler 处理 /v1/responses/compact：较早的条目由模型摘要，最近的条目原样保留，返回保留的 user 消息与一个 compaction 项
 func ResponsesCompactHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		var request ResponsesRequest
 		if err := decodeRequest(c, &request); err != nil {

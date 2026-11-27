@@ -75,7 +75,7 @@ export function ModelDetailSheet({ model, onClose }: { model: Model | null; onCl
       toast({ tone: 'success', title: m.accountsSaved })
     },
     onError: (error) => {
-      toast({ tone: 'error', title: fill(m.saveFailed, { message: error.message }) })
+      toast({ tone: 'error', title: m.saveFailed, detail: error.message })
     },
   })
   if (!model) return null
@@ -107,6 +107,7 @@ export function ModelDetailSheet({ model, onClose }: { model: Model | null; onCl
             )}
             <DetailList
               items={[
+                { label: m.apiAccess, value: model.hidden ? m.hidden : m.open },
                 ...(model.alias_of ? [{ label: m.aliasOf, value: model.alias_of }] : []),
                 { label: m.context, value: contextWindow },
                 { label: m.thinking, value: model.thinking_levels.join(' · ') || m.none },

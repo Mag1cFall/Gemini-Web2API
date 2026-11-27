@@ -1,3 +1,4 @@
+import { ClampText } from '@/components/ui/clamp'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { bodyMessages } from '@/features/requests/messages'
@@ -83,9 +84,11 @@ export function RecordDrawer({
           </DetailSection>
           {record.error && (
             <DetailSection title={m.detailError}>
-              <pre className="rounded-sm bg-error-soft p-3 font-mono text-xs break-words whitespace-pre-wrap text-error-text">
-                {serverText(record.error)}
-              </pre>
+              <div className="rounded-sm bg-error-soft p-3">
+                <ClampText className="font-mono text-xs break-words whitespace-pre-wrap text-error-text">
+                  {serverText(record.error)}
+                </ClampText>
+              </div>
             </DetailSection>
           )}
           <DetailSection title={m.detailAttempts}>

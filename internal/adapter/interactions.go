@@ -103,7 +103,6 @@ var interactionServerSteps = []string{
 
 // InteractionsHandler 处理 Interactions 创建请求：previous_interaction_id 续接已保存的交互，cached_content 展开显式缓存，store 不为 false 时保存交互，background 为 true 时立即返回 in_progress 的交互、生成在后台继续
 func InteractionsHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		var request interactionRequest
 		if err := decodeRequest(c, &request); err != nil {
@@ -261,7 +260,7 @@ func (run interactionRun) execute(c *gin.Context, ctx context.Context, pool *bal
 		return nil, nil, err
 	}
 	if run.policy == sessionCreate {
-		rememberHistory(pool, result, run.system, run.bridge, run.turns)
+		rememberHistory(pool, result, run.system, run.bridge, run.turns, projection)
 	}
 	object := run.object(interactionStatus(response), result.Accumulator.Usage)
 	object["steps"] = interactionSteps(geminiResponseParts(response), result.Accumulator.Primary().Citations, run.id)

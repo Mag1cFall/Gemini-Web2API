@@ -1,8 +1,8 @@
 import { ChevronRight } from 'lucide-react'
 import { type ReactNode, useId, useState } from 'react'
 
+import { ClampText } from '@/components/ui/clamp'
 import { Collapse } from '@/components/ui/collapse'
-import { ClampText } from '@/features/logs/ClampText'
 import { type LogRow, logText } from '@/features/logs/filter'
 import { timeFormat } from '@/features/logs/format'
 import { LogField } from '@/features/logs/LogField'
@@ -83,22 +83,24 @@ function AttemptList({ title, attempts }: { title: string; attempts: Attempt[] }
       <span className="text-xs text-foreground-muted">{title}</span>
       <ol className="flex flex-col gap-[2px]">
         {attempts.map((attempt, index) => (
-          <li key={index} className="wrap-anywhere text-foreground">
-            {fill(m.attemptLine, {
-              account: attempt.account,
-              reason: attempt.superseded
-                ? m.attemptSuperseded
-                : attempt.error
-                  ? serverText(attempt.error)
-                  : attempt.status
-                    ? 'HTTP ' + String(attempt.status)
-                    : m.attemptNoResponse,
-            })}
-            {attempt.hedge && (
-              <span className="ml-2 rounded-sm bg-muted px-1 text-xs text-foreground-muted">
-                {m.hedge}
-              </span>
-            )}
+          <li key={index}>
+            <ClampText className="wrap-anywhere text-foreground">
+              {fill(m.attemptLine, {
+                account: attempt.account,
+                reason: attempt.superseded
+                  ? m.attemptSuperseded
+                  : attempt.error
+                    ? serverText(attempt.error)
+                    : attempt.status
+                      ? 'HTTP ' + String(attempt.status)
+                      : m.attemptNoResponse,
+              })}
+              {attempt.hedge && (
+                <span className="ml-2 rounded-sm bg-muted px-1 text-xs text-foreground-muted">
+                  {m.hedge}
+                </span>
+              )}
+            </ClampText>
           </li>
         ))}
       </ol>

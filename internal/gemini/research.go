@@ -92,12 +92,12 @@ func (r *researchThoughts) progress(candidate []any) error {
 	if !ok {
 		return nil
 	}
-	stepsValue, _ := valuePath(card, 1, 4, 2)
+	stepsValue, _ := valueAt(card, 1, 4, 2)
 	steps, _ := stepsValue.([]any)
 	for _, step := range steps {
-		line, _ := stringPath(step, 4, 1)
+		line, _ := stringAt(step, 4, 1)
 		if line == "" {
-			line, _ = stringPath(step, 4, 2, 2)
+			line, _ = stringAt(step, 4, 2, 2)
 		}
 		if _, seen := r.seen[line]; line == "" || seen {
 			continue
@@ -158,7 +158,7 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decode
 			return err
 		}
 		turns, _ := arrayAt(payload, 0)
-		if !slices.ContainsFunc(turns, func(turn any) bool { rid, _ := stringPath(turn, 0, 1); return rid == session.RID }) {
+		if !slices.ContainsFunc(turns, func(turn any) bool { rid, _ := stringAt(turn, 0, 1); return rid == session.RID }) {
 			if missing++; missing >= turnMissingPolls {
 				return retryableProtocolError("官网会话中没有本次请求的回答", nil)
 			}
@@ -166,12 +166,12 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decode
 		}
 		missing = 0
 		for _, turn := range turns {
-			if rid, _ := stringPath(turn, 0, 1); rid != session.RID {
+			if rid, _ := stringAt(turn, 0, 1); rid != session.RID {
 				continue
 			}
-			candidate, _ := valuePath(turn, 3, 0, 0)
+			candidate, _ := valueAt(turn, 3, 0, 0)
 			values, _ := candidate.([]any)
-			if phase, _ := intPath(candidate, 8, 0); Phase(phase) != PhaseComplete {
+			if phase, _ := intAt(candidate, 8, 0); Phase(phase) != PhaseComplete {
 				trace.Stage("后台生成轮询", "次数", polls, "已等待", time.Since(started).Truncate(time.Second))
 				if progress != nil {
 					if err := progress(values); err != nil {
@@ -180,7 +180,7 @@ func (c *Client) awaitTurn(ctx context.Context, state *ConversationState, decode
 				}
 				break
 			}
-			hash, _ := stringPath(turn, 2, 4)
+			hash, _ := stringAt(turn, 2, 4)
 			frame := make([]any, 40)
 			frame[1] = []any{session.CID, session.RID}
 			frame[4] = []any{values}

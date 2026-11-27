@@ -88,4 +88,6 @@ type GenerateRequest struct {
 	Branch bool
 	// ClientTools 表示请求带客户端执行的工具，这类请求不使用 Temporary Chat
 	ClientTools bool
+	// OnSession 在本次尝试退出时回调，报告最终可见的会话快照，不是新建会话通知
+	OnSession func(ConversationSnapshot)
 }

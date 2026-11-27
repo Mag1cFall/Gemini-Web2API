@@ -179,12 +179,12 @@ func renderVideoCarousel(candidate []any, body []string) string {
 		if group >= len(list) {
 			continue
 		}
-		videos, _ := valuePath(list[group], 4, 0)
+		videos, _ := valueAt(list[group], 4, 0)
 		entries, _ := videos.([]any)
 		for _, entry := range entries {
-			title, _ := stringPath(entry, 0)
-			link, _ := stringPath(entry, 2)
-			channel, _ := stringPath(entry, 3)
+			title, _ := stringAt(entry, 0)
+			link, _ := stringAt(entry, 2)
+			channel, _ := stringAt(entry, 3)
 			if title == "" || link == "" {
 				continue
 			}

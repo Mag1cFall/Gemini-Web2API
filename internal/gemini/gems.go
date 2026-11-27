@@ -26,7 +26,7 @@ func (c *Client) fetchGems(ctx context.Context, bootstrap Bootstrap) ([]Gem, err
 	for _, kind := range []struct {
 		value      int
 		predefined bool
-	}{{2, false}, {1, true}, {3, true}} {
+	}{{2, false}, {1, false}, {3, true}} {
 		request, err := json.Marshal([]any{kind.value, []any{bootstrap.Language}, 0})
 		if err != nil {
 			return nil, err
@@ -65,7 +65,7 @@ func (c ModelCatalog) gems() []Gem {
 	var gems []Gem
 	for _, model := range c.models {
 		if model.Gem != "" {
-			gems = append(gems, Gem{ID: model.Gem, Name: model.DisplayName, Description: model.Description})
+			gems = append(gems, Gem{ID: model.Gem, Name: model.DisplayName, Description: model.Description, Predefined: model.PredefinedGem})
 		}
 	}
 	return gems
@@ -79,7 +79,7 @@ func (c *ModelCatalog) addGems(gems []Gem) {
 			continue
 		}
 		entry := base
-		entry.ID, entry.DisplayName, entry.Description, entry.Default, entry.Gem = GemModelPrefix+gem.ID, gem.Name, gem.Description, false, gem.ID
+		entry.ID, entry.DisplayName, entry.Description, entry.Default, entry.Gem, entry.PredefinedGem = GemModelPrefix+gem.ID, gem.Name, gem.Description, false, gem.ID, gem.Predefined
 		c.add(entry)
 	}
 }

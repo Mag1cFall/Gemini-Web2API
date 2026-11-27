@@ -73,13 +73,11 @@ export function RequestsPage() {
         toast({ tone: 'success', title: fill(m.cancelSent, { id }) })
       },
       onError: (error) => {
-        toast({
-          tone: 'error',
-          title:
-            error instanceof ApiError && error.status === 404
-              ? m.cancelGone
-              : fill(m.cancelFailed, { message: error.message }),
-        })
+        toast(
+          error instanceof ApiError && error.status === 404
+            ? { tone: 'error', title: m.cancelGone }
+            : { tone: 'error', title: m.cancelFailed, detail: error.message },
+        )
       },
     })
   }

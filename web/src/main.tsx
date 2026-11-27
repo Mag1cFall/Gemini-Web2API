@@ -37,7 +37,18 @@ queryClient.setQueryDefaults(logsKey, { structuralSharing: false, gcTime: Infini
 
 // AppToaster 以当前语言渲染提示
 function AppToaster() {
-  return <Toaster closeLabel={useMessages(appMessages).dismiss} />
+  const m = useMessages(appMessages)
+  return (
+    <Toaster
+      labels={{
+        dismiss: m.dismiss,
+        details: m.details,
+        close: m.close,
+        copy: m.copy,
+        copied: m.copied,
+      }}
+    />
+  )
 }
 
 const root = document.getElementById('root')

@@ -47,8 +47,8 @@ func RunSetup(ctx context.Context, args []string, stdin io.Reader, stdout io.Wri
 	renew := flags.Bool("renew", false, "恢复本机已保存的远程配对账号持续续签")
 	proxy := flags.String("proxy", "", "账号固定代理 URL")
 	cookieHeader := flags.String("cookie", "", "从一行 Cookie Header 导入账号")
-	cookieFile := flags.String("cookie-file", "", "从浏览器导出的 Cookie JSON 或 Netscape cookies.txt 文件导入账号")
-	accountID := flags.String("id", "", "Cookie 导入使用的账号名称")
+	cookieFile := flags.String("cookie-file", "", "从 Playwright storage-state.json、浏览器导出的 Cookie JSON 或 Netscape cookies.txt 文件导入账号")
+	accountID := flags.String("id", "", "Cookie 导入使用的账号名称，留空时按首页邮箱自动生成")
 	authUser := flags.Int("authuser", 0, "Cookie 中目标账号的序号，即官网地址 gemini.google.com/u/N/app 中的 N")
 	if err := flags.Parse(args); err != nil {
 		return err

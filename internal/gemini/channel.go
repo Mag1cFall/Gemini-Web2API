@@ -362,10 +362,10 @@ func (ch *channel) frame(ctx context.Context, raw json.RawMessage, trace *loggin
 			return true, yield(streamRecord{end: true})
 		}
 	}
-	items, _ := valuePath(message, 1, 6)
+	items, _ := valueAt(message, 1, 6)
 	list, _ := items.([]any)
 	for _, item := range list {
-		payload, ok := valuePath(item, 3, 3)
+		payload, ok := valueAt(item, 3, 3)
 		root, _ := payload.([]any)
 		if ok && root != nil {
 			if err := yield(streamRecord{payload: root}); err != nil {
@@ -386,11 +386,11 @@ func (ch *channel) frame(ctx context.Context, raw json.RawMessage, trace *loggin
 
 // channelStatus 把下行帧 __sm__ 中的 google.rpc.Status 转为生成流记录：带 BardErrorInfo 时取其错误码，状态 16 为会话认证失败
 func channelStatus(status any) streamRecord {
-	if code, ok := intPath(status, 0, 0, 2, 0, 1, 0); ok {
+	if code, ok := intAt(status, 0, 0, 2, 0, 1, 0); ok {
 		return streamRecord{bardCode: code}
 	}
-	code, _ := intPath(status, 0, 0, 0)
-	message, _ := stringPath(status, 0, 0, 1)
+	code, _ := intAt(status, 0, 0, 0)
+	message, _ := stringAt(status, 0, 0, 1)
 	if code == 16 {
 		return streamRecord{err: &ProtocolError{
 			HTTPStatus: http.StatusUnauthorized, Code: http.StatusUnauthorized, Retryable: true, Cause: ErrSignedOut,

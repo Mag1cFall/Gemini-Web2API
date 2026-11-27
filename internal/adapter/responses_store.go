@@ -50,6 +50,13 @@ func cancelResponseJob(id string) bool {
 	return true
 }
 
+// startResponseJob 登记进行中的后台任务，cancel 停止它的生成
+func startResponseJob(id string, cancel func()) {
+	responseJobs.Lock()
+	responseJobs.jobs[id] = &responseJob{cancel: cancel}
+	responseJobs.Unlock()
+}
+
 // finishResponseJob 移除后台响应并返回它是否已被取消
 func finishResponseJob(id string) bool {
 	responseJobs.Lock()
@@ -57,6 +64,41 @@ func finishResponseJob(id string) bool {
 	job := responseJobs.jobs[id]
 	delete(responseJobs.jobs, id)
 	return job != nil && job.cancelled
+}
+
+// startBackgroundJob 在独立的请求跟踪中于新协程运行后台任务 id，客户端的请求结束后任务继续，cancelResponseJob 可停止它
+// run 以脱离请求取消的 ctx 与复制的请求上下文 background 执行，返回保存结果的 save 与错误；错误按上游状态记入请求跟踪，任务没有被取消时调用 save，最后把这次请求写入账本
+func startBackgroundJob(c *gin.Context, store *requestdb.Store, id string, kind string, model string, inputs int, tools int, run func(ctx context.Context, background *gin.Context) (save func(), err error)) {
+	trace, ctx := logging.NewRequest(context.WithoutCancel(c.Request.Context()), c.Request.Method, c.Request.URL.Path, c.ClientIP())
+	trace.Begin(kind, model, false, inputs, tools)
+	startResponseJob(id, trace.Cancel)
+	background := c.Copy()
+	background.Request = c.Request.Clone(ctx)
+	go func() {
+		save, err := run(ctx, background)
+		status := http.StatusOK
+		if err != nil {
+			status = upstreamStatus(err)
+			trace.Fail(status, err.Error())
+		}
+		if !finishResponseJob(id) {
+			save()
+		}
+		store.Record(trace.Finish(status, false), nil)
+	}()
+}
+
+// detachStream 让后台流式请求在客户端断开后继续生成：返回脱离请求取消的上下文并把 id 登记为可取消的后台任务，写往客户端的输出在断开后丢弃；处理结束时调用返回的 done
+func detachStream(c *gin.Context, id string) (context.Context, func()) {
+	requestContext := c.Request.Context()
+	ctx, cancel := context.WithCancelCause(context.WithoutCancel(requestContext))
+	logging.FromContext(requestContext).Detach(cancel)
+	startResponseJob(id, func() { cancel(nil) })
+	c.Writer = &detachedWriter{ResponseWriter: c.Writer}
+	return ctx, func() {
+		finishResponseJob(id)
+		cancel(nil)
+	}
 }
 
 // storesResponse 判断响应是否保存：store 不为 false 或以后台模式创建
@@ -176,17 +218,7 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 	shell := responseShell(run.id, config.MapModel(request.Model), run.created, "queued")
 	applyRequestFields(shell, request)
 	saveResponse(c.Request.Context(), store, request, run.id, run.created, shell)
-	trace, ctx := logging.NewRequest(context.WithoutCancel(c.Request.Context()), c.Request.Method, c.Request.URL.Path, c.ClientIP())
-	trace.Begin("responses", request.Model, false, responsesInputCount(request.Input), len(request.Tools))
-	responseJobs.Lock()
-	responseJobs.jobs[run.id] = &responseJob{cancel: trace.Cancel}
-	responseJobs.Unlock()
-	background := c.Copy()
-	background.Request = c.Request.Clone(ctx)
-	c.Header("X-Response-ID", run.id)
-	c.JSON(http.StatusOK, fieldorder.Official("responses", shell))
-
-	go func() {
+	startBackgroundJob(c, store, run.id, "responses", request.Model, responsesInputCount(request.Input), len(request.Tools), func(ctx context.Context, background *gin.Context) (func(), error) {
 		running := responseShell(run.id, config.MapModel(request.Model), run.created, "in_progress")
 		applyRequestFields(running, request)
 		saveResponse(ctx, store, request, run.id, run.created, running)
@@ -200,22 +232,17 @@ func startBackgroundResponse(c *gin.Context, pool *balancer.AccountPool, store *
 			response, err = buildResponsesObject(run.id, run.created, request.PreviousResponseID, result, run.bridge, run.includeThoughts)
 		}
 		if err == nil {
-			rememberHistory(pool, result, request.Instructions, run.bridge, run.turns)
+			rememberHistory(pool, result, request.Instructions, run.bridge, run.turns, nil)
 		}
-		status := http.StatusOK
-		cancelled := finishResponseJob(run.id)
 		if err != nil {
-			status = upstreamStatus(err)
 			response = responseShell(run.id, config.MapModel(request.Model), run.created, "failed")
 			response["error"] = gin.H{"code": responsesErrorCode(err), "message": publicMessage(background, err.Error())}
-			trace.Fail(status, err.Error())
 		}
 		applyRequestFields(response, request)
-		if !cancelled {
-			saveResponse(ctx, store, request, run.id, run.created, response)
-		}
-		store.Record(trace.Finish(status, false), nil)
-	}()
+		return func() { saveResponse(ctx, store, request, run.id, run.created, response) }, err
+	})
+	c.Header("X-Response-ID", run.id)
+	c.JSON(http.StatusOK, fieldorder.Official("responses", shell))
 }
 
 // interruptedMessage 是服务重启前未完成的后台任务的错误说明
@@ -333,7 +360,6 @@ const responsePollInterval = 500 * time.Millisecond
 
 // ResponseRetrieveHandler 返回保存的响应对象；stream=true 时等后台响应结束，再按创建时的流式事件回放，starting_after 之前的事件不输出
 func ResponseRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id := c.Param("response")
 		stored, ok := storedResponseOrNotFound(c, store, id)
@@ -458,7 +484,6 @@ func ginValue(value any) any {
 
 // ResponseDeleteHandler 删除保存的响应，进行中的后台响应同时停止
 func ResponseDeleteHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id := c.Param("response")
 		if _, ok := storedResponseOrNotFound(c, store, id); !ok {
@@ -475,7 +500,6 @@ func ResponseDeleteHandler(store *requestdb.Store) gin.HandlerFunc {
 
 // ResponseCancelHandler 取消后台响应：进行中的响应停止生成并标为 cancelled，已结束的响应原样返回
 func ResponseCancelHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id := c.Param("response")
 		stored, ok := storedResponseOrNotFound(c, store, id)
@@ -583,7 +607,6 @@ func responseChainItems(ctx context.Context, store *requestdb.Store, stored requ
 
 // ResponseInputItemsHandler 按 after、before、limit 与 order 分页返回生成该响应时的输入项，未知的游标返回空页
 func ResponseInputItemsHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		limit := 20
 		if raw := c.Query("limit"); raw != "" {

@@ -43,7 +43,7 @@ function switchTheme(theme: Theme) {
   const root = document.documentElement
   root.dataset.themeSwitching = ''
   root.dataset.theme = theme
-  void getComputedStyle(document.body).color
+  getComputedStyle(document.body).getPropertyValue('color')
   requestAnimationFrame(() => {
     delete root.dataset.themeSwitching
   })

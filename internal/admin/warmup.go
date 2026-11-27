@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
@@ -86,11 +87,21 @@ func (h *handler) ping(ctx context.Context, request *logging.Request, client *ge
 	}
 	defer release()
 	request.AccountReady(account, model)
-	if _, err := client.ResolveModel(model); err != nil {
+	resolved, err := client.ResolveModel(model)
+	if err != nil {
 		return err
 	}
+	var createdCIDs []string
 	finish := ""
-	err = client.Stream(ctx, gemini.GenerateRequest{Prompt: warmupPrompt, Model: model}, func(event gemini.Event) error {
+	err = client.Stream(ctx, gemini.GenerateRequest{
+		Prompt: warmupPrompt,
+		Model:  model,
+		OnSession: func(snapshot gemini.ConversationSnapshot) {
+			if snapshot.CID != "" {
+				createdCIDs = append(createdCIDs, snapshot.CID)
+			}
+		},
+	}, func(event gemini.Event) error {
 		if event.Kind == gemini.EventError && event.Err != nil {
 			return event.Err
 		}
@@ -99,6 +110,24 @@ func (h *handler) ping(ctx context.Context, request *logging.Request, client *ge
 		}
 		return nil
 	})
+	if client.TemporaryChats() && resolved.Feature == gemini.FeatureTask && len(createdCIDs) > 0 {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		level := gemini.ThinkingLevel(0)
+		if len(resolved.ThinkingLevels) > 0 {
+			level = resolved.ThinkingLevels[0]
+		}
+		seen := make(map[string]struct{}, len(createdCIDs))
+		for _, cid := range createdCIDs {
+			if _, ok := seen[cid]; ok {
+				continue
+			}
+			seen[cid] = struct{}{}
+			if delErr := client.DeleteConversation(cleanupCtx, cid, resolved.Mode, resolved.Variant, level); delErr != nil {
+				logging.Warn(account, "删除预热网页会话失败", "会话", cid, "错误", delErr)
+			}
+		}
+	}
 	var protocolErr *gemini.ProtocolError
 	switch {
 	case err == nil:

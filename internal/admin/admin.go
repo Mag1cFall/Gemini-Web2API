@@ -89,8 +89,13 @@ func Mount(router *gin.Engine, deps Deps) {
 	api.GET("/requests/:id/body", requestdb.BodyHandler(deps.Store))
 	api.GET("/logs", requestdb.LogsHandler(deps.Store))
 	api.DELETE("/logs", func(c *gin.Context) {
-		logging.Clear()
-		if err := deps.Store.ClearLogs(c.Request.Context()); err != nil {
+		through, err := strconv.ParseInt(c.Query("through"), 10, 64)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "invalid_request", "through 必须是整数")
+			return
+		}
+		logging.ClearThrough(through)
+		if err := deps.Store.ClearLogs(c.Request.Context(), through); err != nil {
 			writeError(c, http.StatusInternalServerError, "logs_clear_failed", err.Error())
 			return
 		}
@@ -184,6 +189,10 @@ type modelInfo struct {
 	CoolingAccounts  []string `json:"cooling_accounts"`
 	// Price 为按 Gemini API 单价估算费用所用的当前单价，没有对应单价的模型没有该字段
 	Price *pricing.Price `json:"price,omitempty"`
+	// Hidden 表示该模型当前在设置中关闭、不在公开 API 中开放
+	Hidden bool `json:"hidden"`
+	// PredefinedGem 表示该条目是官网 CNgdBe 类型 3 的 Google 预置 Gem
+	PredefinedGem bool `json:"predefined_gem,omitempty"`
 }
 
 // modelTools 是官网工具条目在模型页的工具名
@@ -202,7 +211,7 @@ func (h *handler) models() []modelInfo {
 			}
 		}
 	}
-	catalog := adapter.Catalog(h.Pool)
+	catalog := adapter.AllCatalog(h.Pool)
 	models := make([]modelInfo, 0, len(catalog))
 	for _, model := range catalog {
 		levels := make([]string, 0, len(model.ThinkingLevels))
@@ -218,6 +227,7 @@ func (h *handler) models() []modelInfo {
 			AliasOf: model.AliasOf, Tool: modelTools[model.Feature], Capabilities: nonNil(model.Capabilities), ThinkingLevels: levels,
 			MinContextWindow: model.MinInputTokenLimit, MaxContextWindow: model.MaxInputTokenLimit,
 			Accounts: nonNil(model.Accounts), CoolingAccounts: nonNil(cooling[target]),
+			Hidden: model.Hidden, PredefinedGem: model.PredefinedGem,
 		}
 		if price, ok := pricing.Lookup(target, now); ok {
 			info.Price = &price

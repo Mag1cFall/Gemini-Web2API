@@ -654,8 +654,7 @@ func (r *Request) setPhaseLocked(phase requestPhase, now time.Time) {
 }
 
 func (r *Request) publishLocked(level string, source string, name string, message string, fields []Field) {
-	parsed, _ := ParseLevel(level)
-	if !Enabled(parsed) {
+	if !Enabled(Level(level)) {
 		return
 	}
 	var info RequestInfo

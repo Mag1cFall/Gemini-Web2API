@@ -562,6 +562,14 @@ func (c *Client) stream(ctx context.Context, request GenerateRequest, emit func(
 	next.Turns++
 	next.Saved = !temporaryChat
 	decodeState := NewConversationStateFrom(next)
+	if request.OnSession != nil {
+		defer func() {
+			if snapshot := decodeState.Snapshot(); snapshot.CID != "" {
+				snapshot.ModelMode = model.Mode
+				request.OnSession(snapshot)
+			}
+		}()
+	}
 	withDownload := func(event Event) error {
 		if event.Media != nil && event.Media.download != nil {
 			event.Media.download.mode, event.Media.download.variant, event.Media.download.level, event.Media.download.temporaryChat = model.Mode, model.Variant, request.ThinkingLevel, temporaryChat
@@ -680,17 +688,67 @@ func (c *Client) TemporaryChats() bool {
 	return !c.guest && !c.saveHistory
 }
 
-// DeleteConversation 从账号的网页历史中删除会话，mode 为会话所用模型的模式
-func (c *Client) DeleteConversation(ctx context.Context, cid string, mode int) error {
+// DeleteConversation 按官网侧栏删除流程从账号的网页历史中删除会话：先发送 DeleteConversation（GzXR5e），成功后按官网前端订阅逻辑发送 GetTasksInConversation（qWymEb），若返回关联任务再逐条发送 DeleteTask（Q4Gw3c）；mode、variant 与 level 为会话所用模型的模式、变体键与思考强度
+func (c *Client) DeleteConversation(ctx context.Context, cid string, mode int, variant string, level ThinkingLevel) error {
 	bootstrap, err := c.bootstrapSnapshot()
 	if err != nil {
 		return err
 	}
 	payload, _ := json.Marshal([]string{cid})
-	_, err = c.batchExecute(ctx, bootstrap, batchRequest{
-		rpcID: "GzXR5e", payload: string(payload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]", mode: mode,
+	if _, err = c.batchExecute(ctx, bootstrap, batchRequest{
+		rpcID: "GzXR5e", payload: string(payload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]",
+		mode: mode, variant: variant, level: level,
+	}); err != nil {
+		return err
+	}
+	tasksPayload, _ := json.Marshal([]any{cid, []any{1, nil, 0, 1}})
+	tasks, err := c.batchExecute(ctx, bootstrap, batchRequest{
+		rpcID: "qWymEb", payload: string(tasksPayload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]",
+		mode: mode, variant: variant, level: level,
 	})
-	return err
+	if err != nil {
+		logging.Warn(c.accountID, "读取已删除会话关联任务失败", "会话", cid, "错误", err)
+		return nil
+	}
+	for _, taskID := range conversationTaskIDs(tasks) {
+		deletePayload, _ := json.Marshal([]any{nil, []string{taskID}})
+		if _, err := c.batchExecute(ctx, bootstrap, batchRequest{
+			rpcID: "Q4Gw3c", payload: string(deletePayload), sourcePath: "/app", language: bootstrap.Language, extension: "[0]",
+			mode: mode, variant: variant, level: level,
+		}); err != nil {
+			logging.Warn(c.accountID, "删除已删除会话关联任务失败", "会话", cid, "任务", taskID, "错误", err)
+		}
+	}
+	return nil
+}
+
+// conversationTaskIDs 从 qWymEb（GetTasksInConversation）响应 payload[0] 提取各条异步任务的 taskId（item[0]），跳过占位 ID 并保序去重
+func conversationTaskIDs(payload []any) []string {
+	if len(payload) == 0 {
+		return nil
+	}
+	items, ok := payload[0].([]any)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	var ids []string
+	for _, raw := range items {
+		item, ok := raw.([]any)
+		if !ok {
+			continue
+		}
+		id, _ := stringAt(item, 0)
+		if id == "" || id == "agency-placeholder-task-id" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // Models 返回当前账号初始化得到的模型目录
@@ -816,12 +874,15 @@ var rpcActions = map[string]string{
 	listGemsRPC:    "读取 Gem 列表",
 	"NkpXw":        "通知官网停止生成",
 	"GzXR5e":       "删除网页会话",
+	"qWymEb":       "读取会话关联任务",
+	"Q4Gw3c":       "删除会话关联任务",
 	"F6qrid":       "读取服务条款版本",
 	"UVb0T":        "同意服务条款",
 	"L5adhe":       "保存账号偏好",
 	"c8o8Fe":       "读取原图下载地址",
 	"hNvQHb":       "读取会话中的回答",
 	speechRPC:      "生成朗读音频",
+	usageRPC:       "读取用量",
 }
 
 // batchRequest 是一次 batchexecute RPC 的参数，mode、variant 与 level 为页面当前选中的模型 mode、变体键与思考强度，页面加载阶段为零值
@@ -841,6 +902,20 @@ type batchRequest struct {
 
 // batchExecute 以页面 XHR 发送单个 batchexecute RPC 并返回其 payload
 func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call batchRequest) ([]any, error) {
+	body, err := c.postBatch(ctx, bootstrap, call)
+	if err != nil {
+		return nil, err
+	}
+	return rpcPayload(bytes.NewReader(body), call.rpcID, func(record []any) error {
+		if record == nil {
+			return retryableProtocolError("上游没有返回数据", nil)
+		}
+		return rpcStatusError(rpcActions[call.rpcID], record)
+	})
+}
+
+// postBatch 以页面 XHR 发送单个 batchexecute RPC，返回状态为 200 的响应正文
+func (c *Client) postBatch(ctx context.Context, bootstrap Bootstrap, call batchRequest) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
 	started := time.Now()
@@ -876,30 +951,41 @@ func (c *Client) batchExecute(ctx context.Context, bootstrap Bootstrap, call bat
 	if resp.StatusCode != http.StatusOK {
 		return nil, responseStatusError(resp, rpcActions[rpcID])
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, transportProtocolError(rpcActions[rpcID], err)
+	}
+	return body, nil
+}
 
-	var payload []any
-	found := false
-	err = scanProtocolRecords(resp.Body, func(record []any) error {
-		tag, _ := stringAt(record, 0)
-		recordID, _ := stringAt(record, 1)
-		if tag != "wrb.fr" || recordID != rpcID {
-			return nil
+// rpcPayload 读出响应中 RPC 名为 rpcID 的 wrb.fr 记录并解析其 JSON 载荷，rpcID 为空时取任意 wrb.fr 记录（ProcessFile 的记录不带 RPC 名）
+// 记录不带载荷时返回 empty(record)，响应中没有该记录时返回 empty(nil)
+func rpcPayload(reader io.Reader, rpcID string, empty func(record []any) error) ([]any, error) {
+	var record []any
+	err := scanProtocolRecords(reader, func(item []any) error {
+		tag, _ := stringAt(item, 0)
+		id, _ := stringAt(item, 1)
+		if tag == "wrb.fr" && (rpcID == "" || id == rpcID) {
+			record = item
 		}
-		encoded, _ := stringAt(record, 2)
-		if encoded == "" {
-			return rpcStatusError(rpcActions[rpcID], record)
-		}
-		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("解析上游响应失败: %w", err)
-		}
-		found = true
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		return nil, retryableProtocolError("上游没有返回数据", nil)
+	if len(record) <= 2 || record[2] == nil {
+		return nil, empty(record)
+	}
+	encoded, ok := record[2].(string)
+	if !ok {
+		return nil, fmt.Errorf("解析上游响应失败: %w", errors.New("unexpected payload type"))
+	}
+	if encoded == "" {
+		return nil, empty(record)
+	}
+	var payload []any
+	if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
+		return nil, fmt.Errorf("解析上游响应失败: %w", err)
 	}
 	return payload, nil
 }

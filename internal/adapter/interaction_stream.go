@@ -15,7 +15,6 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/fieldorder"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
-	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/requestdb"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/streamio"
 	"github.com/gin-gonic/gin"
@@ -242,16 +241,9 @@ func streamInteraction(c *gin.Context, pool *balancer.AccountPool, store *reques
 	setSSEHeaders(c)
 	ctx := c.Request.Context()
 	if run.request.Background {
-		requestContext := ctx
-		detached, cancel := context.WithCancelCause(context.WithoutCancel(requestContext))
-		defer cancel(nil)
-		logging.FromContext(requestContext).Detach(cancel)
-		ctx = detached
-		responseJobs.Lock()
-		responseJobs.jobs[run.id] = &responseJob{cancel: func() { cancel(nil) }}
-		responseJobs.Unlock()
-		defer finishResponseJob(run.id)
-		c.Writer = &detachedWriter{ResponseWriter: c.Writer}
+		var done func()
+		ctx, done = detachStream(c, run.id)
+		defer done()
 		saveInteraction(ctx, store, run, run.object("in_progress", nil))
 	}
 	keepalive, stop := startStreamWriter(c, openAIKeepalive, !run.request.Background)
@@ -322,28 +314,14 @@ func interactionCitations(object gin.H) []gemini.Citation {
 func startBackgroundInteraction(c *gin.Context, pool *balancer.AccountPool, store *requestdb.Store, run interactionRun) {
 	started := run.object("in_progress", nil)
 	saveInteraction(c.Request.Context(), store, run, started)
-	trace, ctx := logging.NewRequest(context.WithoutCancel(c.Request.Context()), c.Request.Method, c.Request.URL.Path, c.ClientIP())
-	trace.Begin("interactions", run.model, false, len(run.input), len(run.request.Tools))
-	responseJobs.Lock()
-	responseJobs.jobs[run.id] = &responseJob{cancel: trace.Cancel}
-	responseJobs.Unlock()
-	background := c.Copy()
-	background.Request = c.Request.Clone(ctx)
-	c.JSON(http.StatusOK, fieldorder.Official("interactions", started))
-
-	go func() {
+	startBackgroundJob(c, store, run.id, "interactions", run.model, len(run.input), len(run.request.Tools), func(ctx context.Context, background *gin.Context) (func(), error) {
 		object, _, err := run.execute(background, ctx, pool, nil, nil)
-		status := http.StatusOK
 		if err != nil {
-			status = upstreamStatus(err)
 			object = failedInteraction(background, run, err)
-			trace.Fail(status, err.Error())
 		}
-		if !finishResponseJob(run.id) {
-			saveInteraction(ctx, store, run, object)
-		}
-		store.Record(trace.Finish(status, false), nil)
-	}()
+		return func() { saveInteraction(ctx, store, run, object) }, err
+	})
+	c.JSON(http.StatusOK, fieldorder.Official("interactions", started))
 }
 
 // storedInteraction 读取保存的交互，不存在时写入 404

@@ -28,7 +28,7 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **Images**: supports multimodal input, image generation, and image editing; generated images are returned at full size through the official "Download full size image" request
 - **Official tools**: Create video, Create music, Canvas, Deep Research, Guided Learning, and Task mode are available as separate model IDs
 - **Multi-account balancing**: schedules Google accounts by model availability; usage limits cool down only the affected model and rate limits cool down the whole account, with configurable concurrency and routing strategy
-- **Guest session**: when no account is available, serves the models the Gemini website offers without sign-in (currently `gemini-3.5-flash-lite`, without website tools or attachment uploads) through a signed-out session; ready accounts are always preferred
+- **Guest session**: when no account is available, serves the models the Gemini website offers without sign-in (without website tools or attachment uploads) through a signed-out session; ready accounts are always preferred
 - **Console and desktop app**: the web console shows ready-made client configuration, live logs, active requests, usage and cost statistics, account import and management, the model catalog, settings, and a playground; desktop apps for Windows, macOS, and Linux add a tray icon, single instance, and launch at login
 - **Run logs**: colored columnar console logs that record each request's start, account selection, uploads, first output, account switches, waits, and completion
 - **Request ledger**: SQLite stores per-request usage, with statistics by model, account, and protocol and cost estimates at Gemini API prices
@@ -42,27 +42,27 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 | Model ID | Name | Website description / capability | Input window | Default |
 | --- | --- | --- | ---: | --- |
 | `gemini-4-hydrogen` | 4 Hydrogen | All-around help | 32,768-1,048,576 | Yes |
-| `gemini-3.5-flash-lite` | 3.5 Flash-Lite | Quick answers | 32,768-1,048,576 |  |
 | `gemini-4-carbon` | 4 Carbon | Most complex work | 32,768-1,048,576 |  |
-| `gemini-4-argon` | 4 Argon | Code & analysis | 32,768-1,048,576 |  |
-| `gemini-auto` | Auto | Adapts to your needs (free accounts) | 32,768 |  |
-| `gemini-4-hydrogen-task`, `gemini-4-carbon-task`, `gemini-4-argon-task` | Task | Tasks performed on your behalf |  |  |
+| `gemini-4-neon` | 4 Neon | Deeper analysis | 32,768-1,048,576 |  |
+| `gemini-auto` | Auto | Adapts to your needs | 32,768-1,048,576 |  |
+| `gemini-4-hydrogen-task`, `gemini-4-carbon-task`, `gemini-4-neon-task` | Task | Tasks performed on your behalf |  |  |
 | `gemini-default` | Default | Each account's official default model |  |  |
 | `gemini-3.1-flash-image` | Nano Banana 2 | Image generation and editing |  |  |
 | `gemini-video` | Video | Video generation |  |  |
 | `gemini-music` | Music | Music generation |  |  |
-| `gemini-canvas` | Canvas | Documents and code |  |  |
+| `gemini-canvas` | Canvas | Documents and code (hidden by default; toggle on Models page) |  |  |
 | `gemini-deep-research` | Deep Research | Research reports |  |  |
-| `gemini-guided-learning` | Guided Learning | Guided learning |  |  |
+| `gemini-guided-learning` | Guided Learning | Guided learning (hidden by default; toggle on Models page) |  |  |
 
 - **Model catalog**: at startup the service reads each account's live Gemini Web model catalog and official tools; `/v1/models` is the runtime source of truth. IDs are derived from the model names in the website menu, the website's usage descriptions become `description`, and new models appear automatically; model IDs may carry a `models/` or `google/` prefix
-- **Model renames**: when the website renames or replaces the model in the same menu position, the old ID keeps working and resolves to the renamed model, and `/v1/models` lists the old ID with `alias_of` pointing to its current ID; renames are stored in `data/requests.db` and survive restarts, and old IDs in `MODEL_MAPPING`, `MODEL_ACCOUNTS`, and `FIRST_EVENT_HEDGE_MODELS` keep working
+- **Visible models**: the Models page in the console toggles whether each model is exposed in the API, writing `HIDDEN_MODELS` back to `.env` and taking effect immediately; `gemini-canvas`, `gemini-guided-learning`, and Google pre-made Gems (`predefined-gems`) are hidden by default while custom Gems, regular models, and newly added upstream models stay open; hidden models are omitted from `/v1/models` and return 403 stating the model is closed in settings
+- **Model renames**: when the website renames the same backend model in the same menu position, the old ID keeps working and resolves to the renamed model, and `/v1/models` lists the old ID with `alias_of` pointing to its current ID; when a different model takes over the position, the previous model's ID is retired with it. Renames are stored in `data/requests.db` and survive restarts, and old IDs in `MODEL_MAPPING`, `MODEL_ACCOUNTS`, and `FIRST_EVENT_HEDGE_MODELS` keep working
 - **Subscription tiers**: a model that only a higher subscription tier offers returns 403 with the required tier and the current accounts' tiers
 - **Catalog fields**: `available_account_count` is the number of usable accounts, `default` marks the default model, and `thinking_levels` lists the available thinking levels
 - **Tool models**: tool IDs appear only for accounts that have the corresponding official tool and run on that account's official default model
 - **Images**: the image ID works with conversational image requests and `/v1/images/*`; `size` and `imageConfig.aspectRatio` support 1:1, 9:16, 3:4, 4:3, 16:9, 2:3, 21:9, 1:8, and 8:1
 - **Video**: for video IDs, `imageConfig.aspectRatio` supports landscape 16:9 and portrait 9:16
-- **Chat history**: Task, Deep Research, and video requests use saved chats, which remain in the account history
+- **Chat history**: Task, Deep Research, and video requests use saved chats; Deep Research and video chats remain in the account history, and with `GEMINI_SAVE_HISTORY=false` (the default) a Task chat is deleted from the account together with its task record once generation has ended for over a minute without a follow-up, or when the service stops
 - **Deep Research**: the research plan and progress are returned as reasoning and the report as text, with the report's citations returned as web sources in each protocol's citation fields; a run usually takes over ten minutes, so set the client request timeout longer than that
 - **Quotas**: context windows, model access, and quotas depend on the account's plan and region; account usage is shown on the admin Accounts page
 - **Token usage**: text input, visible output, and reasoning summaries are counted with a local Gemini tokenizer; the token counting endpoints estimate images, audio, video, and PDFs with the Gemini API counting rules
@@ -75,13 +75,14 @@ Convert Google Gemini Web into OpenAI, Claude, and Gemini compatible APIs.
 - **macOS desktop app**: macOS 13 or later, universal for Apple silicon and Intel
 - **Linux desktop app**: x86_64 or arm64 with GTK 3 and WebKitGTK 4.1: on Ubuntu 22.04 run `sudo apt install libwebkit2gtk-4.1-0` first; Ubuntu 24.04, Debian 12, and newer desktop systems include it
 - **CLI build and Docker**: no extra dependencies
-- **Running from source**: Go 1.27, Node.js 22 or later, and pnpm
+- **Running from source**: Go 1.27.4 or later, Node.js 22.22+ or 24+, and pnpm
 
 ### One-click Windows start
 
 Download the `windows-amd64.zip` package from [Releases](https://github.com/Mag1cFall/Gemini-Web2API/releases), extract it, and double-click `gemini-web2api.exe`:
 
 - The console opens in a desktop window that uses the system WebView2 runtime; the app stays in the tray after the window closes, and the tray menu copies the API address and toggles launch at login
+- The window runs in its own process; if it fails and exits, the API and the tray keep running and the window can be reopened from the tray
 - Double-clicking `gemini-web2api.exe` again brings back the running window
 - Import accounts from local Chrome, cookies, or remote pairing on the console's Import account page
 - `.env`, `auth/`, and `data/` all live in the folder containing `gemini-web2api.exe`
@@ -119,31 +120,44 @@ pnpm -C web build
 go build -tags nomsgpack -o gemini-web2api.exe ./cmd/gemini-web2api
 ```
 
-On Windows, import accounts already signed into the local Chrome installation:
+On first use on Windows, run the interactive setup to import accounts already signed into the local Chrome installation; other import methods are in the next section:
 
 ```powershell
 .\gemini-web2api.exe setup
 ```
 
-`setup` scans local Chrome accounts and briefly starts an isolated temporary Chrome process to read the App-Bound master key. Existing Chrome windows and profiles remain untouched.
+Daily startup is:
 
-An account can also be selected directly. When a profile is signed in to several Google accounts, each account is listed and imported separately:
+```powershell
+.\gemini-web2api.exe
+```
+
+The default auth directory is `auth`, and the default listener is `127.0.0.1:8007`. While the service is running, import accounts on the console's Import account page; when the `auth` directory that setup would write to is in use by a running service, setup exits with a message.
+
+### Importing accounts from the command line
+
+Setup writes the account to `auth/<account>/storage-state.json` and verifies the live model catalog. How each import method renews is described in [Accounts and sign-in state](#accounts-and-sign-in-state).
+
+Select an account signed in to Chrome directly. When a profile is signed in to several Google accounts, each account is listed and imported separately:
 
 ```powershell
 .\gemini-web2api.exe setup --email "name@example.com"
 ```
 
-You can also paste the one-line value of a request's `Cookie` header. This state works while those cookies remain valid and cannot perform OAuth renewal:
+Paste the one-line value of a request's `Cookie` header:
 
 ```powershell
-.\gemini-web2api.exe setup --cookie "SAPISID=...; __Secure-1PSID=..." --id account-name
+.\gemini-web2api.exe setup --cookie "SAPISID=...; __Secure-1PSID=..."
 ```
 
-Import a cookie JSON exported by a browser extension or a Netscape `cookies.txt` file with `--cookie-file`:
+Import Playwright `storage-state.json`, browser-exported cookie JSON, and Netscape `cookies.txt` files with `--cookie-file`, or paste them into the console's Import from cookie form:
 
 ```powershell
-.\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name
+.\gemini-web2api.exe setup --cookie-file storage-state.json
 ```
+
+- Without `--id`, `--cookie` and `--cookie-file` name the account after the signed-in email
+- A `storage-state.json` that includes `accounts.google.com` session cookies automatically obtains `gemini.google.com` `OSID` cookies during initialization
 
 When the cookies come from a browser signed in to several Google accounts, select the account with `--authuser`, the `N` in `gemini.google.com/u/N/app` (default 0). The console's cookie import lists the accounts signed in to the pasted cookies automatically:
 
@@ -151,21 +165,17 @@ When the cookies come from a browser signed in to several Google accounts, selec
 .\gemini-web2api.exe setup --cookie-file cookies.txt --id account-name --authuser 1
 ```
 
-When the service runs on a server without Chrome, generate a pairing token on the console's Import account page, then upload accounts from a computer signed in to Chrome. The token is read from standard input. Remote addresses other than the local machine require HTTPS; through an SSH tunnel such as `ssh -L 8007:127.0.0.1:8007 <server>`, use `http://127.0.0.1:8007`. After uploading Chrome-imported accounts, `setup --remote` stays running on the source computer to renew and upload fresh sessions before expiry; if closed, resume renewal with `setup --remote <url> --renew`:
+> **Give one set of sign-in cookies to one service only**: while running, the service rotates sign-in cookies (`__Secure-1PSIDTS`) every 10 minutes. When the same login session cookies are also used by another running service, rotation signs out the other side. Migrate the session, or sign in separately to get an independent session before importing.
+
+When the service runs on a server without Chrome, generate a pairing token on the console's Import account page, then run the command below on a computer signed in to Chrome to upload accounts to the server:
 
 ```powershell
 .\gemini-web2api.exe setup --email "name@example.com" --remote https://example.com
 ```
 
-Setup creates `auth/<account>/storage-state.json` and verifies the live model catalog. Chrome import also saves the OAuth renewal material and device-bound session parameters needed to renew cookies after Chrome exits. While the service is running, import accounts on the console's Import account page; when the `auth` directory that setup would write to is in use by a running service, setup exits with a message. Daily startup is:
-
-```powershell
-.\gemini-web2api.exe
-```
-
-The default auth directory is `auth`, and the default listener is `127.0.0.1:8007`. Linux and macOS can use a copied `auth` directory: accounts whose `storage-state.json` has `wrappedBindingKey` (renewal material bound to the original device) work until their cookies expire and can be kept renewed from the original Windows device with `setup --remote`; other Chrome-imported accounts renew automatically on any system.
-
-While running, the service rotates each account's sign-in cookies every 10 minutes, as the Gemini website does, and refreshes the device-bound session of Chrome-imported accounts with the local device key before its bound cookies expire. Cookies that change in a response are written back to `auth/<account>/storage-state.json` and reused after a restart. Chrome-imported accounts renew automatically when their session expires.
+- The token is read from standard input
+- Remote addresses other than the local machine require HTTPS; through an SSH tunnel such as `ssh -L 8007:127.0.0.1:8007 <server>`, use `http://127.0.0.1:8007`
+- After uploading Chrome-imported accounts, `setup --remote` stays running on the source computer to renew and upload fresh sessions before expiry; if closed, resume renewal with `setup --remote <url> --renew`
 
 ### Optional configuration
 
@@ -194,12 +204,19 @@ docker compose up -d
 - Run `docker compose restart` after editing `data/.env`; settings in the `environment` section of `docker-compose.yml` are set by the container environment and are read-only in the console
 - The container time zone defaults to UTC, which log timestamps and daily usage rollups follow; for a local time zone add a zone name such as `TZ: Asia/Shanghai` to `environment` in `docker-compose.yml`
 
-### Proxy
+## Accounts and sign-in state
+
+- **Chrome import**: setup scans local Chrome accounts and briefly starts an isolated temporary Chrome process to read the App-Bound master key; existing Chrome windows and profiles remain untouched. The import saves the OAuth renewal material and device-bound session parameters needed to renew cookies after Chrome exits, and the account renews automatically when its session expires
+- **Cookie import**: works while those cookies remain valid and cannot perform OAuth renewal; import again after they expire
+- **Cookie rotation**: while running, the service rotates each account's sign-in cookies every 10 minutes, as the Gemini website does, and refreshes the device-bound session of Chrome-imported accounts with the local device key before its bound cookies expire. Cookies that change in a response are written back to `auth/<account>/storage-state.json` and reused after a restart
+- **Linux and macOS**: a copied `auth` directory works. Accounts whose `storage-state.json` has `wrappedBindingKey` (renewal material bound to the original device) work until their cookies expire and can be kept renewed from the original Windows device with `setup --remote`; other Chrome-imported accounts renew automatically on any system
+
+## Proxy
 
 `PROXY` is the proxy pool, comma-separated, for example `PROXY=socks5://127.0.0.1:1080,http://user:pass@10.0.0.2:7890`. Supported schemes are `http`, `https`, `socks4`, `socks4a`, `socks5` and `socks5h`. In the console, edit it one proxy per line under Settings → Service → Egress proxy; changes apply on save.
 
 - **Assignment**: accounts without a fixed proxy and the guest session each stay bound to one proxy; a new account goes to the proxy with the fewest accounts, the earlier one in the list on a tie. When the proxy list changes, accounts are rebalanced with the fewest moves
-- **Checks**: at startup, every 5 minutes, when an account fails to connect, and when you click Check now in the console, the service requests the Gemini home page through each proxy
+- **Checks**: at startup, every 5 minutes, when an account fails to connect, and when you click Check now in the console, the service requests the Gemini home page through each proxy; a proxy blocked by the Google CAPTCHA page is paused for 2 hours and skipped by checks meanwhile
 - **Failover**: accounts on an unavailable proxy move to an available proxy and re-initialize; when every proxy is unavailable, accounts keep their proxy
 - **Status**: the proxy pool card on the settings page shows each proxy's status, latency and the accounts using it
 - **System proxy**: when `PROXY` is empty, the `HTTPS_PROXY` environment variable is used; without it, Windows uses the system proxy setting (per-protocol settings are taken in the order https, http, socks, and socks is SOCKS4); otherwise connections are direct
@@ -247,11 +264,16 @@ GET    /v1/models
 ```
 
 - **Responses**: stored in `data/requests.db` for 30 days by default and can be retrieved, have their input items listed, and be deleted; `store: false` skips storage. `background: true` returns `queued` immediately for later polling or cancellation
-- **Continuation**: by default every request starts a new web conversation with the full conversation; Responses `previous_response_id` fills in the earlier turns from the stored response chain and returns 404 when that response is not stored, `conversation` fills them in from the responses stored under that ID and starts a new conversation when none are stored, and the other continuation fields (`previous_response_id` and conversation IDs on Chat, Anthropic and Gemini, and the `X-Conversation-ID` header) return 400. With `GEMINI_CONTINUE_SESSION=true` (experimental), multi-turn conversations continue the web conversation of the previous turn, send only the new messages and return the conversation ID: `previous_response_id` and conversation IDs keep working across service restarts within `SESSION_TTL`, and clients that resend the full history continue the same web conversation when the history matches the previous answer
+- **Continuation**:
+  - By default every request starts a new web conversation with the full conversation: Responses `previous_response_id` fills in the earlier turns from the stored response chain and returns 404 when that response is not stored; `conversation` fills them in from the responses stored under that ID and starts a new conversation when none are stored; the other continuation fields (`previous_response_id` and conversation IDs on Chat, Anthropic and Gemini, and the `X-Conversation-ID` header) return 400
+  - With `GEMINI_CONTINUE_SESSION=true` (experimental), multi-turn conversations continue the web conversation of the previous turn, send only the new messages and return the conversation ID: `previous_response_id` and conversation IDs keep working across service restarts within `SESSION_TTL`, and clients that resend the full history continue the same web conversation when the history matches the previous answer
 - **Files**: uploaded files are stored in `data/files/` and referenced from generation requests by `file_id`; `expires_after` sets the expiry by the OpenAI rules, `purpose=batch` files are deleted after 30 days by default, and when all files together exceed 4 GiB the oldest are deleted first
 - **Speech**: `/v1/audio/speech` uses the website's read-aloud feature and returns mp3, opus, wav, flac, or pcm; `voice` and `speed` have no effect
 - **Transcription and translation**: performed by the selected chat model
-- **Video**: `/v1/videos` uses `gemini-video`, and `input_reference` (`image_url` or `file_id`) in a JSON request becomes the first frame; generated videos and thumbnails are kept for 48 hours, and the video object's `expires_at` is the expiry time; `remix` and `extensions` continue in the Gemini Web conversation of a completed video generated by this service, an extension returns the stitched full video, and `seconds` is the actual duration
+- **Video**:
+  - `/v1/videos` uses `gemini-video`, and `input_reference` (`image_url` or `file_id`) in a JSON request becomes the first frame
+  - Generated videos and thumbnails are kept for 48 hours, and the video object's `expires_at` is the expiry time
+  - `remix` and `extensions` continue in the Gemini Web conversation of a completed video generated by this service, an extension returns the stitched full video, and `seconds` is the actual duration
 - **Capabilities Gemini Web lacks**: the Embeddings, Moderations, and Realtime endpoints return 404 `model_not_found`
 
 ### Claude compatible
@@ -322,6 +344,8 @@ MCP clients connect to `http://127.0.0.1:8007/mcp` over Streamable HTTP with the
 GET  /readyz
 ```
 
+### Authentication and account selection
+
 Authentication accepts `Authorization: Bearer xxx`, `?key=xxx`, `x-goog-api-key`, and `x-api-key`. Without `PROXY_API_KEY`, only web pages opened from a local address can call the API from a browser; pages on other sites need a key configured on the service and sent with each request.
 
 The `X-Gemini-Web2API-Account: <account ID>` request header routes the request to that account only, using the ID shown on the admin "All accounts" page, intersected with the accounts the API key may use: an unknown account returns 400, an account outside the API key's accounts returns 403, and a cooling or unavailable account returns an error that states the reason.
@@ -335,9 +359,26 @@ Open `http://127.0.0.1:8007/` in a browser for the console, which uses the `/api
 - **Warm up**: Warm up on the All accounts page sends one minimal generation request for each selected account and model and lists the result, duration, and failure reason per row; the requests appear in the request records; disabled accounts can be warmed up too and stay disabled afterwards
 - **Listen port**: when the configured port falls inside a range reserved by Windows (Hyper-V, WSL2, Docker), the service listens on the next available port and the console shows the actual address at the top
 - **Remote access**: only local connections are accepted by default; with `ADMIN_AUTH_ENABLED=true`, `ADMIN_PASSWORD`, and `LISTEN_ADDR` on an externally reachable address, other devices can sign in; after 5 consecutive failed sign-ins from one client, sign-in from that client returns 429 with `Retry-After` for 60 seconds
-- **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service and forward the client address in `X-Forwarded-For`; in nginx, use `proxy_set_header Host $http_host;` and `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. The client address forwarded by a reverse proxy on the same machine is used for the local-access check, sign-in rate limiting, and request records. The service also works under a subpath, for example nginx `location /gemini/ { proxy_pass http://127.0.0.1:8007/; proxy_set_header Host $http_host; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_buffering off; }`; open the console at `/gemini/` and add the same prefix to client base URLs
-- **Applying settings**: settings saved in the console are written back to `.env`, and values equal to the default are removed from it; the listen address, auth paths, and log format take effect after a restart, and everything else applies immediately; invalid values in `.env` run with the default and are listed at the top of the settings page; settings set by process environment variables or `--auth` and `--listen` show their source and are read-only
-- **Online update**: the About page shows the latest GitHub release and its notes; after confirmation the command-line and desktop builds download the package for the current platform, verify its SHA-256, replace the executable, and restart into the new version, showing download progress meanwhile; the new version deletes the replaced files when it starts; downloads go through the first proxy in `PROXY`, or the system proxy when it is unset; Docker deployments update with the image
+- **Reverse proxy**: the proxy must pass the browser's original `Host` header to the service and forward the client address in `X-Forwarded-For`; the client address forwarded by a reverse proxy on the same machine is used for the local-access check, sign-in rate limiting, and request records. The service also works under a subpath: open the console at that subpath and add the same prefix to client base URLs. nginx example:
+
+  ```nginx
+  location /gemini/ {
+      proxy_pass http://127.0.0.1:8007/;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_buffering off;
+  }
+  ```
+
+- **Applying settings**:
+  - Settings saved in the console are written back to `.env`, and values equal to the default are removed from it
+  - The listen address, auth paths, and log format take effect after a restart, and everything else applies immediately
+  - Invalid values in `.env` run with the default and are listed at the top of the settings page
+  - Settings set by process environment variables or `--auth` and `--listen` show their source and are read-only
+- **Online update**:
+  - The About page shows the latest GitHub release and its notes; after confirmation the command-line and desktop builds download the package for the current platform, verify its SHA-256, replace the executable, and restart into the new version, showing download progress meanwhile; the new version deletes the replaced files when it starts
+  - Downloads go through the first proxy in `PROXY`, or the system proxy when it is unset
+  - Docker deployments update with the image
 
 ## Example
 
@@ -368,6 +409,7 @@ Use `http://127.0.0.1:8007/v1` as the OpenAI SDK base URL. Claude and Google Gen
 | `PROXY_API_KEY` | Local 2API access keys, comma-separated | empty |
 | `PROXY` | Proxy pool, comma-separated | empty |
 | `MODEL_MAPPING` | External model name to current model ID mapping | empty |
+| `HIDDEN_MODELS` | Model IDs hidden from the API, comma-separated (`predefined-gems` hides all Google pre-made Gems; set empty to expose all models) | `gemini-canvas,gemini-guided-learning,predefined-gems` |
 | `ACCOUNT_COOLDOWN` | Cooldown after an upstream account failure; upstream rate limits start at 1 minute and double on repeats, up to 10 minutes | `2m` |
 | `SESSION_TTL` | Lifetime of explicit session state | `30m` |
 | `INIT_TIMEOUT` | Per-account startup timeout | `20s` |
@@ -385,9 +427,14 @@ Use `http://127.0.0.1:8007/v1` as the OpenAI SDK base URL. Claude and Google Gen
 | `ACCOUNT_ORDER` | Account IDs that `fill-first` uses in turn among accounts with the same context window, separated by commas | empty |
 | `MODEL_ACCOUNTS` | Accounts each model may use, as `model-id:account\|account` items separated by commas | empty |
 | `FIRST_EVENT_HEDGE` | First-output backup request: `auto`, a wait in seconds, or `off` | `auto` |
-| `FIRST_EVENT_HEDGE_MODELS` | Model IDs that send first-output backup requests, separated by commas | `gemini-4-carbon,gemini-4-argon` |
+| `FIRST_EVENT_HEDGE_MODELS` | Model IDs that send first-output backup requests, separated by commas | `gemini-4-carbon` |
 
-`MODEL_MAPPING` takes comma-separated `alias:model-id` pairs. Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval. With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts starting from a random position; with `fill-first`, the first idle account is preferred: accounts with the largest context window come first, accounts with the same window follow the `ACCOUNT_ORDER` order, and unlisted accounts follow in import order. Keys missing from `API_KEY_ACCOUNTS` can use every account; listed keys use only their accounts and never the guest session. Models missing from `MODEL_ACCOUNTS` can use every account; listed models pick only from their accounts, together with `API_KEY_ACCOUNTS`. The model details on the console's Models page can also set these accounts. `FIRST_EVENT_HEDGE` sends the same request from another idle account when the original has not returned its first event for a while and uses whichever answers first; `auto` uses the p95 first-event wait of each model over the last 24 hours.
+- `MODEL_MAPPING` takes comma-separated `alias:model-id` pairs
+- Accounts that fail startup initialization retry at the `ACCOUNT_COOLDOWN` interval
+- With `ROUTING_STRATEGY=round-robin`, requests rotate across accounts starting from a random position; with `fill-first`, the first idle account is preferred: accounts with the largest context window come first, accounts with the same window follow the `ACCOUNT_ORDER` order, and unlisted accounts follow in import order
+- Keys missing from `API_KEY_ACCOUNTS` can use every account; listed keys use only their accounts and never the guest session
+- Models missing from `MODEL_ACCOUNTS` can use every account; listed models pick only from their accounts, together with `API_KEY_ACCOUNTS`. The model details on the console's Models page can also set these accounts
+- `FIRST_EVENT_HEDGE` sends the same request from another idle account when the original has not returned its first event for a while and uses whichever answers first; `auto` uses the p95 first-event wait of each model over the last 24 hours
 
 The `--auth` and `--listen` flags override auth paths and the listener address; `--open-ui` controls whether the console opens in the browser after startup, and defaults to on when the program starts without arguments.
 

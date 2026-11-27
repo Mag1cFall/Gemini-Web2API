@@ -2,6 +2,7 @@ import { CircleAlert, LoaderCircle } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { ClampText } from '@/components/ui/clamp'
 import { PageHeader } from '@/components/ui/page'
 
 // useDelayedFlag 让加载指示延迟 200ms 出现，出现后至少保持 300ms
@@ -147,9 +148,9 @@ export function ErrorState({
       </span>
       <div className="flex max-w-prose flex-col gap-1">
         <p className="text-md font-semibold">{title}</p>
-        <p className="text-sm break-words text-foreground-muted">
+        <ClampText className="text-sm wrap-anywhere text-foreground-muted">
           {error instanceof Error ? error.message : String(error)}
-        </p>
+        </ClampText>
       </div>
       {onRetry && <Button onClick={onRetry}>{retryLabel}</Button>}
     </div>

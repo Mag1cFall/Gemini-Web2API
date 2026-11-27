@@ -2,14 +2,9 @@ package chromeauth
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"math/big"
 	"regexp"
 	"slices"
 	"strings"
@@ -131,43 +126,17 @@ func signBoundChallenge(wrappedKey []byte, challenge string) (string, error) {
 		return "", err
 	}
 	defer bindingKey.Close()
-	publicKey, _, err := bindingKey.PublicKey()
-	if err != nil {
-		return "", err
-	}
-	return signBoundRefresh(bindingKey, publicKey, challenge)
+	return signBoundRefresh(bindingKey, challenge)
 }
 
 // signBoundRefresh 按 DBSC 规范与 Chromium CreateKeyRefreshHeaderAndPayload 签发 dbsc+jwt 刷新证明
-func signBoundRefresh(bindingKey deviceBindingKey, publicKey *ecdsa.PublicKey, challenge string) (string, error) {
-	header, err := json.Marshal(struct {
+func signBoundRefresh(bindingKey deviceBindingKey, challenge string) (string, error) {
+	return signJWT(bindingKey, struct {
 		Algorithm string `json:"alg"`
 		Type      string `json:"typ"`
-	}{"ES256", "dbsc+jwt"})
-	if err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(struct {
+	}{"ES256", "dbsc+jwt"}, struct {
 		JWTID string `json:"jti"`
 	}{challenge})
-	if err != nil {
-		return "", err
-	}
-	signingInput := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
-	signature, err := bindingKey.SignSHA256([]byte(signingInput))
-	if err != nil {
-		return "", err
-	}
-	if len(signature) != 64 {
-		return "", fmt.Errorf("NCrypt ECDSA 签名长度异常")
-	}
-	digest := sha256.Sum256([]byte(signingInput))
-	r := new(big.Int).SetBytes(signature[:32])
-	s := new(big.Int).SetBytes(signature[32:])
-	if !ecdsa.Verify(publicKey, digest[:], r, s) {
-		return "", fmt.Errorf("NCrypt ECDSA 签名校验失败")
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
 // boundRefreshStatusError 按 Chromium RegistrationFetcher 把 5xx 与 429 归为传输层错误，其余非 2xx 状态归为会话被拒

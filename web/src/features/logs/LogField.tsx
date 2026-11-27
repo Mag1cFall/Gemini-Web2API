@@ -1,4 +1,4 @@
-import { ClampText } from '@/features/logs/ClampText'
+import { ClampText } from '@/components/ui/clamp'
 import type { LogFieldEntry } from '@/features/logs/types'
 import { serverText } from '@/lib/i18n'
 

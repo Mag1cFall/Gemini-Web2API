@@ -2,6 +2,7 @@ package config
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -16,13 +17,17 @@ import (
 // MinLogTotalMB 是日志目录总量上限的最小值，容纳当前文件与一个轮转文件
 const MinLogTotalMB = 20
 
+// PredefinedGemsSelector 在 HIDDEN_MODELS 中表示官网 CNgdBe 类型 3 的全部 Google 预置 Gem
+const PredefinedGemsSelector = "predefined-gems"
+
 // Defaults 是 .env 全部配置项的默认值写法，与默认值相同的项不写入 .env
 var Defaults = map[string]string{
 	"LISTEN_ADDR": "127.0.0.1:8007", "GEMINI_AUTH_STATES": "auth", "PROXY_API_KEY": "", "PROXY": "",
-	"ACCOUNT_COOLDOWN": "2m", "SESSION_TTL": "30m", "INIT_TIMEOUT": "20s", "MODEL_MAPPING": "", "GEMINI_SAVE_HISTORY": "false", "GEMINI_CONTINUE_SESSION": "false",
+	"ACCOUNT_COOLDOWN": "2m", "SESSION_TTL": "30m", "INIT_TIMEOUT": "20s", "MODEL_MAPPING": "", "HIDDEN_MODELS": "gemini-canvas,gemini-guided-learning," + PredefinedGemsSelector,
+	"GEMINI_SAVE_HISTORY": "false", "GEMINI_CONTINUE_SESSION": "false",
 	"LOG_LEVEL": "info", "LOG_FORMAT": "text", "REQUEST_BODY_LOG": "false", "LOG_FILE": "true", "LOG_MAX_TOTAL_MB": "500",
 	"PER_ACCOUNT_CONCURRENCY": "1", "ROUTING_STRATEGY": "round-robin", "ADMIN_AUTH_ENABLED": "false", "ADMIN_USERNAME": "admin",
-	"ADMIN_PASSWORD": "", "API_KEY_ACCOUNTS": "", "FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-carbon,gemini-4-argon",
+	"ADMIN_PASSWORD": "", "API_KEY_ACCOUNTS": "", "FIRST_EVENT_HEDGE": "auto", "FIRST_EVENT_HEDGE_MODELS": "gemini-4-carbon",
 	"NONSTREAM_KEEPALIVE": "true", "FAKE_STREAM": "false",
 	"ACCOUNT_ORDER": "", "MODEL_ACCOUNTS": "",
 }
@@ -44,7 +49,9 @@ type Config struct {
 	SessionTTL      time.Duration
 	InitTimeout     time.Duration
 	ModelMapping    map[string]string
-	SaveHistory     bool
+	// HiddenModels 是在公开 API 中关闭的模型 ID 或 predefined-gems 列表
+	HiddenModels []string
+	SaveHistory  bool
 	// ContinueSession 为真时后续请求续接已登记的网页会话，为假时每个请求新建网页会话
 	ContinueSession bool
 	// NonstreamKeepalive 为真时非流式请求等待结果期间每 10 秒写出一个换行
@@ -84,22 +91,26 @@ type Config struct {
 var (
 	modelMapping = map[string]string{}
 	mappingMu    sync.RWMutex
+
+	hiddenMu        sync.RWMutex
+	hiddenModelList []string
+	hiddenModelSet  map[string]bool
+	hidePredefined  bool
 )
+
+func init() {
+	SetHiddenModels(NormalizeHiddenModels(Defaults["HIDDEN_MODELS"]))
+}
 
 // Load 从环境变量读取配置，取值无效的项改用默认值并记入 Invalid
 func Load() Config {
 	cfg := Config{
-		ListenAddress:         envOrDefault("LISTEN_ADDR"),
 		AuthStatePaths:        SplitList(os.Getenv("GEMINI_AUTH_STATES")),
 		ProxyAPIKey:           strings.TrimSpace(os.Getenv("PROXY_API_KEY")),
 		ProxyURL:              strings.TrimSpace(os.Getenv("PROXY")),
-		LogLevel:              strings.ToLower(envOrDefault("LOG_LEVEL")),
-		LogFormat:             strings.ToLower(envOrDefault("LOG_FORMAT")),
-		RoutingStrategy:       strings.ToLower(envOrDefault("ROUTING_STRATEGY")),
 		AdminUsername:         envOrDefault("ADMIN_USERNAME"),
 		AdminPassword:         os.Getenv("ADMIN_PASSWORD"),
 		AccountOrder:          SplitList(os.Getenv("ACCOUNT_ORDER")),
-		FirstEventHedge:       strings.ToLower(envOrDefault("FIRST_EVENT_HEDGE")),
 		FirstEventHedgeModels: SplitList(envOrDefault("FIRST_EVENT_HEDGE_MODELS")),
 	}
 	reject := func(key string, reason string) {
@@ -109,72 +120,41 @@ func Load() Config {
 		}
 		cfg.Invalid = append(cfg.Invalid, InvalidValue{Key: key, Value: value, Reason: reason})
 	}
-	if _, _, err := net.SplitHostPort(cfg.ListenAddress); err != nil {
-		reject("LISTEN_ADDR", "必须是 主机:端口")
-		cfg.ListenAddress = Defaults["LISTEN_ADDR"]
+	value := func(key string) string {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			return Defaults[key]
+		}
+		normalized, err := Validate(key, raw)
+		if err != nil {
+			reject(key, err.Error())
+			return Defaults[key]
+		}
+		return normalized
 	}
+	cfg.ListenAddress = value("LISTEN_ADDR")
+	cfg.LogLevel = value("LOG_LEVEL")
+	cfg.LogFormat = value("LOG_FORMAT")
+	cfg.RoutingStrategy = value("ROUTING_STRATEGY")
+	cfg.FirstEventHedge = value("FIRST_EVENT_HEDGE")
 	for key, target := range map[string]*bool{
 		"GEMINI_SAVE_HISTORY": &cfg.SaveHistory, "GEMINI_CONTINUE_SESSION": &cfg.ContinueSession, "REQUEST_BODY_LOG": &cfg.RequestBodyLog,
 		"ADMIN_AUTH_ENABLED": &cfg.AdminAuthEnabled, "LOG_FILE": &cfg.LogFile,
 		"NONSTREAM_KEEPALIVE": &cfg.NonstreamKeepalive, "FAKE_STREAM": &cfg.FakeStream,
 	} {
-		*target, _ = strconv.ParseBool(Defaults[key])
-		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
-			value, err := strconv.ParseBool(raw)
-			if err != nil {
-				reject(key, "必须是 true 或 false")
-				continue
-			}
-			*target = value
-		}
+		*target, _ = strconv.ParseBool(value(key))
 	}
 	for key, target := range map[string]*int{"LOG_MAX_TOTAL_MB": &cfg.LogMaxTotalMB, "PER_ACCOUNT_CONCURRENCY": &cfg.PerAccountConcurrency} {
-		*target, _ = strconv.Atoi(Defaults[key])
-		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
-			value, err := strconv.Atoi(raw)
-			if err != nil || value < 1 {
-				reject(key, "必须是正整数")
-				continue
-			}
-			*target = value
-		}
-	}
-	if cfg.LogMaxTotalMB < MinLogTotalMB {
-		reject("LOG_MAX_TOTAL_MB", fmt.Sprintf("不能小于 %d", MinLogTotalMB))
-		cfg.LogMaxTotalMB, _ = strconv.Atoi(Defaults["LOG_MAX_TOTAL_MB"])
+		*target, _ = strconv.Atoi(value(key))
 	}
 	for key, target := range map[string]*time.Duration{
 		"ACCOUNT_COOLDOWN": &cfg.AccountCooldown, "SESSION_TTL": &cfg.SessionTTL, "INIT_TIMEOUT": &cfg.InitTimeout,
 	} {
-		*target, _ = time.ParseDuration(Defaults[key])
-		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
-			value, err := time.ParseDuration(raw)
-			if err != nil || value <= 0 {
-				reject(key, "必须是正数时长，例如 30s 或 2m")
-				continue
-			}
-			*target = value
-		}
-	}
-	if !slices.Contains([]string{"debug", "info", "warn", "error"}, cfg.LogLevel) {
-		reject("LOG_LEVEL", "取 debug、info、warn 或 error")
-		cfg.LogLevel = Defaults["LOG_LEVEL"]
-	}
-	if cfg.LogFormat != "text" && cfg.LogFormat != "json" {
-		reject("LOG_FORMAT", "取 text 或 json")
-		cfg.LogFormat = Defaults["LOG_FORMAT"]
-	}
-	if cfg.RoutingStrategy != "round-robin" && cfg.RoutingStrategy != "fill-first" {
-		reject("ROUTING_STRATEGY", "取 round-robin 或 fill-first")
-		cfg.RoutingStrategy = Defaults["ROUTING_STRATEGY"]
+		*target, _ = time.ParseDuration(value(key))
 	}
 	if cfg.AdminAuthEnabled && cfg.AdminPassword == "" {
 		reject("ADMIN_AUTH_ENABLED", "开启管理登录前先设置 ADMIN_PASSWORD")
 		cfg.AdminAuthEnabled = false
-	}
-	if err := ValidateFirstEventHedge(cfg.FirstEventHedge); err != nil {
-		reject("FIRST_EVENT_HEDGE", err.Error())
-		cfg.FirstEventHedge = Defaults["FIRST_EVENT_HEDGE"]
 	}
 	bindings, err := ParseAPIKeyAccounts(os.Getenv("API_KEY_ACCOUNTS"), cfg.ProxyAPIKey)
 	if err != nil {
@@ -189,10 +169,80 @@ func Load() Config {
 		reject("MODEL_MAPPING", err.Error())
 	}
 	cfg.ModelMapping = mapping
+	hiddenRaw, hiddenSet := os.LookupEnv("HIDDEN_MODELS")
+	if !hiddenSet {
+		hiddenRaw = Defaults["HIDDEN_MODELS"]
+	}
+	cfg.HiddenModels = NormalizeHiddenModels(hiddenRaw)
 	slices.SortFunc(cfg.Invalid, func(a, b InvalidValue) int { return strings.Compare(a.Key, b.Key) })
 
 	SetModelMapping(cfg.ModelMapping)
+	SetHiddenModels(cfg.HiddenModels)
 	return cfg
+}
+
+// NormalizeHiddenModels 解析逗号分隔的隐藏模型名单，规范为小写、去前缀与去重排序后的切片
+func NormalizeHiddenModels(value string) []string {
+	items := SplitList(value)
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		normalized := normalizeHiddenEntry(item)
+		if normalized != "" {
+			result = append(result, normalized)
+		}
+	}
+	slices.Sort(result)
+	return slices.Compact(result)
+}
+
+// FormatHiddenModels 返回隐藏模型名单写入 .env 的规范逗号分隔字符串
+func FormatHiddenModels(models []string) string {
+	return strings.Join(NormalizeHiddenModels(strings.Join(models, ",")), ",")
+}
+
+// SetHiddenModels 替换当前生效的隐藏模型名单
+func SetHiddenModels(models []string) {
+	normalized := NormalizeHiddenModels(strings.Join(models, ","))
+	set := make(map[string]bool, len(normalized))
+	predefined := false
+	for _, item := range normalized {
+		if item == PredefinedGemsSelector {
+			predefined = true
+			continue
+		}
+		set[item] = true
+	}
+	hiddenMu.Lock()
+	hiddenModelList = normalized
+	hiddenModelSet = set
+	hidePredefined = predefined
+	hiddenMu.Unlock()
+}
+
+// HiddenModels 返回当前生效的隐藏模型名单副本
+func HiddenModels() []string {
+	hiddenMu.RLock()
+	defer hiddenMu.RUnlock()
+	return slices.Clone(hiddenModelList)
+}
+
+// IsModelHidden 判断指定模型 ID 或 Google 预置 Gem 是否在设置中关闭
+func IsModelHidden(id string, predefinedGem bool) bool {
+	key := normalizeHiddenEntry(id)
+	hiddenMu.RLock()
+	defer hiddenMu.RUnlock()
+	if predefinedGem && hidePredefined {
+		return true
+	}
+	return key != "" && hiddenModelSet[key]
+}
+
+// normalizeHiddenEntry 去掉首尾空白、models/ 或 google/ 前缀与 [1m] 后缀并转为小写
+func normalizeHiddenEntry(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimSuffix(value, "[1m]")
+	value = strings.TrimPrefix(value, "models/")
+	return strings.TrimPrefix(value, "google/")
 }
 
 // SetModelMapping 替换当前模型别名映射
@@ -226,6 +276,54 @@ func envOrDefault(key string) string {
 	return cmp.Or(strings.TrimSpace(os.Getenv(key)), Defaults[key])
 }
 
+// Validate 校验配置项 key 的取值并返回规范写法，取值无效时返回不含项名的原因；取值不受限的项原样返回
+func Validate(key string, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	switch key {
+	case "LISTEN_ADDR":
+		if _, _, err := net.SplitHostPort(value); err != nil {
+			return "", errors.New("必须是 主机:端口")
+		}
+	case "GEMINI_SAVE_HISTORY", "GEMINI_CONTINUE_SESSION", "REQUEST_BODY_LOG", "ADMIN_AUTH_ENABLED", "LOG_FILE", "NONSTREAM_KEEPALIVE", "FAKE_STREAM":
+		if _, err := strconv.ParseBool(value); err != nil {
+			return "", errors.New("必须是 true 或 false")
+		}
+	case "LOG_MAX_TOTAL_MB", "PER_ACCOUNT_CONCURRENCY":
+		number, err := strconv.Atoi(value)
+		if err != nil || number < 1 {
+			return "", errors.New("必须是正整数")
+		}
+		if key == "LOG_MAX_TOTAL_MB" && number < MinLogTotalMB {
+			return "", fmt.Errorf("不能小于 %d", MinLogTotalMB)
+		}
+	case "ACCOUNT_COOLDOWN", "SESSION_TTL", "INIT_TIMEOUT":
+		if duration, err := time.ParseDuration(value); err != nil || duration <= 0 {
+			return "", errors.New("必须是正数时长，例如 30s 或 2m")
+		}
+	case "LOG_LEVEL":
+		value = strings.ToLower(value)
+		if !slices.Contains([]string{"debug", "info", "warn", "error"}, value) {
+			return "", errors.New("取 debug、info、warn 或 error")
+		}
+	case "LOG_FORMAT":
+		value = strings.ToLower(value)
+		if value != "text" && value != "json" {
+			return "", errors.New("取 text 或 json")
+		}
+	case "ROUTING_STRATEGY":
+		value = strings.ToLower(value)
+		if value != "round-robin" && value != "fill-first" {
+			return "", errors.New("取 round-robin 或 fill-first")
+		}
+	case "FIRST_EVENT_HEDGE":
+		value = strings.ToLower(value)
+		if seconds, err := strconv.Atoi(value); value != "off" && value != "auto" && (err != nil || seconds < 1) {
+			return "", errors.New("取 off、auto 或正整数秒")
+		}
+	}
+	return value, nil
+}
+
 // FormatModelMapping 按别名排序输出 MODEL_MAPPING 格式的映射
 func FormatModelMapping(mapping map[string]string) string {
 	pairs := make([]string, 0, len(mapping))
@@ -246,17 +344,6 @@ func SplitList(value string) []string {
 		}
 	}
 	return result
-}
-
-// ValidateFirstEventHedge 检查首事件备用请求方式是 off、auto 或正整数秒
-func ValidateFirstEventHedge(value string) error {
-	if value == "off" || value == "auto" {
-		return nil
-	}
-	if seconds, err := strconv.Atoi(value); err != nil || seconds < 1 {
-		return fmt.Errorf("取 off、auto 或正整数秒")
-	}
-	return nil
 }
 
 // ParseAPIKeyAccounts 解析逗号分隔的“API key:账号|账号”绑定，跳过不在 apiKeys 中的 key，无效项与重复的 key 跳过并返回错误，其余绑定照常返回

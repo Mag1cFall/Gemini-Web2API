@@ -7,6 +7,7 @@ import type { RequestInfo } from '@/features/requests/types'
 // sample 构造一条服务日志样例
 function sample(overrides: Partial<LogEntry>): LogEntry {
   return {
+    seq: 1,
     time: '2026-10-14T10:00:00Z',
     level: 'INFO',
     source: 'service',

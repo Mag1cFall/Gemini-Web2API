@@ -1,3 +1,4 @@
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Boxes } from 'lucide-react'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
@@ -7,23 +8,57 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardEmpty, CardHeader, CountBadge, PageHeader } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
 import { ErrorState, PagePlaceholder } from '@/components/ui/states'
+import { Switch } from '@/components/ui/switch'
 import { Table, Td, Th } from '@/components/ui/table'
+import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { modelsMessages } from '@/features/models/messages'
 import { ModelDetailSheet } from '@/features/models/ModelDetailSheet'
-import { useModels } from '@/features/models/queries'
+import { modelsKey, useModels } from '@/features/models/queries'
+import type { Model } from '@/features/models/types'
+import { toggleHiddenModels } from '@/features/models/visibility'
+import { configKey, useConfig } from '@/features/settings/queries'
+import type { ServiceConfig } from '@/features/settings/types'
+import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
 import { fill, plural, useI18n, useMessages } from '@/lib/i18n'
 
-// ModelsPage 列出公开模型目录，搜索词写入地址的 q 参数，点模型名称打开详情
+// ModelsPage 列出全部模型目录并逐个切换 API 开放状态，保存到模型目录刷新完成前禁用全部开关，搜索词写入地址的 q 参数，点模型名称打开详情
 export function ModelsPage() {
   const m = useMessages(modelsMessages)
   const app = useMessages(appMessages)
   const { language } = useI18n()
   const [params, setParams] = useSearchParams()
   const q = params.get('q') ?? ''
+  const client = useQueryClient()
   const models = useModels()
+  const config = useConfig()
   const [selected, setSelected] = useState<string | null>(null)
+  const toggle = useMutation({
+    mutationFn: ({ target, open }: { target: Model; open: boolean }) => {
+      const hidden_models = toggleHiddenModels(
+        config.data?.hidden_models ?? '',
+        target,
+        models.data?.models ?? [],
+        open,
+      )
+      return api<ServiceConfig>('/api/config', {
+        method: 'PUT',
+        json: { hidden_models },
+      })
+    },
+    onSuccess: async (data, { target, open }) => {
+      client.setQueryData(configKey, data)
+      toast({
+        tone: 'success',
+        title: fill(open ? m.accessOpened : m.accessClosed, { model: target.id }),
+      })
+      await client.invalidateQueries({ queryKey: modelsKey })
+    },
+    onError: (error) => {
+      toast({ tone: 'error', title: m.saveFailed, detail: error.message })
+    },
+  })
   if (models.isPending) {
     return <PagePlaceholder title={m.title} description={m.description} label={m.title} />
   }
@@ -37,13 +72,16 @@ export function ModelsPage() {
       />
     )
   }
+  const allModels = models.data.models
+  const locked = Boolean(config.data?.locked.HIDDEN_MODELS)
   const needle = q.trim().toLowerCase()
-  const rows = models.data.models.filter(
+  const rows = allModels.filter(
     (model) =>
       !needle ||
       model.id.toLowerCase().includes(needle) ||
       model.display_name.toLowerCase().includes(needle),
   )
+  const openCount = rows.filter((model) => !model.hidden).length
   return (
     <>
       <PageHeader title={m.title} description={m.description} />
@@ -52,7 +90,12 @@ export function ModelsPage() {
           title={m.catalog}
           actions={
             <>
-              <CountBadge>{formatNumber(rows.length, language)}</CountBadge>
+              <CountBadge>
+                {fill(m.openCount, {
+                  open: formatNumber(openCount, language),
+                  total: formatNumber(rows.length, language),
+                })}
+              </CountBadge>
               <SearchInput
                 aria-label={m.search}
                 placeholder={m.search}
@@ -68,7 +111,7 @@ export function ModelsPage() {
             </>
           }
         />
-        {models.data.models.length === 0 ? (
+        {allModels.length === 0 ? (
           <CardEmpty icon={<Boxes size={20} aria-hidden />}>
             <span className="flex flex-col gap-1">
               <span>{m.empty}</span>
@@ -84,13 +127,36 @@ export function ModelsPage() {
                 <Th className="@max-[860px]:hidden">{m.thinking}</Th>
                 <Th className="text-right @max-[640px]:hidden">{m.context}</Th>
                 <Th>{m.accounts}</Th>
+                <Th className="text-right">{m.apiAccess}</Th>
               </tr>
             </thead>
             <tbody>
               {rows.map((model) => {
                 const capabilities = model.capabilities.join(' · ') || m.none
+                const hidden = Boolean(model.hidden)
+                const control = model.alias_of ? (
+                  <Tooltip label={fill(m.accessFollowsTarget, { target: model.alias_of })}>
+                    <span className="inline-flex">
+                      <Badge tone={hidden ? 'neutral' : 'success'}>
+                        {hidden ? m.hidden : m.open}
+                      </Badge>
+                    </span>
+                  </Tooltip>
+                ) : (
+                  <Switch
+                    aria-label={fill(m.toggleAccess, { model: model.id })}
+                    checked={!hidden}
+                    disabled={locked || !config.data || toggle.isPending}
+                    onCheckedChange={(open) => {
+                      toggle.mutate({ target: model, open })
+                    }}
+                  />
+                )
                 return (
-                  <tr key={model.id} className="hover:bg-hover">
+                  <tr
+                    key={model.id}
+                    className={hidden ? 'opacity-70 hover:bg-hover' : 'hover:bg-hover'}
+                  >
                     <Td className="whitespace-nowrap">
                       <div className="flex flex-col gap-1">
                         <div className="flex h-6 items-center gap-2">
@@ -105,6 +171,7 @@ export function ModelsPage() {
                             {model.display_name || model.id}
                           </button>
                           {model.default && <Badge tone="info">{m.default}</Badge>}
+                          {hidden && <Badge tone="neutral">{m.hidden}</Badge>}
                         </div>
                         <span className="font-mono text-xs text-foreground-muted">
                           {model.id}
@@ -140,6 +207,17 @@ export function ModelsPage() {
                         )}
                       </div>
                     </Td>
+                    <Td className="text-right whitespace-nowrap">
+                      <div className="flex justify-end">
+                        {locked && !model.alias_of ? (
+                          <Tooltip label={m.accessLockedEnv}>
+                            <span className="inline-flex">{control}</span>
+                          </Tooltip>
+                        ) : (
+                          control
+                        )}
+                      </div>
+                    </Td>
                   </tr>
                 )
               })}
@@ -148,7 +226,7 @@ export function ModelsPage() {
         )}
       </Card>
       <ModelDetailSheet
-        model={models.data.models.find((model) => model.id === selected) ?? null}
+        model={allModels.find((model) => model.id === selected) ?? null}
         onClose={() => {
           setSelected(null)
         }}

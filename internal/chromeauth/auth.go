@@ -64,14 +64,15 @@ type ImportOptions struct {
 	Emails       []string
 }
 
-// pendingImport 是通过验证后写入 path 的认证状态与验证请求使用的代理
+// pendingImport 是通过验证后写入 path 的认证状态与验证请求使用的代理；path 为空时在验证首页邮箱后写入 output/<id>/storage-state.json
 type pendingImport struct {
 	state        auth.StorageState
 	path         string
+	output       string
 	requestProxy string
 }
 
-// CookieImportOptions 保存 Cookie 导入参数，Cookies 为 Cookie Header、浏览器导出的 JSON 或 Netscape cookies.txt
+// CookieImportOptions 保存 Cookie 导入参数，Cookies 为 Cookie Header、Playwright storage-state.json、浏览器导出的 JSON 或 Netscape cookies.txt
 type CookieImportOptions struct {
 	Cookies string
 	ID      string
@@ -117,11 +118,14 @@ func Refresh(ctx context.Context, material auth.OAuthMaterial, chrome int, langu
 	return auth.GeminiCookies(toStorageCookies(cookies)), bound, nil
 }
 
-// ImportCookies 从 Cookie 文本生成账号状态，返回状态文件路径与模型数
+// ImportCookies 从 Cookie 文本生成账号状态，返回状态文件路径与模型数；ID 留空时在验证通过后按首页邮箱自动生成
 func ImportCookies(ctx context.Context, options CookieImportOptions) (string, int, error) {
-	id := AccountID(options.ID)
-	if id == "" {
-		return "", 0, fmt.Errorf("id 必须包含英文字母或数字")
+	id := ""
+	if strings.TrimSpace(options.ID) != "" {
+		id = AccountID(options.ID)
+		if id == "" {
+			return "", 0, fmt.Errorf("id 必须包含英文字母或数字")
+		}
 	}
 	if options.AuthUser < 0 {
 		return "", 0, fmt.Errorf("authuser 不能为负数")
@@ -130,7 +134,10 @@ func ImportCookies(ctx context.Context, options CookieImportOptions) (string, in
 	if err != nil {
 		return "", 0, err
 	}
-	path := filepath.Join(options.Output, id, storageFileName)
+	path := ""
+	if id != "" {
+		path = filepath.Join(options.Output, id, storageFileName)
+	}
 	metadata, requestProxy, err := importIdentity(path, auth.Metadata{
 		ID: id, Proxy: options.Proxy, Source: auth.ImportSource{Browser: "cookie-header"},
 		Language: defaultImportLanguage, AuthUser: options.AuthUser,
@@ -138,10 +145,10 @@ func ImportCookies(ctx context.Context, options CookieImportOptions) (string, in
 	if err != nil {
 		return "", 0, err
 	}
-	pending := pendingImport{state: auth.StorageState{Cookies: cookies, Metadata: metadata}, path: path, requestProxy: requestProxy}
+	pending := pendingImport{state: auth.StorageState{Cookies: cookies, Metadata: metadata}, path: path, output: options.Output, requestProxy: requestProxy}
 	paths, modelCount, err := validateAndWriteImports(ctx, []pendingImport{pending})
 	if err != nil {
-		return "", 0, err
+		return "", 0, withMissingCookieHint(cookies, err)
 	}
 	return paths[0], modelCount, nil
 }
@@ -224,7 +231,9 @@ func missingValues(requested map[string]struct{}, found map[string]struct{}) []s
 // importIdentity 返回写入 path 的账号身份与导入请求使用的代理：账号已导入过时沿用它的停用标记、Chrome 版本与未重新填写的固定代理，新账号按版本池占比分配 Chrome 版本
 func importIdentity(path string, metadata auth.Metadata, fallback string) (auth.Metadata, string, error) {
 	metadata.Proxy = strings.TrimSpace(metadata.Proxy)
-	metadata = auth.Inherit(path, metadata)
+	if path != "" {
+		metadata = auth.Inherit(path, metadata)
+	}
 	if !gemini.IsChromeVersion(metadata.Chrome) {
 		metadata.Chrome = gemini.PickChromeVersion()
 	}
@@ -327,8 +336,9 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 	models := make(map[string]struct{})
 	for index := range pending {
 		item := &pending[index]
+		sourceID := cmp.Or(item.state.Metadata.ID, "cookie")
 		source := gemini.AccountSource{
-			ID: item.state.Metadata.ID, Cookies: auth.GeminiCookies(item.state.Cookies),
+			ID: sourceID, Cookies: auth.GeminiCookies(item.state.Cookies),
 			Language: item.state.Metadata.Language, AuthUser: item.state.Metadata.AuthUser, Chrome: item.state.Metadata.Chrome,
 			Save: func(cookies []gemini.Cookie) error {
 				item.state.Cookies = auth.StateCookies(cookies)
@@ -337,7 +347,7 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 		}
 		client, err := gemini.NewClient(source, item.requestProxy, false)
 		if err != nil {
-			return nil, 0, fmt.Errorf("验证账号 %s: %w", item.state.Metadata.ID, err)
+			return nil, 0, fmt.Errorf("验证账号 %s: %w", sourceID, err)
 		}
 		accountContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err = client.Init(accountContext)
@@ -347,9 +357,19 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 			}
 		}
 		cancel()
+		email := client.Email()
 		client.CloseIdleConnections()
 		if err != nil {
-			return nil, 0, fmt.Errorf("验证账号 %s: %w", item.state.Metadata.ID, withImportProxyHint(item.requestProxy, err))
+			return nil, 0, fmt.Errorf("验证账号 %s: %w", sourceID, withImportProxyHint(item.requestProxy, err))
+		}
+		if item.state.Metadata.ID == "" {
+			id := AccountID(email)
+			if id == "" {
+				return nil, 0, fmt.Errorf("未从首页识别到账号邮箱，请通过 --id 指定账号名称")
+			}
+			item.state.Metadata.ID = id
+			item.path = filepath.Join(item.output, id, storageFileName)
+			item.state.Metadata = auth.Inherit(item.path, item.state.Metadata)
 		}
 		for _, model := range client.Models() {
 			models[model.ID] = struct{}{}

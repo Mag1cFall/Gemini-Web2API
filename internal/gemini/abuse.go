@@ -3,6 +3,7 @@ package gemini
 import (
 	"context"
 	"strconv"
+	"time"
 )
 
 // AbuseStatus 是官网页面加载时 GPRiHf 返回的账号异常状态，Restricted 为假表示没有异常标记
@@ -26,22 +27,40 @@ func (c *Client) fetchAbuseStatus(ctx context.Context, bootstrap Bootstrap) (Abu
 	return parseAbuseStatus(payload), nil
 }
 
-// parseAbuseStatus 解析 GPRiHf 载荷：正常账号为 []，有异常标记时 [1][1] 除以 1000000 为状态码，[1][3][1] 为信号
+// parseAbuseStatus 按官网前端解析 GPRiHf 载荷：正常账号为 []；存在《使用限制政策》警告时 payload[0] 为告警记录，[0][0] 为签发微秒时间戳，[0][2][0] 为违规类型码（两者非零时官网弹出使用限制警告卡片）
 func parseAbuseStatus(payload []any) AbuseStatus {
-	info, _ := arrayAt(payload, 1)
+	info, _ := arrayAt(payload, 0)
 	if len(info) == 0 {
 		return AbuseStatus{}
 	}
-	status := AbuseStatus{Restricted: true}
-	raw, _ := valuePath(info, 1)
-	switch raw := raw.(type) {
-	case float64:
-		status.Code = int(raw) / 1000000
-	case string:
-		if value, err := strconv.ParseInt(raw, 10, 64); err == nil {
-			status.Code = int(value / 1000000)
-		}
+	issued := unixSecondsMicro(info, 0)
+	code, _ := intAt(info, 2, 0)
+	if issued == 0 || code == 0 {
+		return AbuseStatus{}
 	}
-	status.Signal, _ = stringPath(info, 3, 1)
-	return status
+	return AbuseStatus{
+		Restricted: true,
+		Code:       code,
+		Signal:     time.Unix(issued, 0).UTC().Format(time.RFC3339),
+	}
+}
+
+// unixSecondsMicro 读取微秒时间戳字段并换算为 Unix 秒，兼容 JSON 数字与字符串编码
+func unixSecondsMicro(values []any, path ...int) int64 {
+	raw, ok := valueAt(values, path...)
+	if !ok {
+		return 0
+	}
+	switch value := raw.(type) {
+	case float64:
+		return int64(value) / 1_000_000
+	case string:
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return parsed / 1_000_000
+	default:
+		return 0
+	}
 }

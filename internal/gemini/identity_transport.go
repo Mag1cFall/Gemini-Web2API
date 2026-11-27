@@ -23,8 +23,8 @@ const chromeTLSHandshakeTimeout = 30 * time.Second
 // chromeConnectTimeoutSeconds 是建立 TCP 连接与代理隧道的时限，单位秒
 const chromeConnectTimeoutSeconds = 30
 
-// chromeIdleConnTimeout 是空闲 HTTP/2 连接保留的时长
-const chromeIdleConnTimeout = 90 * time.Second
+// chromeIdleConnTimeout 是空闲 HTTP/2 连接保留的时长，与 Chromium kUsedIdleSocketTimeout（300 秒）一致
+const chromeIdleConnTimeout = 5 * time.Minute
 
 // chromeWeights 是 Chrome 按 priority 请求头的紧急度 u 写入 HEADERS 帧的权重减一，即 Chromium Spdy3PriorityToHttp2Weight(u) - 1
 var chromeWeights = [8]uint8{255, 219, 182, 146, 109, 73, 36, 0}

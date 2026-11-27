@@ -10,7 +10,7 @@ import { settingsMessages } from '@/features/settings/messages'
 import { proxiesKey, useProxies } from '@/features/settings/queries'
 import type { ProxyStatus } from '@/features/settings/types'
 import { api } from '@/lib/api'
-import { fill, serverText, useMessages } from '@/lib/i18n'
+import { serverText, useMessages } from '@/lib/i18n'
 
 // ProxyPoolCard 列出代理池中每个代理的检测结果、延迟与绑定的账号，可立即检测，代理池为空时不显示
 export function ProxyPoolCard() {
@@ -23,7 +23,7 @@ export function ProxyPoolCard() {
       client.setQueryData(proxiesKey, data)
     },
     onError: (error) => {
-      toast({ tone: 'error', title: fill(m.poolCheckFailed, { message: error.message }) })
+      toast({ tone: 'error', title: m.poolCheckFailed, detail: error.message })
     },
   })
   if (!proxies.data?.length) return null

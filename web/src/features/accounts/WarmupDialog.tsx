@@ -5,6 +5,7 @@ import { Link } from 'react-router'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ClampText } from '@/components/ui/clamp'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Table, Td, Th } from '@/components/ui/table'
 import { DisabledHint, Tooltip } from '@/components/ui/tooltip'
@@ -107,7 +108,9 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
   const sm = useMessages(accountStateMessages)
   const { language } = useI18n()
   const client = useQueryClient()
-  const models = (useModels().data?.models ?? []).filter((model) => !model.tool && !model.alias_of)
+  const models = (useModels().data?.models ?? []).filter(
+    (model) => !model.tool && !model.alias_of && !model.hidden,
+  )
   const [open, setOpen] = useState(false)
   const [pickedAccounts, setPickedAccounts] = useState<ReadonlySet<string>>(new Set())
   const [pickedModels, setPickedModels] = useState<ReadonlySet<string>>(new Set())
@@ -273,9 +276,11 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                               </span>
                             </span>
                             {run.result.error && (
-                              <p className="max-w-[320px] text-xs break-words text-error-text">
-                                {serverText(run.result.error)}
-                              </p>
+                              <div className="max-w-[320px]">
+                                <ClampText className="text-xs break-words text-error-text">
+                                  {serverText(run.result.error)}
+                                </ClampText>
+                              </div>
                             )}
                             {run.result.usage?.current && (
                               <span className="text-xs text-foreground-muted">

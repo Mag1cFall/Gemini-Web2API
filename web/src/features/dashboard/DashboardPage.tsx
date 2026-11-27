@@ -231,7 +231,10 @@ export function DashboardPage() {
             </Link>
           </Field>
           <Field label={m.availableModels}>
-            {formatNumber(models.data?.models.length ?? 0, language)}
+            {formatNumber(
+              (models.data?.models ?? []).filter((model) => !model.hidden).length,
+              language,
+            )}
           </Field>
         </FieldGrid>
       </Card>

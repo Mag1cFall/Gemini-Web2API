@@ -1,7 +1,8 @@
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useSyncExternalStore } from 'react'
 
-import { toast, toastDuration } from '@/components/ui/toast'
+import { appMessages } from '@/app/messages'
+import { toast } from '@/components/ui/toast'
 import { runBatch } from '@/features/accounts/batch'
 import { accountsMessages } from '@/features/accounts/messages'
 import type { Account, AccountTask } from '@/features/accounts/types'
@@ -65,7 +66,7 @@ export function useAccounts() {
 // deleteBatchLimit 是撤销期结束后同时发送的删除请求数
 const deleteBatchLimit = 3
 
-// useDeleteAccounts 返回删除账号的函数：账号立即从列表隐藏并提示可撤销，5 秒内撤销时不向服务端发送删除
+// useDeleteAccounts 返回删除账号的函数：账号立即从列表隐藏并提示可撤销，提示关闭前撤销时不向服务端发送删除
 export function useDeleteAccounts() {
   const m = useMessages(accountsMessages)
   const client = useQueryClient()
@@ -76,28 +77,6 @@ export function useDeleteAccounts() {
       const restore = () => {
         setDeleting(new Set([...deleting].filter((id) => !ids.includes(id))))
       }
-      const timer = setTimeout(() => {
-        void removeAccounts(client, ids).then((failures) => {
-          restore()
-          void client.invalidateQueries({ queryKey: accountsKey })
-          if (failures.length === 0) return
-          toast({
-            tone: 'error',
-            title: fill(m.batchFailures, {
-              result: fill(m.batchResult, {
-                action: m.delete,
-                succeeded: ids.length - failures.length,
-                failed: failures.length,
-              }),
-              items: failures
-                .map((failure) =>
-                  fill(m.batchFailure, { id: failure.id, message: serverText(failure.message) }),
-                )
-                .join(m.listSeparator),
-            }),
-          })
-        })
-      }, toastDuration)
       const first = accounts[0]
       toast({
         tone: 'success',
@@ -105,12 +84,21 @@ export function useDeleteAccounts() {
           accounts.length === 1 && first
             ? fill(m.deletedOne, { id: first.email ?? first.account_id })
             : fill(m.deleted, { count: accounts.length }),
-        action: {
-          label: m.undo,
-          onClick: () => {
-            clearTimeout(timer)
+        action: { label: m.undo, onClick: restore },
+        onClose: () => {
+          void removeAccounts(client, ids).then((failures) => {
             restore()
-          },
+            void client.invalidateQueries({ queryKey: accountsKey })
+            if (failures.length === 0) return
+            toast({
+              tone: 'error',
+              title: fill(m.batchFailed, { action: m.delete, failed: failures.length }),
+              detail: failures.map((failure) => ({
+                label: failure.id,
+                message: serverText(failure.message),
+              })),
+            })
+          })
         },
       })
     },
@@ -159,6 +147,7 @@ export function runAccountAction(id: string, action: AccountAction) {
 // useClearCooldown 清除账号的冷却，scope 为模型 ID 或表示账号级冷却的 *
 export function useClearCooldown() {
   const m = useMessages(accountsMessages)
+  const app = useMessages(appMessages)
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ account, scope }: { account: string; scope: string }) =>
@@ -172,7 +161,11 @@ export function useClearCooldown() {
       toast({ tone: 'success', title: m.cooldownCleared })
     },
     onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: m.clearCooldown }),
+        detail: error.message,
+      })
     },
   })
 }

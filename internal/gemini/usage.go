@@ -3,14 +3,9 @@ package gemini
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"strings"
 	"time"
-
-	http "github.com/bogdanfinn/fhttp"
 )
 
 const usageRPC = "jSf9Qc"
@@ -78,7 +73,7 @@ func buildAccountModelHeader(features []int, model Model, language string, chatM
 	if thinkingLevel != 0 {
 		levelSlot = int(thinkingLevel)
 	}
-	return encodeJSPB(withVariant([]any{
+	return encodeJSPB(withVariantAndTimezone([]any{
 		1, nil, nil, nil, model.Hash, nil, language, chatMode,
 		features, nil, nil, tierSlot, enterpriseSlot, nil, model.Mode, levelSlot, clientID,
 		[]string{buildLabel}, nil, timing,
@@ -158,53 +153,23 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 	if err != nil {
 		return UsageInfo{}, err
 	}
-	encodedRequest, err := json.Marshal([]any{[]any{[]any{usageRPC, "[]", nil, "generic"}}})
-	if err != nil {
-		return UsageInfo{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.pageURL(pathBatch), strings.NewReader(protocolForm(string(encodedRequest), bootstrap.SNlM0e)))
-	if err != nil {
-		return UsageInfo{}, err
-	}
-	req.URL.RawQuery = c.batchQuery(bootstrap, usageRPC, "/usage", bootstrap.Language)
-	c.applyXHRHeaders(req)
-	req.Header.Set("x-goog-ext-525001261-jspb", buildGenericHeader(c.features(), bootstrap.Language, c.clientID, bootstrap.BL, 0, "", 0))
-	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return UsageInfo{}, transportProtocolError("读取用量", err)
-	}
-	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
-		resp.Body.Close()
-		return UsageInfo{}, err
-	}
+	body, err := c.postBatch(ctx, bootstrap, batchRequest{rpcID: usageRPC, payload: "[]", sourcePath: "/usage", language: bootstrap.Language, extension: "[0]"})
 	renew := false
-	if resp.StatusCode != http.StatusOK {
-		err = responseStatusError(resp, "读取用量")
-		resp.Body.Close()
+	switch {
+	case err != nil:
 		renew = renewable(err)
-	} else {
-		var body []byte
-		body, err = io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return UsageInfo{}, transportProtocolError("读取用量", err)
+	case bytes.Contains(body, []byte("accounts.google.com")):
+		err, renew = retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut), true
+	default:
+		var usage UsageInfo
+		usage, err = decodeUsageResponse(body)
+		if !errors.Is(err, errUsageEmpty) {
+			return usage, err
 		}
-		switch {
-		case bytes.Contains(body, []byte("accounts.google.com")):
-			err, renew = retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut), true
-		default:
-			var usage UsageInfo
-			usage, err = decodeUsageResponse(bytes.NewReader(body))
-			if !errors.Is(err, errUsageEmpty) {
-				return usage, err
-			}
-			if _, err = c.fetchPreferences(ctx, bootstrap); err == nil {
-				return UsageInfo{}, ErrUsageUnavailable
-			}
-			renew = renewable(err)
+		if _, err = c.fetchPreferences(ctx, bootstrap); err == nil {
+			return UsageInfo{}, ErrUsageUnavailable
 		}
+		renew = renewable(err)
 	}
 	if !renew || !allowRefresh || c.refresh == nil {
 		return UsageInfo{}, err
@@ -219,49 +184,17 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 }
 
 // decodeUsageResponse 解析用量 RPC 的响应正文，没有用量载荷时返回 errUsageEmpty
-func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
-	var usage UsageInfo
-	found := false
-	err := scanProtocolRecords(reader, func(record []any) error {
-		tag, _ := stringAt(record, 0)
-		rpcID, _ := stringAt(record, 1)
-		if tag != "wrb.fr" || rpcID != usageRPC {
-			return nil
+func decodeUsageResponse(body []byte) (UsageInfo, error) {
+	payload, err := rpcPayload(bytes.NewReader(body), usageRPC, func(record []any) error {
+		if code, ok := intAt(record, 5, 0); ok && code != 7 {
+			return rpcStatusError("读取用量", record)
 		}
-		if len(record) <= 2 || record[2] == nil {
-			if status, ok := arrayAt(record, 5); ok {
-				if code, ok := intAt(status, 0); ok && code != 7 {
-					return rpcStatusError("读取用量", record)
-				}
-			}
-			return errUsageEmpty
-		}
-		encoded, ok := record[2].(string)
-		if !ok {
-			return fmt.Errorf("解析官网用量数据: %w", errors.New("unexpected payload type"))
-		}
-		if encoded == "" {
-			return errUsageEmpty
-		}
-		var payload []any
-		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("解析官网用量数据: %w", err)
-		}
-		parsed, err := parseUsageInfo(payload)
-		if err != nil {
-			return err
-		}
-		usage = parsed
-		found = true
-		return nil
+		return errUsageEmpty
 	})
 	if err != nil {
 		return UsageInfo{}, err
 	}
-	if !found {
-		return UsageInfo{}, errUsageEmpty
-	}
-	return usage, nil
+	return parseUsageInfo(payload)
 }
 
 func parseUsageInfo(payload []any) (UsageInfo, error) {
@@ -358,12 +291,4 @@ func usageContextWindow(tier string) int {
 		return 1024 * 1024
 	}
 	return 0
-}
-
-func numberAt(values []any, index int) (float64, bool) {
-	if index < 0 || index >= len(values) {
-		return 0, false
-	}
-	value, ok := values[index].(float64)
-	return value, ok
 }

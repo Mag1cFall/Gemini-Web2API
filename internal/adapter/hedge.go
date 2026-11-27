@@ -68,7 +68,6 @@ type firstEventSample struct {
 type firstEventStats struct {
 	mu      sync.Mutex
 	samples map[string][]firstEventSample
-	seeded  sync.Once
 }
 
 // firstEvents 是全部请求共用的首事件样本
@@ -103,25 +102,23 @@ func (stats *firstEventStats) p95(model string, now time.Time) (time.Duration, i
 
 // seed 从请求账本补入 firstEventSampleAge 内的原请求样本：被备用请求取代的原请求取其已等时长，其余只含落败备用请求或没有尝试记录的取首事件减排队
 func (stats *firstEventStats) seed(store *requestdb.Store) {
-	stats.seeded.Do(func() {
-		now := time.Now()
-		page, err := store.Records(context.Background(), requestdb.UsageRecordQuery{From: now.Add(-firstEventSampleAge), To: now, Limit: firstEventSampleLimit * 50})
-		if err != nil {
-			logging.Warn(logging.SourceService, "读取首事件样本失败", "原因", err)
-			return
+	now := time.Now()
+	page, err := store.Records(context.Background(), requestdb.UsageRecordQuery{From: now.Add(-firstEventSampleAge), To: now, Limit: firstEventSampleLimit * 50})
+	if err != nil {
+		logging.Warn(logging.SourceService, "读取首事件样本失败", "原因", err)
+		return
+	}
+	slices.Reverse(page.Items)
+	for _, record := range page.Items {
+		model := config.MapModel(record.Model)
+		superseded := slices.IndexFunc(record.Attempts, func(attempt logging.Attempt) bool { return attempt.Superseded && !attempt.Hedge })
+		switch {
+		case superseded >= 0:
+			stats.observe(model, record.Time, time.Duration(record.Attempts[superseded].DurationMS)*time.Millisecond)
+		case record.FirstEventMS > 0 && !slices.ContainsFunc(record.Attempts, func(attempt logging.Attempt) bool { return !attempt.Hedge }):
+			stats.observe(model, record.Time, time.Duration(record.FirstEventMS-record.QueueMS)*time.Millisecond)
 		}
-		slices.Reverse(page.Items)
-		for _, record := range page.Items {
-			model := config.MapModel(record.Model)
-			superseded := slices.IndexFunc(record.Attempts, func(attempt logging.Attempt) bool { return attempt.Superseded && !attempt.Hedge })
-			switch {
-			case superseded >= 0:
-				stats.observe(model, record.Time, time.Duration(record.Attempts[superseded].DurationMS)*time.Millisecond)
-			case record.FirstEventMS > 0 && !slices.ContainsFunc(record.Attempts, func(attempt logging.Attempt) bool { return !attempt.Hedge }):
-				stats.observe(model, record.Time, time.Duration(record.FirstEventMS-record.QueueMS)*time.Millisecond)
-			}
-		}
-	})
+	}
 }
 
 // FirstEventP95 返回模型近 24 小时原请求首事件等待的 p95 与样本数，ready 表示样本数已够自动模式按它发起备用请求

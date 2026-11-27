@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { ClampText } from '@/components/ui/clamp'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { useAccountLabel } from '@/features/accounts/queries'
@@ -132,9 +133,11 @@ export function RequestDetailSheet({
           )}
           {request.error && (
             <DetailSection title={m.error}>
-              <pre className="rounded-sm bg-error-soft p-3 font-mono text-xs break-words whitespace-pre-wrap text-error-text">
-                {serverText(request.error)}
-              </pre>
+              <div className="rounded-sm bg-error-soft p-3">
+                <ClampText className="font-mono text-xs break-words whitespace-pre-wrap text-error-text">
+                  {serverText(request.error)}
+                </ClampText>
+              </div>
             </DetailSection>
           )}
           <DetailSection title={m.attemptsTitle}>
