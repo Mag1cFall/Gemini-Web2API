@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +35,10 @@ const (
 	EventRequestFinished = "request.finished"
 )
 
-// Event 是一条运行日志事件，Message 为事件名称，Fields 为按顺序排列的字段
+// Event 是一条运行日志事件，Seq 为发布序号，Message 为事件名称，Fields 为按顺序排列的字段
 type Event struct {
+	// Seq 在本进程内从 1 起按发布顺序递增
+	Seq     int64        `json:"seq"`
 	Time    time.Time    `json:"time"`
 	Level   string       `json:"level"`
 	Source  string       `json:"source"`
@@ -67,6 +70,7 @@ type Hub struct {
 	level       slog.Level
 	console     func(Event)
 	history     []Event
+	seq         int64
 	subscribers map[chan Event]struct{}
 	// format 是控制台格式，日志文件使用同一格式
 	format string
@@ -82,11 +86,7 @@ func newHub() *Hub {
 }
 
 // Setup 按配置设置默认日志输出
-func Setup(options Options) error {
-	level, err := ParseLevel(options.Level)
-	if err != nil {
-		return err
-	}
+func Setup(options Options) {
 	writer := options.Writer
 	if writer == nil {
 		writer = os.Stderr
@@ -94,35 +94,26 @@ func Setup(options Options) error {
 	if file, ok := writer.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
 		disableQuickEdit()
 	}
-	var console func(Event)
-	format := strings.ToLower(strings.TrimSpace(options.Format))
-	switch format {
-	case "", "text":
-		console = newTextConsole(writer, consoleTimeLayout).write
-	case "json":
+	console := newTextConsole(writer, consoleTimeLayout).write
+	if options.Format == "json" {
 		console = newJSONConsole(writer)
-	default:
-		return fmt.Errorf("LOG_FORMAT 必须是 text 或 json")
 	}
 	std.mu.Lock()
-	std.level, std.console, std.format = level, console, format
+	std.level, std.console, std.format = Level(options.Level), console, options.Format
 	std.mu.Unlock()
-	return nil
 }
 
-// ParseLevel 解析日志级别名称
-func ParseLevel(value string) (slog.Level, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "info":
-		return slog.LevelInfo, nil
+// Level 返回日志级别名称 debug、info、warn 或 error（不区分大小写）对应的级别
+func Level(name string) slog.Level {
+	switch strings.ToLower(name) {
 	case "debug":
-		return slog.LevelDebug, nil
-	case "warn", "warning":
-		return slog.LevelWarn, nil
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
 	case "error":
-		return slog.LevelError, nil
+		return slog.LevelError
 	}
-	return 0, fmt.Errorf("LOG_LEVEL 必须是 debug、info、warn 或 error")
+	return slog.LevelInfo
 }
 
 // SetLevel 修改最低输出级别
@@ -141,7 +132,7 @@ func Enabled(level slog.Level) bool {
 
 // Publish 记录事件，低于最低级别的事件丢弃
 func Publish(event Event) {
-	level, _ := ParseLevel(event.Level)
+	level := Level(event.Level)
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
@@ -153,6 +144,8 @@ func Publish(event Event) {
 	if level < std.level {
 		return
 	}
+	std.seq++
+	event.Seq = std.seq
 	std.console(event)
 	if std.fileWrite != nil {
 		std.fileWrite(event)
@@ -192,10 +185,10 @@ func Subscribe(limit int) ([]Event, <-chan Event, func()) {
 	return history, channel, cancel
 }
 
-// Clear 清空保留的事件
-func Clear() {
+// ClearThrough 删除序号不大于 seq 的保留事件
+func ClearThrough(seq int64) {
 	std.mu.Lock()
-	std.history = nil
+	std.history = slices.DeleteFunc(std.history, func(event Event) bool { return event.Seq <= seq })
 	std.mu.Unlock()
 }
 

@@ -23,32 +23,60 @@ type CatalogModel struct {
 	Accounts []string
 	// AliasOf 为 MODEL_MAPPING 别名或改名前的旧 ID 指向的模型 ID
 	AliasOf string
+	// Hidden 表示该模型当前在设置中关闭、不在公开 API 开放
+	Hidden bool
 }
 
-// Catalog 汇总已就绪或已读取目录的账号的模型目录，追加 gemini-default、MODEL_MAPPING 中指向已有模型的别名与改名前的旧 ID
+// Catalog 汇总已就绪或已读取目录的账号并在 API 中开放的模型目录，隐藏的模型不列出
 func Catalog(pool *balancer.AccountPool) []CatalogModel {
+	all := AllCatalog(pool)
+	visible := make([]CatalogModel, 0, len(all))
+	for _, model := range all {
+		if !model.Hidden {
+			visible = append(visible, model)
+		}
+	}
+	return visible
+}
+
+// AllCatalog 汇总已就绪或已读取目录的账号的全部模型目录（含在设置中关闭的模型），追加 gemini-default、MODEL_MAPPING 中指向已有模型的别名与改名前的旧 ID
+func AllCatalog(pool *balancer.AccountPool) []CatalogModel {
+	accounts := pool.CatalogAccounts()
 	byID := make(map[string]CatalogModel)
+	hashesByID := make(map[string]map[string]bool)
 	defaultVotes := make(map[string]int)
 	defaults := CatalogModel{Model: gemini.Model{ID: gemini.DefaultModelID, DisplayName: "Default", Description: "Each account's official default model", Capabilities: []string{"generateContent", "streamGenerateContent"}}}
-	for _, account := range pool.CatalogAccounts() {
+	hasOpenDefault := false
+	for _, account := range accounts {
 		client := account.Client
 		contextWindow := client.ContextWindow()
-		if account.Ready {
-			defaults.AccountCount++
-			defaults.Accounts = append(defaults.Accounts, account.ID)
+		if def, err := client.ResolveModel(gemini.DefaultModelID); err == nil && !config.IsModelHidden(def.ID, def.PredefinedGem) {
+			hasOpenDefault = true
+			if account.Ready {
+				defaults.AccountCount++
+				defaults.Accounts = append(defaults.Accounts, account.ID)
+			}
+			if defaults.MinInputTokenLimit == 0 || contextWindow < defaults.MinInputTokenLimit {
+				defaults.MinInputTokenLimit = contextWindow
+			}
+			defaults.MaxInputTokenLimit = max(defaults.MaxInputTokenLimit, contextWindow)
 		}
-		if defaults.MinInputTokenLimit == 0 || contextWindow < defaults.MinInputTokenLimit {
-			defaults.MinInputTokenLimit = contextWindow
-		}
-		defaults.MaxInputTokenLimit = max(defaults.MaxInputTokenLimit, contextWindow)
 		for _, model := range client.Models() {
 			if model.Default {
 				defaultVotes[model.ID]++
 			}
+			if model.Hash != "" {
+				if hashesByID[model.ID] == nil {
+					hashesByID[model.ID] = make(map[string]bool)
+				}
+				hashesByID[model.ID][model.Hash] = true
+			}
 			availability := byID[model.ID]
+			predefined := availability.PredefinedGem || model.PredefinedGem
 			if availability.ID == "" || len(model.ThinkingLevels) > len(availability.ThinkingLevels) {
 				availability.Model = model
 			}
+			availability.PredefinedGem = predefined
 			if account.Ready {
 				availability.AccountCount++
 				availability.Accounts = append(availability.Accounts, account.ID)
@@ -61,6 +89,10 @@ func Catalog(pool *balancer.AccountPool) []CatalogModel {
 			}
 			byID[model.ID] = availability
 		}
+	}
+	for id, model := range byID {
+		model.Hidden = config.IsModelHidden(model.ID, model.PredefinedGem)
+		byID[id] = model
 	}
 	globalDefault := ""
 	for id := range byID {
@@ -83,6 +115,7 @@ func Catalog(pool *balancer.AccountPool) []CatalogModel {
 	})
 	if _, exists := byID[gemini.DefaultModelID]; !exists && len(byID) > 0 {
 		defaults.ThinkingLevels = byID[globalDefault].ThinkingLevels
+		defaults.Hidden = config.IsModelHidden(defaults.ID, false) || !hasOpenDefault
 		models = append(models, defaults)
 	}
 	aliases := config.ModelAliases()
@@ -92,11 +125,51 @@ func Catalog(pool *balancer.AccountPool) []CatalogModel {
 	}
 	sort.Strings(names)
 	for _, alias := range names {
-		target, ok := byID[gemini.CanonicalModelID(aliases[alias])]
-		if _, exists := byID[alias]; !ok || exists {
+		if _, exists := byID[alias]; exists || alias == gemini.DefaultModelID {
+			continue
+		}
+		mapped := aliases[alias]
+		if gemini.NormalizeModelID(mapped) == gemini.DefaultModelID {
+			if len(byID) == 0 {
+				continue
+			}
+			target := defaults
+			target.ID, target.AliasOf, target.Default = alias, gemini.DefaultModelID, false
+			target.Hidden = defaults.Hidden || config.IsModelHidden(alias, false)
+			models = append(models, target)
+			continue
+		}
+		var target CatalogModel
+		matched, hasOpen := false, false
+		for _, account := range accounts {
+			resolved, err := account.Client.ResolveModel(mapped)
+			if err != nil {
+				continue
+			}
+			matched = true
+			if !config.IsModelHidden(resolved.ID, resolved.PredefinedGem) {
+				hasOpen = true
+			}
+			predefined := target.PredefinedGem || resolved.PredefinedGem
+			if target.ID == "" || len(resolved.ThinkingLevels) > len(target.ThinkingLevels) {
+				target.Model = resolved
+			}
+			target.PredefinedGem = predefined
+			contextWindow := account.Client.ContextWindow()
+			if account.Ready {
+				target.AccountCount++
+				target.Accounts = append(target.Accounts, account.ID)
+			}
+			if target.MinInputTokenLimit == 0 || contextWindow < target.MinInputTokenLimit {
+				target.MinInputTokenLimit = contextWindow
+			}
+			target.MaxInputTokenLimit = max(target.MaxInputTokenLimit, contextWindow)
+		}
+		if !matched {
 			continue
 		}
 		target.ID, target.AliasOf, target.Default = alias, target.ID, false
+		target.Hidden = config.IsModelHidden(alias, false) || !hasOpen
 		models = append(models, target)
 	}
 	renames := gemini.ModelRenames()
@@ -106,11 +179,13 @@ func Catalog(pool *balancer.AccountPool) []CatalogModel {
 	}
 	sort.Strings(olds)
 	for _, old := range olds {
-		target, ok := byID[renames[old]]
-		if _, exists := byID[old]; !ok || exists {
+		rename := renames[old]
+		target, ok := byID[rename.Current]
+		if _, exists := byID[old]; !ok || exists || !hashesByID[rename.Current][rename.Hash] {
 			continue
 		}
-		target.ID, target.AliasOf, target.Default = old, renames[old], false
+		target.ID, target.AliasOf, target.Default = old, rename.Current, false
+		target.Hidden = target.Hidden || config.IsModelHidden(old, false)
 		models = append(models, target)
 	}
 	return models

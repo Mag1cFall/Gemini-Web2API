@@ -14,6 +14,7 @@ import { Link, useSearchParams } from 'react-router'
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { ClampText } from '@/components/ui/clamp'
 import { CodeBlock } from '@/components/ui/code-block'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Card, CardHeader, PageHeader } from '@/components/ui/page'
@@ -182,7 +183,9 @@ function EndpointList() {
       {routes.isError && (
         <div className="px-5 pt-3">
           <Callout tone="error" role="alert">
-            {fill(m.routesFailed, { message: routes.error.message })}
+            <ClampText className="wrap-anywhere">
+              {fill(m.routesFailed, { message: routes.error.message })}
+            </ClampText>
           </Callout>
         </div>
       )}
@@ -468,7 +471,7 @@ function ClientConfigs() {
   const [choice, setChoice] = useState<{ model?: string; small?: string; key?: string }>({})
   const key = choice.key ?? keys[0] ?? 'gemini-web2api'
   const models = modelsForKey(
-    (catalog.data?.models ?? []).filter((model) => !model.tool),
+    (catalog.data?.models ?? []).filter((model) => !model.tool && !model.hidden),
     parseAccountBindings(config.data?.api_key_accounts ?? '').get(key),
   )
   const choices = clientProtocols[client]
@@ -571,7 +574,9 @@ function ClientConfigs() {
     <>
       {catalog.isError ? (
         <Callout tone="error" role="alert">
-          {fill(m.modelsFailed, { message: catalog.error.message })}
+          <ClampText className="wrap-anywhere">
+            {fill(m.modelsFailed, { message: catalog.error.message })}
+          </ClampText>
         </Callout>
       ) : (
         models.length === 0 && <Callout tone="muted">{m.noModels}</Callout>

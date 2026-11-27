@@ -3,9 +3,11 @@ import { ArrowLeft, Globe, MoreHorizontal, Power, RefreshCw, ShieldCheck } from 
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 
+import { appMessages } from '@/app/messages'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { ClampText } from '@/components/ui/clamp'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,6 +46,7 @@ import { useNow } from '@/lib/time'
 // AccountPage 是账号详情：状态胶囊、用量窗口与模型冷却
 export function AccountPage() {
   const m = useMessages(accountsMessages)
+  const app = useMessages(appMessages)
   const sm = useMessages(accountStateMessages)
   const rm = useMessages(cooldownReasonMessages)
   const { language } = useI18n()
@@ -62,14 +65,22 @@ export function AccountPage() {
       toast({ tone: 'success', title: m.verified })
     },
     onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: m.verify }),
+        detail: error.message,
+      })
     },
   })
   const toggle = useMutation({
     mutationFn: (enabled: boolean) => runAccountAction(id, { kind: 'enabled', enabled }),
     onSuccess: () => void client.invalidateQueries({ queryKey: accountsKey }),
-    onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+    onError: (error, enabled) => {
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: enabled ? m.enable : m.disable }),
+        detail: error.message,
+      })
     },
   })
   const saveProxy = useMutation({
@@ -80,7 +91,11 @@ export function AccountPage() {
       setProxyOpen(false)
     },
     onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: m.editProxy }),
+        detail: error.message,
+      })
     },
   })
   const refreshUsage = useMutation({
@@ -90,7 +105,11 @@ export function AccountPage() {
       toast({ tone: 'success', title: m.usageRefreshed })
     },
     onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: m.refreshUsage }),
+        detail: error.message,
+      })
     },
   })
   if (accounts.isPending) return <PagePlaceholder title={id} label={m.title} />
@@ -372,7 +391,11 @@ export function AccountPage() {
                 {account.last_error_at &&
                   ' · ' + formatDateTime(new Date(account.last_error_at), now, language)}
               </dt>
-              <dd className="font-medium break-words">{serverText(account.last_error)}</dd>
+              <dd>
+                <ClampText className="font-medium break-words">
+                  {serverText(account.last_error)}
+                </ClampText>
+              </dd>
             </div>
           )}
         </dl>

@@ -25,7 +25,7 @@ func TestDecodeUsageResponseEmptyPayload(t *testing.T) {
 		{"no_record", `[["wrb.fr","otherRPC","[]",null,null]]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeUsageResponse(strings.NewReader(tc.body))
+			_, err := decodeUsageResponse([]byte(tc.body))
 			if !errors.Is(err, errUsageEmpty) {
 				t.Fatalf("got %v, want errUsageEmpty", err)
 			}
@@ -35,17 +35,17 @@ func TestDecodeUsageResponseEmptyPayload(t *testing.T) {
 		})
 	}
 
-	_, err := decodeUsageResponse(strings.NewReader(")]}'\n\n80\n[[\"wrb.fr\",\"jSf9Qc\",null,null,null,[13],\"generic\"]]\n"))
+	_, err := decodeUsageResponse([]byte(")]}'\n\n80\n[[\"wrb.fr\",\"jSf9Qc\",null,null,null,[13],\"generic\"]]\n"))
 	if err == nil || errors.Is(err, errUsageEmpty) || errors.Is(err, ErrUsageUnavailable) || !strings.Contains(err.Error(), "13") {
 		t.Fatalf("frame status [13] returned %v, want RPC status error containing 13", err)
 	}
 
-	_, err = decodeUsageResponse(strings.NewReader(`[["wrb.fr","jSf9Qc",123,null,null]]`))
+	_, err = decodeUsageResponse([]byte(`[["wrb.fr","jSf9Qc",123,null,null]]`))
 	if err == nil || errors.Is(err, errUsageEmpty) || errors.Is(err, ErrUsageUnavailable) {
 		t.Fatalf("non-string payload returned %v, want parse error", err)
 	}
 
-	_, err = decodeUsageResponse(strings.NewReader(`[["wrb.fr","jSf9Qc","{invalid",null,null]]`))
+	_, err = decodeUsageResponse([]byte(`[["wrb.fr","jSf9Qc","{invalid",null,null]]`))
 	if err == nil || errors.Is(err, errUsageEmpty) || errors.Is(err, ErrUsageUnavailable) {
 		t.Fatalf("malformed JSON payload returned %v, want parse error", err)
 	}

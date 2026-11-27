@@ -17,9 +17,8 @@ type softwareBindingKey struct {
 	privateKey *ecdsa.PrivateKey
 }
 
-func (k softwareBindingKey) PublicKey() (*ecdsa.PublicKey, []byte, error) {
-	spki, err := x509.MarshalPKIXPublicKey(&k.privateKey.PublicKey)
-	return &k.privateKey.PublicKey, spki, err
+func (k softwareBindingKey) PublicKey() ([]byte, error) {
+	return x509.MarshalPKIXPublicKey(&k.privateKey.PublicKey)
 }
 
 func (k softwareBindingKey) SignSHA256(value []byte) ([]byte, error) {
@@ -46,7 +45,7 @@ func TestSignBoundRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := signBoundRefresh(softwareBindingKey{privateKey: privateKey}, &privateKey.PublicKey, challenge)
+	signed, err := signBoundRefresh(softwareBindingKey{privateKey: privateKey}, challenge)
 	if err != nil {
 		t.Fatal(err)
 	}

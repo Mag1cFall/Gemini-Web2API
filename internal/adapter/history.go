@@ -2,13 +2,15 @@ package adapter
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"slices"
 	"strings"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/balancer"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/claude"
+	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
+	"github.com/gin-gonic/gin"
 )
 
 // historyKeyPrefix 是按对话历史续接网页会话的会话键前缀
@@ -78,8 +80,8 @@ func continuedHistoryKey(system string, bridge ToolBridge, turns []historyTurn) 
 	return ""
 }
 
-// rememberHistory 把请求历史加上本轮回答后的会话键登记到本轮网页会话，供不带会话标识的客户端下一轮续接；回答按客户端可能回传的几种渲染各登记一次，turns 为空表示请求带有会话标识，续接官网会话开关关闭时不登记
-func rememberHistory(pool *balancer.AccountPool, result generationResult, system string, bridge ToolBridge, turns []historyTurn) {
+// rememberHistory 把请求历史加上本轮回答后的会话键登记到本轮网页会话，供不带会话标识的客户端下一轮续接；回答按客户端可能回传的几种渲染各登记一次，projection 为流式请求的输出投影，非流式为 nil，turns 为空表示请求带有会话标识，续接官网会话开关关闭时不登记
+func rememberHistory(pool *balancer.AccountPool, result generationResult, system string, bridge ToolBridge, turns []historyTurn, projection *streamProjection) {
 	if len(turns) == 0 || !continueSession.Load() {
 		return
 	}
@@ -97,16 +99,76 @@ func rememberHistory(pool *balancer.AccountPool, result generationResult, system
 		reply.Calls = append(reply.Calls, historyCall{Name: call.Name, Arguments: canonicalJSON(call.Arguments)})
 	}
 	rendered := renderCandidateMarkdown(content, primary, 0)
+	seen := make(map[string]struct{}, 6)
 	var replies []historyTurn
-	for _, text := range []string{content, rendered, renderCitationMarkdown(rendered, primary.Citations)} {
-		reply.Text = strings.TrimSpace(text)
-		replies = append(replies, reply)
+	addReply := func(text string) {
+		trimmed := strings.TrimSpace(text)
+		if _, exists := seen[trimmed]; exists {
+			return
+		}
+		seen[trimmed] = struct{}{}
+		item := reply
+		item.Text = trimmed
+		replies = append(replies, item)
 	}
-	keys := slices.Compact(historyKeys(system, bridge, turns, replies...))
+	for _, text := range []string{content, rendered, renderCitationMarkdown(rendered, primary.Citations)} {
+		addReply(text)
+	}
+	for _, text := range structuredHistoryTexts(content, primary, projection) {
+		addReply(text)
+	}
+	keys := historyKeys(system, bridge, turns, replies...)
 	conversations.put(state, accountID, contextTokens, keys...)
 	for _, key := range keys {
 		pool.BindSession(key, accountID)
 	}
+}
+
+// structuredHistoryTexts 返回带媒体或代码的回答的回传形态对应的历史文本：Gemini 结构化内容段（inlineData、代码执行）、Responses image_generation_call，以及流式在媒体或代码到达前已发出正文时客户端收到的 Markdown 正文与 Gemini 内容段（已发出的正文接上尾帧）
+func structuredHistoryTexts(content string, primary CandidateOutput, projection *streamProjection) []string {
+	if len(primary.Media) == 0 && len(primary.Codes) == 0 {
+		return nil
+	}
+	parts := geminiStructuredParts(content, primary)
+	texts := []string{geminiHistoryTurns([]GeminiContent{{Role: "model", Parts: parts}})[0].Text}
+	if projection != nil && projection.textRunes > 0 {
+		sent := projection.sentText.String()
+		texts = append(texts, sent+renderCandidateMarkdown(content, primary, projection.textRunes))
+		output := make([]gin.H, 0, len(parts))
+		for _, part := range parts {
+			output = append(output, geminiOutputPart(part))
+		}
+		tail := projectGeminiStreamTail(gin.H{"candidates": []gin.H{{"content": gin.H{"parts": output}}}}, projection)
+		encoded, _ := json.Marshal(append([]gin.H{{"text": sent}}, geminiResponseParts(tail)...))
+		var received []GeminiPart
+		_ = json.Unmarshal(encoded, &received)
+		texts = append(texts, geminiHistoryTurns([]GeminiContent{{Role: "model", Parts: received}})[0].Text)
+	}
+	if hasGeneratedImage(primary) {
+		var messages []ChatMessage
+		for _, media := range primary.Media {
+			if media.Type != gemini.MediaGeneratedImage {
+				continue
+			}
+			_, data, ok := splitDataURL(media.URL)
+			if !ok {
+				continue
+			}
+			raw, err := responseImageContent(data)
+			if err != nil {
+				continue
+			}
+			messages = append(messages, ChatMessage{Role: "assistant", Content: raw})
+		}
+		if text := renderCandidateMarkdown(content, responsesMarkdownOutput(primary), 0); strings.TrimSpace(text) != "" {
+			encoded, _ := json.Marshal(text)
+			messages = append(messages, ChatMessage{Role: "assistant", Content: encoded})
+		}
+		if turns := chatHistoryTurns(messages); len(turns) > 0 {
+			texts = append(texts, turns[0].Text)
+		}
+	}
+	return texts
 }
 
 // chatHistoryTurns 把 Chat 与 Responses 转换后的消息转为历史会话键的消息序列
@@ -169,6 +231,10 @@ func geminiHistoryTurns(contents []GeminiContent) []historyTurn {
 			}
 			rest := part
 			rest.Text, rest.ThoughtSignature, rest.FunctionCall = "", "", nil
+			if rest.InlineData != nil {
+				mimeType, data := normalizeInlineData(rest.InlineData.MimeType, rest.InlineData.Data)
+				rest.InlineData = &GeminiInlineData{MimeType: mimeType, Data: data}
+			}
 			if encoded, _ := json.Marshal(rest); string(encoded) != "{}" {
 				turn.Text += string(encoded)
 			}
@@ -249,6 +315,33 @@ func historyContent(raw json.RawMessage) (string, []historyCall) {
 		}
 	}
 	return strings.TrimSpace(builder.String()), calls
+}
+
+// normalizeInlineData 把内联数据的 MIME 规范为小写、data URL 与 URL-safe 或无填充 Base64 规范为标准 Base64
+func normalizeInlineData(mimeType, data string) (string, string) {
+	if dataMime, payload, ok := splitDataURL(data); ok {
+		if strings.TrimSpace(mimeType) == "" {
+			mimeType = dataMime
+		}
+		data = payload
+	}
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	return mimeType, canonicalBase64(data)
+}
+
+// canonicalBase64 把 URL-safe、无填充或带空白的 Base64 转为标准 Base64，已是标准 Base64 时原样返回
+func canonicalBase64(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value)%4 == 0 && !strings.ContainsAny(value, "-_ \t\r\n") {
+		return value
+	}
+	decoded, err := decodeBase64(value)
+	if err != nil {
+		return strings.TrimSpace(value)
+	}
+	return base64.StdEncoding.EncodeToString(decoded)
 }
 
 // canonicalJSON 返回键按字典序排列的 JSON，无效或空值返回 nil

@@ -43,7 +43,11 @@ function ChromeImport() {
       setSelected([])
     },
     onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: m.chromeTitle }),
+        detail: error.message,
+      })
     },
   })
   if (profiles.isPending) return <Loading label={m.chromeTitle} />
@@ -162,6 +166,7 @@ const discoverDelay = 600
 // CookieImport 是从 Cookie 导入：粘贴后自动识别其中登录的账号，选中的账号在后台导入，输入变化后旧的识别结果立即失效
 function CookieImport() {
   const m = useMessages(importMessages)
+  const app = useMessages(appMessages)
   const client = useQueryClient()
   const [cookies, setCookies] = useState('')
   const [proxy, setProxy] = useState('')
@@ -211,11 +216,16 @@ function CookieImport() {
       setFlipped(new Set())
     },
     onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: m.cookieTitle }),
+        detail: error.message,
+      })
     },
   })
   return (
     <Section title={m.cookieTitle} description={m.cookieHint}>
+      <Callout tone="muted">{m.cookieRotationNotice}</Callout>
       <Field id="cookie-value" label={m.cookieValue}>
         <Textarea
           id="cookie-value"
@@ -323,6 +333,7 @@ function savedPairing(): PairingToken | undefined {
 // RemotePairing 生成配对令牌并给出 setup --remote 命令，令牌保存在本标签页直到过期
 function RemotePairing() {
   const m = useMessages(importMessages)
+  const app = useMessages(appMessages)
   const { language } = useI18n()
   const now = useNow(1000)
   const [pairing, setPairing] = useState(savedPairing)
@@ -337,7 +348,11 @@ function RemotePairing() {
       }
     },
     onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: m.createPairing }),
+        detail: error.message,
+      })
     },
   })
   const remaining = pairing ? new Date(pairing.expires_at).getTime() - now.getTime() : 0

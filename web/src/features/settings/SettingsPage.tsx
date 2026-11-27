@@ -52,6 +52,7 @@ const envNames: Record<string, string> = {
   nonstream_keepalive: 'NONSTREAM_KEEPALIVE',
   fake_stream: 'FAKE_STREAM',
   model_mapping: 'MODEL_MAPPING',
+  hidden_models: 'HIDDEN_MODELS',
   account_cooldown: 'ACCOUNT_COOLDOWN',
   session_ttl: 'SESSION_TTL',
   init_timeout: 'INIT_TIMEOUT',
@@ -351,7 +352,7 @@ export function SettingsPage() {
       toast({ tone: 'success', title: m.saved })
     },
     onError: (error) => {
-      toast({ tone: 'error', title: fill(m.saveFailed, { message: error.message }) })
+      toast({ tone: 'error', title: m.saveFailed, detail: error.message })
     },
   })
   if (config.isPending) {
@@ -401,6 +402,7 @@ export function SettingsPage() {
     nonstream_keepalive: m.nonstreamKeepalive,
     fake_stream: m.fakeStream,
     model_mapping: m.modelMapping,
+    hidden_models: m.hiddenModels,
     per_account_concurrency: m.perAccountConcurrency,
     routing_strategy: m.routingStrategy,
     account_cooldown: m.accountCooldown,

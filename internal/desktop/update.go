@@ -69,9 +69,14 @@ func stagingDir() (string, error) {
 	return filepath.Dir(target), nil
 }
 
-// Restart 启动更新器辅助进程并退出桌面应用，辅助进程在当前进程结束后替换文件并启动新版本
+// Restart 先关闭独立窗口子进程以释放可执行文件句柄，再启动更新器辅助进程并退出桌面应用；启动辅助进程失败时恢复窗口启动能力
 func Restart() error {
-	return application.Get().Updater.Restart(context.Background())
+	restore := beginRestart()
+	if err := application.Get().Updater.Restart(context.Background()); err != nil {
+		restore()
+		return err
+	}
+	return nil
 }
 
 // providerSlot 把调用转交给最近一次设置的更新来源

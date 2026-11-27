@@ -99,7 +99,6 @@ type GeminiGenerateContentRequest struct {
 
 // GeminiRouterHandler 处理 Gemini 原生 models/{model}:{method}，生成、流式生成、计数与视频长时操作之外的方法返回 404
 func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		action := strings.TrimPrefix(c.Param("action"), "/")
 		separator := strings.LastIndex(action, ":")
@@ -204,9 +203,6 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 				}, onEvent, projection,
 			)
 			c.Set("account_id", accountID)
-			if err == nil && index == 0 {
-				rememberHistory(pool, result, system, bridge, turns)
-			}
 			return result, err
 		}
 		var usage *gemini.Usage
@@ -250,6 +246,9 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 					_ = writer.fail(http.StatusBadGateway, "INTERNAL", streamFailure(c, err))
 					return
 				}
+				if index == 0 {
+					rememberHistory(pool, result, system, bridge, turns, projection)
+				}
 				response["candidates"].([]gin.H)[0]["index"] = index
 				if pages := requestPages(c); len(pages) > 0 {
 					response["candidates"].([]gin.H)[0]["urlContextMetadata"] = geminiURLContextMetadata(pages)
@@ -285,6 +284,9 @@ func GeminiRouterHandler(pool *balancer.AccountPool, store *requestdb.Store) gin
 			if err != nil {
 				writeGeminiError(c, http.StatusBadGateway, "INTERNAL", err.Error())
 				return
+			}
+			if index == 0 {
+				rememberHistory(pool, result, system, bridge, turns, nil)
 			}
 			usage = addUsage(usage, result.Accumulator.Usage)
 			if index == 0 {
@@ -803,7 +805,9 @@ func buildGeminiResponse(result generationResult, bridge ToolBridge, includeThou
 	if includeThoughts && primary.Thought != "" {
 		parts = append(parts, gin.H{"text": primary.Thought, "thought": true})
 	}
-	parts = append(parts, geminiStructuredParts(content, primary)...)
+	for _, part := range geminiStructuredParts(content, primary) {
+		parts = append(parts, geminiOutputPart(part))
+	}
 	for index, call := range calls {
 		var arguments map[string]interface{}
 		_ = json.Unmarshal(call.Arguments, &arguments)
@@ -835,12 +839,13 @@ func buildGeminiResponse(result generationResult, bridge ToolBridge, includeThou
 	return response, nil
 }
 
-func geminiStructuredParts(text string, output CandidateOutput) []gin.H {
+// geminiStructuredParts 返回候选输出的有序内容段：正文按代码与媒体的插入位置切分，代码为 executableCode，同一索引的执行输出合并为一个 codeExecutionResult，已下载为 data URL 的媒体为 inlineData
+func geminiStructuredParts(text string, output CandidateOutput) []GeminiPart {
 	if hasGeneratedImage(output) && strings.TrimSpace(text) == "" {
 		text = ""
 	}
 	runes := []rune(text)
-	parts := make([]gin.H, 0, len(output.Codes)+len(output.Media)+1)
+	parts := make([]GeminiPart, 0, len(output.Codes)+len(output.Media)+1)
 	cursor := 0
 	emittedResults := make(map[int]struct{})
 	for _, insert := range candidateInserts(output) {
@@ -849,30 +854,44 @@ func geminiStructuredParts(text string, output CandidateOutput) []gin.H {
 			offset = len(runes)
 		}
 		if offset > cursor {
-			parts = append(parts, gin.H{"text": string(runes[cursor:offset])})
+			parts = append(parts, GeminiPart{Text: string(runes[cursor:offset])})
 			cursor = offset
 		}
 		if insert.code != nil {
 			if insert.code.Type == gemini.CodeReference {
-				parts = append(parts, geminiCodePart(*insert.code))
+				parts = append(parts, GeminiPart{ExecutableCode: geminiExecutableCode(*insert.code)})
 			} else if _, ok := emittedResults[insert.code.Index]; !ok {
 				emittedResults[insert.code.Index] = struct{}{}
-				parts = append(parts, geminiCodeResultPart(output.Codes, insert.code.Index))
+				parts = append(parts, GeminiPart{CodeResult: geminiCodeResult(output.Codes, insert.code.Index)})
 			}
 		} else if insert.media != nil {
 			mimeType, data, ok := splitDataURL(insert.media.URL)
 			if ok {
-				parts = append(parts, gin.H{"inlineData": gin.H{"mimeType": mimeType, "data": data}})
+				parts = append(parts, GeminiPart{InlineData: &GeminiInlineData{MimeType: mimeType, Data: data}})
 			}
 		}
 	}
 	if cursor < len(runes) {
-		parts = append(parts, gin.H{"text": string(runes[cursor:])})
+		parts = append(parts, GeminiPart{Text: string(runes[cursor:])})
 	}
 	return parts
 }
 
-func geminiCodeResultPart(codes []CodeOutput, index int) gin.H {
+// geminiOutputPart 返回正文、代码、代码结果或内联媒体内容段在 Gemini 响应中的对象
+func geminiOutputPart(part GeminiPart) gin.H {
+	switch {
+	case part.ExecutableCode != nil:
+		return gin.H{"executableCode": gin.H{"language": part.ExecutableCode.Language, "code": part.ExecutableCode.Code}}
+	case part.CodeResult != nil:
+		return gin.H{"codeExecutionResult": gin.H{"outcome": part.CodeResult.Outcome, "output": part.CodeResult.Output}}
+	case part.InlineData != nil:
+		return gin.H{"inlineData": gin.H{"mimeType": part.InlineData.MimeType, "data": part.InlineData.Data}}
+	}
+	return gin.H{"text": part.Text}
+}
+
+// geminiCodeResult 返回同一索引的代码执行输出合并成的结果，含 stderr 时为 OUTCOME_FAILED
+func geminiCodeResult(codes []CodeOutput, index int) *GeminiCodeExecutionResult {
 	outcome := "OUTCOME_OK"
 	var output strings.Builder
 	for _, code := range codes {
@@ -888,15 +907,16 @@ func geminiCodeResultPart(codes []CodeOutput, index int) gin.H {
 		}
 		output.WriteString(code.Content)
 	}
-	return gin.H{"codeExecutionResult": gin.H{"outcome": outcome, "output": output.String()}}
+	return &GeminiCodeExecutionResult{Outcome: outcome, Output: output.String()}
 }
 
-func geminiCodePart(code CodeOutput) gin.H {
+// geminiExecutableCode 返回代码段对应的 executableCode，Python 以外的语言为 LANGUAGE_UNSPECIFIED
+func geminiExecutableCode(code CodeOutput) *GeminiExecutableCode {
 	language := strings.ToUpper(strings.TrimSpace(code.Language))
 	if language != "PYTHON" {
 		language = "LANGUAGE_UNSPECIFIED"
 	}
-	return gin.H{"executableCode": gin.H{"language": language, "code": code.Content}}
+	return &GeminiExecutableCode{Language: language, Code: code.Content}
 }
 
 // geminiStreamWriter 按 alt=sse 输出 SSE 事件，未指定时与官方一样输出逐个对象的 JSON 数组

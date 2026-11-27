@@ -438,6 +438,9 @@ func labelToolCalls(labels map[string]string, calls []toolCallRef) {
 	}
 }
 
+// failedResult 是执行失败且没有输出的工具结果写入提示词的内容
+const failedResult = "（执行失败，没有输出）"
+
 // writeResultBlock 把一次工具结果写入提示词，结果原文放在代码块中，空结果写为没有输出
 func writeResultBlock(builder *strings.Builder, name string, content string) {
 	if strings.TrimSpace(content) == "" {

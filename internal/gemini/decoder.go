@@ -84,11 +84,7 @@ func (d *FrameDecoder) begin(state *ConversationState) {
 
 // Decode 依次解析 records 给出的生成流记录并原子更新会话状态
 func (d *FrameDecoder) Decode(records func(yield func(streamRecord) error) error, state *ConversationState, emit func(Event) error) error {
-	activeState := state
-	if activeState == nil {
-		activeState = NewConversationState()
-	}
-	d.begin(activeState)
+	d.begin(state)
 
 	var protocolErr *ProtocolError
 	err := records(func(record streamRecord) error {
@@ -110,14 +106,14 @@ func (d *FrameDecoder) Decode(records func(yield func(streamRecord) error) error
 				d.background = true
 				return nil
 			}
-			return d.finish(activeState, emit)
+			return d.finish(state, emit)
 		case isHeartbeat(record.payload):
 			if d.heartbeat != nil {
 				d.heartbeat()
 			}
 			return nil
 		}
-		return d.decodePayload(record.payload, activeState, emit)
+		return d.decodePayload(record.payload, state, emit)
 	})
 	if err == nil && protocolErr == nil && !d.sawEnd {
 		err = retryableProtocolError(errStreamEnded.Error(), errStreamEnded)
@@ -268,7 +264,7 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 			}
 		}
 
-		thought, _ := stringPath(candidate, 37, 0, 0)
+		thought, _ := stringAt(candidate, 37, 0, 0)
 		thought = normalizeSnapshot(thought)
 		if event, changed := diffSnapshot(EventThought, candidateIndex, d.thoughts[candidateIndex], thought); changed {
 			d.thoughts[candidateIndex] = thought
@@ -279,10 +275,10 @@ func (d *FrameDecoder) decodePayload(payload []any, state *ConversationState, em
 		if err := d.decodeContent(candidate, candidateIndex, emit); err != nil {
 			return err
 		}
-		phaseValue, _ := intPath(candidate, 8, 0)
+		phaseValue, _ := intAt(candidate, 8, 0)
 		phase := Phase(phaseValue)
 		if plan, ok := richContentField(candidate, 55); ok {
-			d.researchConfirm, _ = stringPath(plan, 3, 0)
+			d.researchConfirm, _ = stringAt(plan, 3, 0)
 		}
 		if _, ok := richContentField(candidate, 57); ok && phase != PhaseComplete {
 			d.background = true
@@ -310,13 +306,13 @@ func (d *FrameDecoder) decodeImageProgress(payload []any, emit func(Event) error
 	if !ok {
 		return nil
 	}
-	tool, _ := stringPath(raw, 1, 0)
-	category, _ := intPath(raw, 1, 3, 1, 7, 0)
-	status, _ := intPath(raw, 1, 2)
+	tool, _ := stringAt(raw, 1, 0)
+	category, _ := intAt(raw, 1, 3, 1, 7, 0)
+	status, _ := intAt(raw, 1, 2)
 	if tool == "video_generation" {
 		d.background = true
 	}
-	if task, ok := intPath(raw, 12, 4, 0); ok {
+	if task, ok := intAt(raw, 12, 4, 0); ok {
 		d.background = task == 4
 	}
 	if tool != "data_analysis_tool" || category != 20 && category != 23 {
@@ -356,10 +352,10 @@ func (d *FrameDecoder) sessionFromPayload(payload []any, current ConversationSna
 func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) error {
 	next := d.metadata
 	if title, ok := jspbField(payload, 10); ok {
-		next.Title, _ = firstString(title)
+		next.Title, _ = stringAt(title, 0)
 	}
 	if token, ok := jspbField(payload, 20); ok {
-		next.ControlToken, _ = firstString(token)
+		next.ControlToken, _ = stringAt(token, 0)
 	}
 	if modelHash, ok := jspbString(payload, 39); ok {
 		next.ModelHash = modelHash
@@ -368,8 +364,8 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 		next.ModelName = modelName
 	}
 	if notice, ok := jspbField(payload, 52); ok {
-		title, _ := stringPath(notice, 0, 0)
-		detail, _ := stringPath(notice, 1, 0)
+		title, _ := stringAt(notice, 0, 0)
+		detail, _ := stringAt(notice, 1, 0)
 		next.LimitNotice = strings.TrimSpace(title + " " + detail)
 	}
 	if flag, ok := jspbField(payload, 31); ok {
@@ -384,7 +380,7 @@ func (d *FrameDecoder) decodeMetadata(payload []any, emit func(Event) error) err
 }
 
 func (d *FrameDecoder) decodeContent(candidate []any, candidateIndex int, emit func(Event) error) error {
-	raw, _ := stringPath(candidate, 1, 0)
+	raw, _ := stringAt(candidate, 1, 0)
 	text, codes, citations := visibleContent(candidate, raw)
 	if documentChipPattern.MatchString(text) {
 		return retryableProtocolError("官网的回答已完成，但缺少其中的文档内容（Deep Research 报告或 Canvas 文档）", nil)
@@ -473,7 +469,7 @@ func (d *FrameDecoder) flushText(candidateIndex int, emit func(Event) error) err
 }
 
 func (d *FrameDecoder) decodeCitations(candidate []any, candidateIndex int, emit func(Event) error) error {
-	raw, _ := valuePath(candidate, 2, 1)
+	raw, _ := valueAt(candidate, 2, 1)
 	next := parseCitations(raw)
 	for _, citation := range d.markerCitations[candidateIndex] {
 		citation.ID = len(next) + 1
@@ -489,20 +485,20 @@ func (d *FrameDecoder) decodeCitations(candidate []any, candidateIndex int, emit
 func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, session ConversationSnapshot, emit func(Event) error) error {
 	rcid, _ := stringAt(candidate, 0)
 	if raw, ok := richContentField(candidate, 7); ok {
-		if itemsValue, ok := valuePath(raw, 0); ok {
+		if itemsValue, ok := valueAt(raw, 0); ok {
 			if items, ok := itemsValue.([]any); ok {
 				for index, item := range items {
-					mediaURL, _ := stringPath(item, 0, 3, 3)
+					mediaURL, _ := stringAt(item, 0, 3, 3)
 					if isGeneratedImagePlaceholder(mediaURL) {
 						continue
 					}
-					fileName, _ := stringPath(item, 0, 3, 2)
-					mimeType, _ := stringPath(item, 0, 3, 11)
-					generator, _ := stringPath(item, 3, 18)
-					placeholder, _ := stringPath(item, 1, 0)
-					width, _ := intPath(item, 0, 3, 15, 0)
-					height, _ := intPath(item, 0, 3, 15, 1)
-					sizeBytes, _ := intPath(item, 0, 3, 15, 2)
+					fileName, _ := stringAt(item, 0, 3, 2)
+					mimeType, _ := stringAt(item, 0, 3, 11)
+					generator, _ := stringAt(item, 3, 18)
+					placeholder, _ := stringAt(item, 1, 0)
+					width, _ := intAt(item, 0, 3, 15, 0)
+					height, _ := intAt(item, 0, 3, 15, 1)
+					sizeBytes, _ := intAt(item, 0, 3, 15, 2)
 					entry, _ := item.([]any)
 					if err := d.emitMedia(candidateIndex, &Media{
 						Type: MediaGeneratedImage, URL: mediaURL, Title: fmt.Sprintf("[Generated Image %d]", index+1),
@@ -520,20 +516,20 @@ func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, session 
 		if err := videoQuotaErrorFromRichContent(raw); err != nil {
 			return err
 		}
-		file, _ := valuePath(raw, 0, 0, 0, 0)
-		placeholder, _ := stringPath(candidate, 1, 0)
+		file, _ := valueAt(raw, 0, 0, 0, 0)
+		placeholder, _ := stringAt(candidate, 1, 0)
 		placeholder = generatedVideoPattern.FindString(placeholder)
 		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedVideo, file, placeholder, emit); err != nil {
 			return err
 		}
 	}
 	if raw, ok := richContentField(candidate, 86); ok {
-		audio, _ := valuePath(raw, 0, 1)
-		placeholder, _ := stringPath(raw, 6, 0)
+		audio, _ := valueAt(raw, 0, 1)
+		placeholder, _ := stringAt(raw, 6, 0)
 		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedAudio, audio, placeholder, emit); err != nil {
 			return err
 		}
-		video, _ := valuePath(raw, 1, 1)
+		video, _ := valueAt(raw, 1, 1)
 		if err := d.emitGeneratedFile(candidate, candidateIndex, MediaGeneratedVideo, video, "", emit); err != nil {
 			return err
 		}
@@ -543,17 +539,17 @@ func (d *FrameDecoder) decodeMedia(candidate []any, candidateIndex int, session 
 
 // emitGeneratedFile 发布视频与音乐条目中的成品文件，下载地址为条目链接列表的第 2 项，视频的第 1 项为缩略图
 func (d *FrameDecoder) emitGeneratedFile(candidate []any, candidateIndex int, mediaType MediaType, file any, placeholder string, emit func(Event) error) error {
-	mediaURL, _ := stringPath(file, 7, 1)
-	fileName, _ := stringPath(file, 2)
-	mimeType, _ := stringPath(file, 11)
-	width, _ := intPath(file, 17, 1)
-	height, _ := intPath(file, 17, 2)
+	mediaURL, _ := stringAt(file, 7, 1)
+	fileName, _ := stringAt(file, 2)
+	mimeType, _ := stringAt(file, 11)
+	width, _ := intAt(file, 17, 1)
+	height, _ := intAt(file, 17, 2)
 	media := &Media{
 		Type: mediaType, URL: mediaURL, Title: fileName, FileName: fileName, MIMEType: mimeType,
 		Placeholder: placeholder, Width: width, Height: height, Offset: mediaPlaceholderOffset(candidate, placeholder),
 	}
 	if mediaType == MediaGeneratedVideo {
-		media.Thumbnail, _ = stringPath(file, 7, 0)
+		media.Thumbnail, _ = stringAt(file, 7, 0)
 	}
 	return d.emitMedia(candidateIndex, media, emit)
 }
@@ -644,21 +640,21 @@ func parseCitations(raw any) []Citation {
 	}
 	result := make([]Citation, 0)
 	for _, group := range groups {
-		entriesValue, _ := valuePath(group, 2)
+		entriesValue, _ := valueAt(group, 2)
 		entries, _ := entriesValue.([]any)
-		sourceID, _ := stringPath(group, 3)
-		claim, _ := stringPath(group, 0, 0)
-		start, _ := intPath(group, 0, 3, 0, 0)
-		end, _ := intPath(group, 0, 3, 0, 1)
+		sourceID, _ := stringAt(group, 3)
+		claim, _ := stringAt(group, 0, 0)
+		start, _ := intAt(group, 0, 3, 0, 0)
+		end, _ := intAt(group, 0, 3, 0, 1)
 		for _, entry := range entries {
-			citationURL, _ := stringPath(entry, 0)
+			citationURL, _ := stringAt(entry, 0)
 			if citationURL == "" {
 				continue
 			}
-			title, _ := stringPath(entry, 1)
-			favicon, _ := stringPath(entry, 2)
-			snippet, _ := stringPath(entry, 3)
-			publisher, _ := stringPath(entry, 6)
+			title, _ := stringAt(entry, 1)
+			favicon, _ := stringAt(entry, 2)
+			snippet, _ := stringAt(entry, 3)
+			publisher, _ := stringAt(entry, 6)
 			result = append(result, Citation{
 				ID: len(result) + 1, SourceID: sourceID, Claim: claim, Title: title,
 				URL: citationURL, Favicon: favicon, Snippet: snippet, Publisher: publisher, Start: start, End: end,
@@ -669,7 +665,7 @@ func parseCitations(raw any) []Citation {
 }
 
 func richContentField(candidate []any, index int) (any, bool) {
-	rich, ok := valuePath(candidate, 12)
+	rich, ok := valueAt(candidate, 12)
 	if !ok {
 		return nil, false
 	}
@@ -719,11 +715,11 @@ func hasJSPBValue(value any) bool {
 // stripContentCards 去掉正文中富内容第 28 项列出数据的卡片占位链接及其后的换行，官网在该位置显示天气等卡片
 func stripContentCards(candidate []any, raw string) string {
 	cards, _ := richContentField(candidate, 27)
-	first, _ := valuePath(cards, 0)
+	first, _ := valueAt(cards, 0)
 	list, _ := first.([]any)
 	var pairs []string
 	for _, card := range list {
-		if placeholder, _ := stringPath(card, 0, 0); placeholder != "" {
+		if placeholder, _ := stringAt(card, 0, 0); placeholder != "" {
 			pairs = append(pairs, placeholder+"\n", "", placeholder, "")
 		}
 	}
@@ -745,9 +741,9 @@ func expandImageResults(candidate []any, raw string) string {
 	items, _ := list.([]any)
 	images := make(map[string][2]string)
 	for _, item := range items {
-		tag, _ := stringPath(item, 7, 0)
-		image, _ := stringPath(item, 0, 0, 0)
-		page, _ := stringPath(item, 1, 0, 0)
+		tag, _ := stringAt(item, 7, 0)
+		image, _ := stringAt(item, 0, 0, 0)
+		page, _ := stringAt(item, 1, 0, 0)
 		if id, ok := strings.CutPrefix(tag, "http://googleusercontent.com/"); ok && image != "" {
 			images[id] = [2]string{image, page}
 		}
@@ -848,7 +844,7 @@ func citationTables(candidate []any) []citationTable {
 	}
 	documents, _ := arrayAt(candidate, 30)
 	for _, document := range documents {
-		if rich, ok := valuePath(document, 5); ok {
+		if rich, ok := valueAt(document, 5); ok {
 			if field, ok := jspbField(rich, 43); ok {
 				fields = append(fields, field)
 			}
@@ -858,20 +854,20 @@ func citationTables(candidate []any) []citationTable {
 	for _, field := range fields {
 		entries, _ := field.([]any)
 		for _, entry := range entries {
-			marker, _ := stringPath(entry, 0, 0)
+			marker, _ := stringAt(entry, 0, 0)
 			if marker == "" {
 				continue
 			}
 			table := citationTable{marker: marker}
-			sourcesValue, _ := valuePath(entry, 1)
+			sourcesValue, _ := valueAt(entry, 1)
 			sources, _ := sourcesValue.([]any)
 			for _, source := range sources {
-				citationURL, _ := stringPath(source, 3, 0, 1)
+				citationURL, _ := stringAt(source, 3, 0, 1)
 				if citationURL == "" {
 					continue
 				}
-				favicon, _ := stringPath(source, 3, 0, 0)
-				title, _ := stringPath(source, 3, 0, 2)
+				favicon, _ := stringAt(source, 3, 0, 0)
+				title, _ := stringAt(source, 3, 0, 2)
 				table.sources = append(table.sources, Citation{Title: title, URL: citationURL, Favicon: favicon})
 			}
 			tables = append(tables, table)
@@ -925,13 +921,13 @@ func takeCitations(text string, tables []citationTable) (string, []Citation) {
 func expandDocuments(candidate []any, raw string) string {
 	if plan, ok := richContentField(candidate, 55); ok {
 		raw = researchPlanPattern.ReplaceAllStringFunc(raw, func(string) string {
-			title, _ := stringPath(plan, 0)
+			title, _ := stringAt(plan, 0)
 			lines := []string{title}
-			steps, _ := valuePath(plan, 1)
+			steps, _ := valueAt(plan, 1)
 			stepValues, _ := steps.([]any)
 			for _, step := range stepValues {
-				label, _ := stringPath(step, 1)
-				detail, _ := stringPath(step, 2)
+				label, _ := stringAt(step, 1)
+				detail, _ := stringAt(step, 2)
 				lines = append(lines, strings.TrimSpace(label+"\n"+detail))
 			}
 			return strings.Join(lines, "\n\n")
@@ -941,23 +937,23 @@ func expandDocuments(candidate []any, raw string) string {
 	if len(chips) == 0 {
 		return raw
 	}
-	if phase, _ := intPath(candidate, 8, 0); Phase(phase) != PhaseComplete {
+	if phase, _ := intAt(candidate, 8, 0); Phase(phase) != PhaseComplete {
 		return raw[:chips[0][0]]
 	}
 	documentIDs := make(map[string]string)
 	if links, ok := richContentField(candidate, 56); ok {
 		entries, _ := links.([]any)
 		for _, entry := range entries {
-			chip, _ := stringPath(entry, 0, 0)
-			documentID, _ := stringPath(entry, 1)
+			chip, _ := stringAt(entry, 0, 0)
+			documentID, _ := stringAt(entry, 1)
 			documentIDs[chip] = documentID
 		}
 	}
 	contents := make(map[string]string)
 	documents, _ := arrayAt(candidate, 30)
 	for _, document := range documents {
-		documentID, _ := stringPath(document, 0)
-		content, _ := stringPath(document, 4)
+		documentID, _ := stringAt(document, 0)
+		content, _ := stringAt(document, 4)
 		contents[documentID] = content
 	}
 	return documentChipPattern.ReplaceAllStringFunc(raw, func(chip string) string {
@@ -1146,7 +1142,7 @@ func mediaPlaceholderOffset(candidate []any, placeholder string) int {
 	if placeholder == "" {
 		return -1
 	}
-	raw, _ := stringPath(candidate, 1, 0)
+	raw, _ := stringAt(candidate, 1, 0)
 	index := strings.Index(raw, placeholder)
 	if index < 0 {
 		source := strings.TrimPrefix(placeholder, "http://googleusercontent.com/")
@@ -1250,47 +1246,8 @@ func isCandidate(candidate []any) bool {
 	if !ok || !strings.HasPrefix(rcid, "rc_") {
 		return false
 	}
-	_, hasPhase := intPath(candidate, 8, 0)
+	_, hasPhase := intAt(candidate, 8, 0)
 	return hasPhase
-}
-
-func valuePath(value any, indexes ...int) (any, bool) {
-	current := value
-	for _, index := range indexes {
-		values, ok := current.([]any)
-		if !ok || index < 0 || index >= len(values) {
-			return nil, false
-		}
-		current = values[index]
-	}
-	return current, true
-}
-
-func stringPath(value any, indexes ...int) (string, bool) {
-	current, ok := valuePath(value, indexes...)
-	if !ok {
-		return "", false
-	}
-	result, ok := current.(string)
-	return result, ok
-}
-
-func intPath(value any, indexes ...int) (int, bool) {
-	current, ok := valuePath(value, indexes...)
-	if !ok {
-		return 0, false
-	}
-	number, ok := current.(float64)
-	return int(number), ok
-}
-
-func firstString(value any) (string, bool) {
-	values, ok := value.([]any)
-	if !ok || len(values) == 0 {
-		return "", false
-	}
-	result, ok := values[0].(string)
-	return result, ok
 }
 
 var snapshotReplacer = strings.NewReplacer(`\<`, `<`, `\>`, `>`, `\_`, `_`, `\[`, `[`, `\]`, `]`)

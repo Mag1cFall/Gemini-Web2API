@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mag1cFall/Gemini-Web2API/internal/config"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/logging"
 	"github.com/Mag1cFall/Gemini-Web2API/internal/proxypool"
@@ -337,6 +338,12 @@ func (p *AccountPool) MarkReady(accountID string) {
 
 // MarkFailed 把账号标为不可用或待认证并记录原因，返回状态是否变化
 func (p *AccountPool) MarkFailed(accountID string, err error) bool {
+	cooled := false
+	defer func() {
+		if cooled {
+			p.persistCooldowns()
+		}
+	}()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry := p.entry(accountID)
@@ -349,6 +356,9 @@ func (p *AccountPool) MarkFailed(accountID string, err error) bool {
 	}
 	p.reportTransport(err)
 	if errors.Is(err, gemini.ErrCaptcha) {
+		if p.captcha != nil {
+			cooled = p.coolExitLocked(entry.Info.Proxy, time.Now().Add(CaptchaCooldown))
+		}
 		p.reportCaptcha(entry)
 	}
 	changed := entry.State != state || entry.LastError != errorText(err)
@@ -685,11 +695,14 @@ func (p *AccountPool) ReportFailure(accountID string, modelID string, err error)
 	entry.Cooldown = value
 	logging.Warn(accountID, "账号冷却", "至", until, "原因", reasonTexts[reason])
 	if reason == "captcha" {
+		if p.captcha != nil {
+			p.coolExitLocked(entry.Info.Proxy, until)
+		}
 		p.reportCaptcha(entry)
 	}
 }
 
-// reasonTexts 是冷却原因代码在日志中的说明，与管理端的原因文案一致
+// reasonTexts 是冷却原因代码在日志与账号不可用原因中的说明，与管理端的原因文案一致
 var reasonTexts = map[string]string{
 	"usage_limit":    "用量上限",
 	"rate_limited":   "频率限制",
@@ -718,21 +731,42 @@ func (p *AccountPool) reportCaptcha(entry *accountEntry) {
 
 // CoolExit 让经同一出口的账号与访客会话冷却到 until，原因为人机验证拦截，proxy 为出口代理 URL，直连为空
 func (p *AccountPool) CoolExit(proxy string, until time.Time) {
-	cooled := false
 	p.mu.Lock()
-	for _, entry := range p.entries {
-		if entry.Info.Proxy != proxy || !until.After(entry.Cooldown.until) {
-			continue
-		}
-		entry.Cooldown = cooldown{until: until.Round(0), reason: "captcha"}
-		cooled = true
-		logging.Warn(entry.AccountID, "账号冷却", "至", until, "原因", reasonTexts["captcha"])
-	}
+	cooled := p.coolExitLocked(proxy, until)
 	p.notifyLocked()
 	p.mu.Unlock()
 	if cooled {
 		p.persistCooldowns()
 	}
+}
+
+// coolExitLocked 让经 proxy 出口的账号与访客会话冷却到 until，已处于同一人机验证冷却窗口时不重复写入，调用方持有 p.mu
+func (p *AccountPool) coolExitLocked(proxy string, until time.Time) bool {
+	cooled := false
+	until = until.Round(0)
+	for _, entry := range p.entries {
+		if entry.Info.Proxy != proxy || !until.After(entry.Cooldown.until) {
+			continue
+		}
+		if entry.Cooldown.reason == "captcha" && until.Sub(entry.Cooldown.until) < time.Minute {
+			continue
+		}
+		entry.Cooldown = cooldown{until: until, reason: "captcha"}
+		cooled = true
+		logging.Warn(entry.AccountID, "账号冷却", "至", until, "原因", reasonTexts["captcha"])
+	}
+	return cooled
+}
+
+// CaptchaCooldownUntil 返回账号因人机验证拦截冷却的截止时间，未处于人机验证冷却时为零值
+func (p *AccountPool) CaptchaCooldownUntil(accountID string) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry := p.entry(accountID)
+	if entry == nil || entry.Cooldown.reason != "captcha" || !time.Now().Before(entry.Cooldown.until) {
+		return time.Time{}
+	}
+	return entry.Cooldown.until
 }
 
 // rateLimitCooldown 是上游频率限制的首次冷却时长
@@ -949,19 +983,13 @@ func (p *AccountPool) unavailableReason(e *accountEntry, now time.Time, modelID 
 		if until.After(value.until) {
 			value = cooldown{until: until, reason: "usage_limit"}
 		}
-		reason := fmt.Sprintf("%s 冷却至 %s（%s", e.AccountID, until.Local().Format(time.TimeOnly), cooldownNames[value.reason])
+		reason := fmt.Sprintf("%s 冷却至 %s（%s", e.AccountID, until.Local().Format(time.TimeOnly), reasonTexts[value.reason])
 		if value.cause != "" {
 			reason += "：" + value.cause
 		}
 		return reason + "）"
 	}
 	return e.AccountID + " " + string(e.State)
-}
-
-// cooldownNames 是冷却原因 code 的说明
-var cooldownNames = map[string]string{
-	"usage_limit": "模型用量已达上限", "rate_limited": "请求频率受限", "ip_restricted": "出口 IP 受限",
-	"captcha": "人机验证拦截", "model_mismatch": "模型被降级", "upstream_error": "上游错误",
 }
 
 // Changed 返回账号状态下一次变化或请求槽释放时关闭的通道
@@ -1209,8 +1237,8 @@ func (e *accountEntry) supportsModel(modelID string) bool {
 	if e.Client == nil {
 		return false
 	}
-	_, err := e.Client.ResolveModel(modelID)
-	return err == nil
+	model, err := e.Client.ResolveModel(modelID)
+	return err == nil && !config.IsModelHidden(model.ID, model.PredefinedGem)
 }
 
 func (p *AccountPool) entry(accountID string) *accountEntry {

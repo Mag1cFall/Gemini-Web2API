@@ -4,6 +4,7 @@ import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { ClampText } from '@/components/ui/clamp'
 import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog'
 import { settingsMessages } from '@/features/settings/messages'
 import { api } from '@/lib/api'
@@ -68,7 +69,9 @@ export function DirectoryDialog({
       >
         {listing.isError && (
           <Callout tone="error" role="alert">
-            {fill(m.browseFailed, { message: listing.error.message })}
+            <ClampText className="wrap-anywhere">
+              {fill(m.browseFailed, { message: listing.error.message })}
+            </ClampText>
           </Callout>
         )}
         <ul className="flex flex-col">

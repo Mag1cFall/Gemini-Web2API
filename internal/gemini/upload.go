@@ -207,7 +207,7 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	req.URL.RawQuery = c.frontendQuery(bootstrap, bootstrap.Language)
 	c.applyXHRHeaders(req)
 	req.Header[http.HeaderOrderKey] = processFileHeaderOrder
-	header, err := json.Marshal(withVariant([]any{
+	header, err := json.Marshal(withVariantAndTimezone([]any{
 		1, nil, nil, nil, model.Hash, nil, bootstrap.Language, nil, c.features(), nil, nil, nil, nil, nil, model.Mode, int(level), c.clientID,
 		[]string{bootstrap.BL},
 	}, model.Variant))
@@ -228,28 +228,19 @@ func (c *Client) processFile(ctx context.Context, bootstrap Bootstrap, model Mod
 	if resp.StatusCode != http.StatusOK {
 		return "", responseStatusError(resp, "处理附件")
 	}
-	fileID := ""
-	err = scanProtocolRecords(resp.Body, func(record []any) error {
-		if tag, _ := stringAt(record, 0); tag != "wrb.fr" {
-			return nil
+	missing := retryableProtocolError("处理附件时官网没有返回附件 ID", nil)
+	payload, err := rpcPayload(resp.Body, "", func(record []any) error {
+		if record == nil {
+			return missing
 		}
-		encoded, _ := stringAt(record, 2)
-		if encoded == "" {
-			return rpcStatusError("处理附件", record)
-		}
-		var payload []any
-		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("解析附件处理结果: %w", err)
-		}
-		ids, _ := arrayAt(payload, 3)
-		fileID, _ = stringAt(ids, 0)
-		return nil
+		return rpcStatusError("处理附件", record)
 	})
 	if err != nil {
 		return "", err
 	}
+	fileID, _ := stringAt(payload, 3, 0)
 	if fileID == "" {
-		return "", retryableProtocolError("处理附件时官网没有返回附件 ID", nil)
+		return "", missing
 	}
 	return fileID, nil
 }

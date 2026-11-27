@@ -5,7 +5,7 @@ Gemini 官网的前端与接口会在没有公告的情况下变化，服务突�
 ## 采集
 
 1. 在 Chrome 中打开 `https://gemini.google.com/app`，按 F12 打开开发者工具，切到 Network 面板，勾选 Preserve log，过滤框填 `batchexecute`
-2. 刷新页面，依次出现 `rpcids=otAQ7b`（模型目录）、`ESY5D`（账号偏好）、`GPRiHf`（账号异常状态）；打开用量页时出现 `jSf9Qc`
+2. 刷新页面，依次出现 `rpcids=otAQ7b`（模型目录）、`ESY5D`（账号偏好）、`GPRiHf`（账号的使用限制警告）；打开用量页时出现 `jSf9Qc`
 3. 发一条最短的消息，过滤框改为 `processSession` 看到生成会话：握手（`count=0`）、上行（`count=2`）、长轮询（`TYPE=xmlhttp`）、结束消息与关闭（`TYPE=terminate`）；带附件时另有 `upload` 与 `ProcessFile`（过滤框填 `BardChatUi`）
 4. 对每个要对照的请求右键选 Copy → Copy as cURL (bash)，保存到本地文件；响应在 Response 标签页中全选复制保存
 5. 页面源码中的启动数据在 Elements 面板搜索 `WIZ_global_data`，其中 `SNlM0e`（CSRF 令牌 `at`）、`cfb2h`（构建号 `bl`）、`FdrFJe`（`f.sid`）与 `TuX5cc`（界面语言）是服务构造请求时要用的字段
@@ -20,12 +20,13 @@ Gemini 官网的前端与接口会在没有公告的情况下变化，服务突�
 | --- | --- | --- |
 | 页面启动数据 | `internal/gemini/bootstrap.go` | `WIZ_global_data` 各键名与上传参数 |
 | 请求查询参数与表单 | `internal/gemini/client.go` 的 `batchExecute` | `rpcids`、`source-path`、`bl`、`f.sid`、`hl`、`_reqid`、`rt` 的顺序与 `f.req`、`at` 的编码 |
+| batchexecute 与 ProcessFile 扩展头 | `internal/gemini/models.go` 的 `buildGenericHeader`、`buildConversationHeader`、`withVariantAndTimezone`，ProcessFile 在 `upload.go` | `x-goog-ext-525001261-jspb` 的槽位 |
 | 生成会话请求头 | `internal/gemini/channel.go` 的 `channelHeaders`、`models.go` 的 `buildModelHeader` | `$httpHeaders` 各项的取值与顺序、模型头的槽位 |
 | 生成会话上行 | `internal/gemini/payload.go`、`client.go` 的 `stream` | 会话配置消息与输入消息；99 槽 `inner` 中消息、附件、工具、会话三元组与模型模式的位置 |
 | 生成会话下行 | `internal/gemini/channel.go` 的 `frame`、`decoder.go` | 长轮询帧的分隔与种类，生成载荷中候选快照、正文、思考、媒体、续接令牌与收尾帧的下标 |
-| 浏览器身份 | `internal/gemini/identity.go`、`identity_builds.go` | 各 Chrome 版本的请求头、TLS 与 HTTP/2 指纹 |
+| 浏览器身份 | `internal/gemini/identity.go`、`identity_builds.go`、`identity_transport.go` | 各 Chrome 版本的请求头、TLS 与 HTTP/2 指纹 |
 | 模型目录 | `internal/gemini/models.go` | `otAQ7b` 响应中模型行、默认模式与思考强度的下标 |
-| 账号偏好、用量、异常状态 | `internal/gemini/gems.go`、`usage.go`、`abuse.go` | `ESY5D`、`jSf9Qc`、`GPRiHf` 的字段号 |
+| 账号偏好、用量、使用限制警告 | `internal/gemini/preferences.go`、`usage.go`、`abuse.go` | `ESY5D`、`jSf9Qc`、`GPRiHf` 的字段号 |
 | 附件上传 | `internal/gemini/upload.go`、`media.go` | 上传两步的地址、头与 `ProcessFile` 的返回 |
 
 按下面的顺序定位变化：

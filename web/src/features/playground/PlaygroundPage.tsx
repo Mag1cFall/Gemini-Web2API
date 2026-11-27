@@ -6,6 +6,7 @@ import { appMessages } from '@/app/messages'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { ClampText } from '@/components/ui/clamp'
 import { Collapse } from '@/components/ui/collapse'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Field } from '@/components/ui/field'
@@ -340,9 +341,9 @@ const Output = memo(function Output({ run }: { run: Run | undefined }) {
       <div className="relative flex min-w-0 flex-col gap-4 px-5 py-5 xl:min-h-0 xl:grow xl:basis-0 xl:overflow-y-auto">
         {result.error && (
           <Callout tone="error" role="alert">
-            <p className="font-mono text-xs break-words whitespace-pre-wrap select-text">
+            <ClampText className="font-mono text-xs wrap-anywhere whitespace-pre-wrap select-text">
               {serverText(result.error)}
-            </p>
+            </ClampText>
           </Callout>
         )}
         <Tabs defaultValue="reply">
@@ -496,7 +497,7 @@ export function PlaygroundPage() {
     [],
   )
 
-  const catalog = models.data?.models ?? []
+  const catalog = (models.data?.models ?? []).filter((model) => !model.hidden)
   const mode = modes.find((item) => item === params.get('mode')) ?? 'text'
   const protocols = modeProtocols[mode]
   const protocol = protocols.find((item) => item === params.get('protocol')) ?? protocols[0]

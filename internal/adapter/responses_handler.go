@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"cmp"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -71,10 +70,6 @@ type ResponsesRequest struct {
 
 // ResponsesHandler 处理 OpenAI Responses API，store 不为 false 的响应写入账本库，background 为 true 时立即返回 queued
 func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
-	configureSessionStore(pool, store)
-	configureCooldownStore(pool, store)
-	failInterruptedResponses(store)
 	return func(c *gin.Context) {
 		var request ResponsesRequest
 		err := decodeRequest(c, &request)
@@ -158,16 +153,9 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 		if request.Stream {
 			setSSEHeaders(c)
 			if request.Background {
-				requestContext := ctx
-				detached, cancel := context.WithCancelCause(context.WithoutCancel(requestContext))
-				defer cancel(nil)
-				logging.FromContext(requestContext).Detach(cancel)
-				ctx = detached
-				responseJobs.Lock()
-				responseJobs.jobs[responseID] = &responseJob{cancel: func() { cancel(nil) }}
-				responseJobs.Unlock()
-				defer finishResponseJob(responseID)
-				c.Writer = &detachedWriter{ResponseWriter: c.Writer}
+				var done func()
+				ctx, done = detachStream(c, responseID)
+				defer done()
 				running := responseShell(responseID, publicModelID(pool, request.Model), created, "in_progress")
 				applyRequestFields(running, request)
 				saveResponse(ctx, store, request, responseID, created, running)
@@ -223,7 +211,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 				saveFailedResponse(ctx, store, request, responseID, created, writer.fail(c, err))
 				return
 			}
-			rememberHistory(pool, result, request.Instructions, bridge, turns)
+			rememberHistory(pool, result, request.Instructions, bridge, turns, projection)
 			applyRequestFields(response, request)
 			err = writer.settleOutput(response, result.Accumulator, projection)
 			if !finishResponseJob(responseID) {
@@ -258,7 +246,7 @@ func ResponsesHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.Ha
 			writeOpenAIError(c, http.StatusBadGateway, "output_validation_error", err.Error())
 			return
 		}
-		rememberHistory(pool, result, request.Instructions, bridge, turns)
+		rememberHistory(pool, result, request.Instructions, bridge, turns, nil)
 		applyRequestFields(response, request)
 		saveResponse(ctx, store, request, responseID, created, response)
 		c.Header("X-Response-ID", responseID)

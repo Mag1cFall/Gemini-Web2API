@@ -128,7 +128,7 @@ func decodeMessageContent(ctx context.Context, raw json.RawMessage, client *gemi
 			var failed bool
 			_ = json.Unmarshal(part["is_error"], &failed)
 			if failed && strings.TrimSpace(content) == "" {
-				content = "（执行失败，没有输出）"
+				content = failedResult
 			}
 			writeResultBlock(&builder, cmp.Or(toolNames[id], id), content)
 		case "thinking", "redacted_thinking":

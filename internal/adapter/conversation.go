@@ -23,13 +23,17 @@ type conversationRegistry struct {
 	store  *requestdb.Store
 	// temporary 为不写入网页历史的账号以普通会话发送的会话，键为 CID，不再被续接后从网页历史删除
 	temporary map[string]temporaryChat
-	mu        sync.Mutex
+	// active 记录正在处理中的 CID 引用计数，定时清理跳过进行中的会话
+	active map[string]int
+	mu     sync.Mutex
 }
 
-// temporaryChat 是待删除的网页会话所属账号、模型模式与最近一次生成结束的时间
+// temporaryChat 是待删除的网页会话所属账号、模型信息与最近一次生成结束的时间
 type temporaryChat struct {
 	accountID string
 	mode      int
+	variant   string
+	level     gemini.ThinkingLevel
 	touched   time.Time
 }
 
@@ -50,6 +54,7 @@ var conversations = conversationRegistry{
 	locks:     make(map[string]*conversationLock),
 	ttl:       30 * time.Minute,
 	temporary: make(map[string]temporaryChat),
+	active:    make(map[string]int),
 }
 
 // continueSession 是设置页的续接官网会话开关，关闭时每个请求新建网页会话
@@ -124,12 +129,70 @@ func (r *conversationRegistry) put(state *gemini.ConversationState, accountID st
 
 // markTemporary 登记一个结束生成后需要从网页历史删除的会话
 func (r *conversationRegistry) markTemporary(snapshot gemini.ConversationSnapshot, accountID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.temporary[snapshot.CID] = temporaryChat{accountID: accountID, mode: snapshot.ModelMode, touched: time.Now()}
+	r.markTemporaryChat(snapshot, accountID, "", 0)
 }
 
-// takeTemporary 取出不再被续接的待删除会话：生成结束超过一分钟且没有未过期的续接条目指向它，all 为真时取出全部
+// markTemporaryChat 登记一个结束生成后需要从网页历史删除的会话，同一 CID 再次登记时保留已有的非零模型信息
+func (r *conversationRegistry) markTemporaryChat(snapshot gemini.ConversationSnapshot, accountID string, variant string, level gemini.ThinkingLevel) {
+	if snapshot.CID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	existing := r.temporary[snapshot.CID]
+	mode := snapshot.ModelMode
+	if mode == 0 {
+		mode = existing.mode
+	}
+	if variant == "" {
+		variant = existing.variant
+	}
+	if level == 0 {
+		level = existing.level
+	}
+	r.temporary[snapshot.CID] = temporaryChat{
+		accountID: accountID,
+		mode:      mode,
+		variant:   variant,
+		level:     level,
+		touched:   time.Now(),
+	}
+}
+
+// isTemporary 报告会话是否已登记为待删除的临时普通会话
+func (r *conversationRegistry) isTemporary(cid string) bool {
+	if cid == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.temporary[cid]
+	return ok
+}
+
+// hold 标记 CID 正有生成请求使用，返回的释放函数在请求退出时递减引用计数
+func (r *conversationRegistry) hold(cid string) func() {
+	if cid == "" {
+		return func() {}
+	}
+	r.mu.Lock()
+	if r.active == nil {
+		r.active = make(map[string]int)
+	}
+	r.active[cid]++
+	r.mu.Unlock()
+	return func() {
+		r.mu.Lock()
+		if r.active[cid] <= 1 {
+			delete(r.active, cid)
+		} else {
+			r.active[cid]--
+		}
+		r.mu.Unlock()
+	}
+}
+
+// takeTemporary 取出不再被续接的待删除会话：生成结束超过一分钟、没有进行中的请求且没有未过期的续接条目指向它，all 为真时取出全部
 func (r *conversationRegistry) takeTemporary(now time.Time, all bool) map[string]temporaryChat {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -141,7 +204,7 @@ func (r *conversationRegistry) takeTemporary(now time.Time, all bool) map[string
 	}
 	taken := make(map[string]temporaryChat)
 	for cid, chat := range r.temporary {
-		if all || !live[cid] && now.Sub(chat.touched) > time.Minute {
+		if all || !live[cid] && r.active[cid] == 0 && now.Sub(chat.touched) > time.Minute {
 			taken[cid] = chat
 			delete(r.temporary, cid)
 		}
@@ -149,14 +212,14 @@ func (r *conversationRegistry) takeTemporary(now time.Time, all bool) map[string
 	return taken
 }
 
-// deleteChats 从各会话所属账号的网页历史中删除会话
+// deleteChats 按官网侧栏删除流程从各会话所属账号的网页历史中删除会话（GzXR5e、qWymEb 及关联异步任务的 Q4Gw3c）
 func deleteChats(ctx context.Context, pool *balancer.AccountPool, chats map[string]temporaryChat) {
 	for cid, chat := range chats {
 		client := pool.Client(chat.accountID)
 		if client == nil {
 			continue
 		}
-		if err := client.DeleteConversation(ctx, cid, chat.mode); err != nil {
+		if err := client.DeleteConversation(ctx, cid, chat.mode, chat.variant, chat.level); err != nil {
 			logging.Warn(chat.accountID, "删除网页会话失败", "会话", cid, "错误", err)
 			continue
 		}
@@ -211,10 +274,6 @@ func configureCooldownStore(pool *balancer.AccountPool, store *requestdb.Store) 
 // configureSessionStore 让会话登记写入账本库，并恢复上次运行保存的未过期会话
 func configureSessionStore(pool *balancer.AccountPool, store *requestdb.Store) {
 	conversations.mu.Lock()
-	if conversations.store != nil {
-		conversations.mu.Unlock()
-		return
-	}
 	conversations.store = store
 	conversations.mu.Unlock()
 	if !continueSession.Load() {

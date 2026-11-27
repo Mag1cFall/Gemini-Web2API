@@ -256,10 +256,16 @@ func (p *Pool) Empty() bool {
 	return len(p.proxies) == 0
 }
 
-// Check 以 probe 并行检测全部代理并更新状态，返回绑定在不可用代理上、且有可用代理可改绑的账号
+// Check 以 probe 并行检测未处于人机验证停用期的全部代理并更新状态，返回绑定在不可用代理上、且有可用代理可改绑的账号
 func (p *Pool) Check(ctx context.Context, probe func(context.Context, string) (time.Duration, error)) []string {
+	now := time.Now()
 	p.mu.Lock()
-	targets := append([]*proxyState(nil), p.proxies...)
+	targets := make([]*proxyState, 0, len(p.proxies))
+	for _, state := range p.proxies {
+		if !now.Before(state.blockedUntil) {
+			targets = append(targets, state)
+		}
+	}
 	p.mu.Unlock()
 	type result struct {
 		latency time.Duration
@@ -281,17 +287,15 @@ func (p *Pool) Check(ctx context.Context, probe func(context.Context, string) (t
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := time.Now()
-	anyHealthy := false
+	now = time.Now()
 	for index, state := range targets {
 		state.checked, state.latency, state.err = now, results[index].latency, ""
 		state.healthy = results[index].err == nil
 		if !state.healthy {
 			state.latency, state.err = 0, WithLoopbackHint(state.url, results[index].err).Error()
 		}
-		anyHealthy = anyHealthy || state.usable()
 	}
-	if !anyHealthy {
+	if !p.anyHealthy() {
 		return nil
 	}
 	moved := []string{}

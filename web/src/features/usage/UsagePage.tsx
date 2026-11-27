@@ -15,6 +15,7 @@ import { useSearchParams } from 'react-router'
 
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { ClampText } from '@/components/ui/clamp'
 import { Card, PageHeader } from '@/components/ui/page'
 import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
@@ -449,7 +450,7 @@ export function UsagePage() {
         <>
           {report.isError && (
             <Callout tone="error" role="alert">
-              <span>{report.error.message}</span>
+              <ClampText className="wrap-anywhere">{report.error.message}</ClampText>
               <Button size="sm" onClick={() => void report.refetch()}>
                 {m.retry}
               </Button>

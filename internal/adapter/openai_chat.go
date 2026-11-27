@@ -261,7 +261,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 					return
 				}
 				if choice == 0 {
-					rememberHistory(pool, result, "", bridge, turns)
+					rememberHistory(pool, result, "", bridge, turns, projection)
 				}
 				if err := writeOpenAIFinish(c.Writer, responseID, created, streamModel, choice, result, bridge); err != nil {
 					return
@@ -296,7 +296,7 @@ func ChatCompletionHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				return
 			}
 			if choice == 0 {
-				rememberHistory(pool, result, "", bridge, turns)
+				rememberHistory(pool, result, "", bridge, turns, nil)
 				c.Header("X-Conversation-ID", result.ConversationID)
 				c.Header("X-Provider-Model", result.ProviderModel)
 			}

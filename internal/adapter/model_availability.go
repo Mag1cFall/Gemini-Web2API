@@ -23,15 +23,47 @@ const modelRecoveryWindow = time.Minute
 // errCatalogNotReady 是没有任何账号已就绪或已读取模型目录时的错误
 var errCatalogNotReady = &gemini.ProtocolError{HTTPStatus: http.StatusServiceUnavailable, Message: "账号与访客会话的模型目录尚未就绪，请稍后重试"}
 
-// modelKnown 判断模型能否识别：没有任何模型目录时为 503；已读取的目录都没有该模型时，有账号尚未读取目录为 503 并写明其状态，只有更高订阅层级才有该模型时为 403，否则为 404
-func modelKnown(pool *balancer.AccountPool, modelName string) error {
-	availability := pool.ModelAvailability(context.Background(), config.MapModel(modelName))
-	if availability.Catalog && !availability.Known && len(availability.Pending) == 0 {
-		if err := tierError(pool, modelName); err != nil {
-			return err
-		}
+// hiddenModelError 在模型被设置在公开 API 中关闭时返回 403 错误，未关闭时返回 nil
+func hiddenModelError(pool *balancer.AccountPool, modelName string) error {
+	rawID := gemini.NormalizeModelID(modelName)
+	mapped := config.MapModel(modelName)
+	mappedID := gemini.NormalizeModelID(mapped)
+	if config.IsModelHidden(rawID, false) || config.IsModelHidden(mappedID, false) {
+		return &gemini.ProtocolError{HTTPStatus: http.StatusForbidden, Message: fmt.Sprintf("模型 %q 已在设置中关闭，未在 API 中开放", modelName)}
 	}
-	return catalogError(modelName, availability, modelNotFoundMessage(pool, modelName))
+	hidden := false
+	for _, account := range pool.CatalogAccounts() {
+		model, err := account.Client.ResolveModel(mapped)
+		if err != nil {
+			continue
+		}
+		if !config.IsModelHidden(model.ID, model.PredefinedGem) {
+			return nil
+		}
+		hidden = true
+	}
+	if hidden {
+		return &gemini.ProtocolError{HTTPStatus: http.StatusForbidden, Message: fmt.Sprintf("模型 %q 已在设置中关闭，未在 API 中开放", modelName)}
+	}
+	return nil
+}
+
+// modelKnown 判断模型能否识别：已在设置中关闭的模型为 403；没有任何模型目录时为 503；已读取的目录都没有该模型时，有账号尚未读取目录为 503 并写明其状态，只有更高订阅层级才有该模型时为 403，否则为 404
+func modelKnown(pool *balancer.AccountPool, modelName string) error {
+	if err := hiddenModelError(pool, modelName); err != nil {
+		return err
+	}
+	availability := pool.ModelAvailability(context.Background(), config.MapModel(modelName))
+	if availability.Known {
+		return nil
+	}
+	if !availability.Catalog || len(availability.Pending) > 0 {
+		return catalogError(modelName, availability, "")
+	}
+	if err := tierError(pool, modelName); err != nil {
+		return err
+	}
+	return &gemini.ProtocolError{HTTPStatus: http.StatusNotFound, Message: modelNotFoundMessage(pool, modelName)}
 }
 
 // tierError 返回模型只在更高订阅层级可用时的 403 错误：某账号目录中该模型为上锁的升级项，或它只出现在其他层级账号最近一次读取的目录中；都不是时返回 nil
@@ -98,8 +130,11 @@ func noAccountError(ctx context.Context, pool *balancer.AccountPool, modelName s
 	return cooldownError(modelName, time.Until(recoverAt), pool.ModelAvailability(ctx, modelName).Reasons)
 }
 
-// awaitModel 判断模型能否调度：识别失败按 modelKnown，支持该模型的账号都未就绪时为 503 并列出原因，全部冷却时最早恢复的账号在 modelRecoveryWindow 内恢复则等待，否则为 429
+// awaitModel 判断模型能否调度：已在设置中关闭或识别失败按 modelKnown，支持该模型的账号都未就绪时为 503 并列出原因，全部冷却时最早恢复的账号在 modelRecoveryWindow 内恢复则等待，否则为 429
 func awaitModel(c *gin.Context, pool *balancer.AccountPool, modelName string) error {
+	if err := hiddenModelError(pool, modelName); err != nil {
+		return err
+	}
 	modelID := config.MapModel(modelName)
 	for {
 		changed := pool.Changed()

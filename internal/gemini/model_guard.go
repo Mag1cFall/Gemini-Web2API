@@ -143,7 +143,7 @@ func (g *modelGuard) Emitted() bool {
 	return g.emitted
 }
 
-// ServedBy 报告上游元数据是否表明回答来自该模型：变体模型的响应带账号默认模型的 hash，按型号名核对，上游在 Low 以外的思考强度下于型号名后加档位名（如 4 Argon High）
+// ServedBy 报告上游元数据是否表明回答来自该模型：变体模型的响应带账号默认模型的 hash，按型号名核对，上游在 Low 以外的思考强度下于型号名后加档位名（如 4 Neon High）
 func (m Model) ServedBy(metadata EventMetadataData) bool {
 	if m.Variant == "" {
 		return metadata.ModelHash == m.Hash

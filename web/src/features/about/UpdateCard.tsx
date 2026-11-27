@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
+import { ClampText } from '@/components/ui/clamp'
 import { Dialog, DialogClose, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Meter } from '@/components/ui/meter'
 import { Card, CardHeader, CardRow } from '@/components/ui/page'
@@ -37,7 +38,8 @@ const updateMessages = defineMessages({
     restarting: '正在重启到 {version}，服务就绪后页面自动刷新',
     development: '源码构建不支持在线更新，新版本从发布页下载',
     container: 'Docker 部署随镜像更新，拉取新镜像后重建容器',
-    checkFailed: '无法读取最新版本：{error}',
+    checkFailed: '无法读取最新版本',
+    updateFailed: '更新失败',
     viewRelease: '查看发布页',
     loadFailed: '无法读取更新状态',
     downloading: '正在下载新版本',
@@ -60,7 +62,8 @@ const updateMessages = defineMessages({
     restarting: '正在重新啟動到 {version}，服務就緒後頁面自動重新整理',
     development: '原始碼建置不支援線上更新，新版本請從發布頁面下載',
     container: 'Docker 部署隨映像更新，拉取新映像後重建容器',
-    checkFailed: '無法讀取最新版本：{error}',
+    checkFailed: '無法讀取最新版本',
+    updateFailed: '更新失敗',
     viewRelease: '查看發布頁面',
     loadFailed: '無法讀取更新狀態',
     downloading: '正在下載新版本',
@@ -85,7 +88,8 @@ const updateMessages = defineMessages({
     development: 'Source builds do not update online; download new versions from Releases',
     container:
       'Docker deployments update with the image; pull the new image and recreate the container',
-    checkFailed: 'Could not read the latest version: {error}',
+    checkFailed: 'Could not read the latest version',
+    updateFailed: 'Update failed',
     viewRelease: 'View release',
     loadFailed: 'Could not read the update status',
     downloading: 'Downloading the new version',
@@ -111,7 +115,8 @@ const updateMessages = defineMessages({
       'ソースからのビルドはオンライン更新に対応していません。新しいバージョンはリリースから入手してください',
     container:
       'Docker ではイメージごと更新します。新しいイメージを取得してコンテナーを作り直してください',
-    checkFailed: '最新バージョンを読み込めません：{error}',
+    checkFailed: '最新バージョンを読み込めません',
+    updateFailed: '更新に失敗しました',
     viewRelease: 'リリースを表示',
     loadFailed: '更新状態を読み込めません',
     downloading: '新しいバージョンをダウンロードしています',
@@ -137,7 +142,8 @@ const updateMessages = defineMessages({
       '소스 빌드는 온라인 업데이트를 지원하지 않습니다. 새 버전은 릴리스에서 내려받으세요',
     container:
       'Docker 배포는 이미지로 업데이트합니다. 새 이미지를 받은 뒤 컨테이너를 다시 만드세요',
-    checkFailed: '최신 버전을 불러올 수 없습니다: {error}',
+    checkFailed: '최신 버전을 불러올 수 없습니다',
+    updateFailed: '업데이트 실패',
     viewRelease: '릴리스 보기',
     loadFailed: '업데이트 상태를 불러올 수 없습니다',
     downloading: '새 버전을 다운로드하는 중',
@@ -163,7 +169,8 @@ const updateMessages = defineMessages({
       'Les builds depuis les sources ne se mettent pas à jour en ligne ; téléchargez les nouvelles versions depuis Releases',
     container:
       'Les déploiements Docker se mettent à jour avec l’image ; récupérez la nouvelle image et recréez le conteneur',
-    checkFailed: 'Impossible de lire la dernière version : {error}',
+    checkFailed: 'Impossible de lire la dernière version',
+    updateFailed: 'Échec de la mise à jour',
     viewRelease: 'Voir la version',
     loadFailed: 'Impossible de lire l’état de mise à jour',
     downloading: 'Téléchargement de la nouvelle version',
@@ -189,7 +196,8 @@ const updateMessages = defineMessages({
       'Builds aus dem Quellcode werden nicht online aktualisiert; neue Versionen gibt es unter Releases',
     container:
       'Docker-Installationen werden mit dem Image aktualisiert; neues Image laden und Container neu erstellen',
-    checkFailed: 'Neueste Version konnte nicht gelesen werden: {error}',
+    checkFailed: 'Neueste Version konnte nicht gelesen werden',
+    updateFailed: 'Update fehlgeschlagen',
     viewRelease: 'Release ansehen',
     loadFailed: 'Update-Status konnte nicht gelesen werden',
     downloading: 'Neue Version wird heruntergeladen',
@@ -245,7 +253,7 @@ export function UpdateCard() {
               onClick={() => {
                 check.mutate(undefined, {
                   onError: (error) => {
-                    toast({ tone: 'error', title: error.message })
+                    toast({ tone: 'error', title: m.checkFailed, detail: error.message })
                   },
                 })
               }}
@@ -264,7 +272,8 @@ export function UpdateCard() {
       {data.mode === 'binary' && data.error && (
         <div className="px-5 py-4">
           <Callout tone="error" role="alert">
-            {fill(m.checkFailed, { error: serverText(data.error) })}
+            <p className="font-medium">{m.checkFailed}</p>
+            <ClampText className="wrap-anywhere">{serverText(data.error)}</ClampText>
           </Callout>
         </div>
       )}
@@ -314,7 +323,7 @@ export function UpdateCard() {
                               setRestartFrom(next.current)
                             },
                             onError: (error) => {
-                              toast({ tone: 'error', title: error.message })
+                              toast({ tone: 'error', title: m.updateFailed, detail: error.message })
                             },
                           })
                         }}

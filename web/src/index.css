@@ -302,6 +302,20 @@
     scrollbar-color: var(--color-scrollbar) transparent;
     scrollbar-width: thin;
   }
+  html:lang(zh-TW) {
+    --font-sans:
+      'Microsoft JhengHei UI', 'Microsoft JhengHei', 'PingFang TC', 'Segoe UI', 'Noto Sans CJK TC',
+      system-ui, sans-serif;
+  }
+  html:lang(ja) {
+    --font-sans:
+      'Yu Gothic UI', 'Meiryo UI', 'Hiragino Sans', 'Segoe UI', 'Noto Sans CJK JP', system-ui,
+      sans-serif;
+  }
+  html:lang(ko) {
+    --font-sans:
+      'Malgun Gothic', 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans CJK KR', system-ui, sans-serif;
+  }
   * {
     scrollbar-width: thin;
   }

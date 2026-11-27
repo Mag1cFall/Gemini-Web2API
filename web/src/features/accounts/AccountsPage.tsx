@@ -141,20 +141,26 @@ export function AccountsPage() {
     },
     onSuccess: (failures, request) => {
       const labels = { proxy: m.setProxy, enable: m.enable, disable: m.disable, verify: m.verify }
-      const result = fill(m.batchResult, {
-        action: labels[request.action],
-        succeeded: request.accounts.length - failures.length,
-        failed: failures.length,
-      })
-      const items = failures
-        .map((failure) =>
-          fill(m.batchFailure, { id: failure.id, message: serverText(failure.message) }),
-        )
-        .join(m.listSeparator)
-      toast({
-        tone: failures.length === 0 ? 'success' : 'error',
-        title: failures.length === 0 ? result : fill(m.batchFailures, { result, items }),
-      })
+      const action = labels[request.action]
+      toast(
+        failures.length === 0
+          ? {
+              tone: 'success',
+              title: fill(m.batchResult, {
+                action,
+                succeeded: request.accounts.length,
+                failed: 0,
+              }),
+            }
+          : {
+              tone: 'error',
+              title: fill(m.batchFailed, { action, failed: failures.length }),
+              detail: failures.map((failure) => ({
+                label: failure.id,
+                message: serverText(failure.message),
+              })),
+            },
+      )
     },
     onSettled: () => {
       setProxyOpen(false)
@@ -535,6 +541,7 @@ function RowActions({
   onDelete: (accounts: Account[]) => void
 }) {
   const m = useMessages(accountsMessages)
+  const app = useMessages(appMessages)
   const client = useQueryClient()
   const action = useMutation({
     mutationFn: (kind: 'toggle' | 'verify') =>
@@ -545,8 +552,14 @@ function RowActions({
     onSuccess: (_, kind) => {
       if (kind === 'verify') toast({ tone: 'success', title: m.verified })
     },
-    onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+    onError: (error, kind) => {
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, {
+          action: kind === 'verify' ? m.verify : account.enabled ? m.disable : m.enable,
+        }),
+        detail: error.message,
+      })
     },
     onSettled: () => void client.invalidateQueries({ queryKey: accountsKey }),
   })

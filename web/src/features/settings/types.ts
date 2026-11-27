@@ -7,6 +7,7 @@ export interface ServiceConfig {
   nonstream_keepalive: boolean
   fake_stream: boolean
   model_mapping: string
+  hidden_models: string
   account_cooldown: string
   session_ttl: string
   init_timeout: string
@@ -56,6 +57,7 @@ export const editableKeys = [
   'nonstream_keepalive',
   'fake_stream',
   'model_mapping',
+  'hidden_models',
   'account_cooldown',
   'session_ttl',
   'init_timeout',

@@ -75,8 +75,11 @@ func (t *tray) entries() []trayEntry {
 	}
 	enabled := autostartEnabled(app)
 	return append(entries,
-		trayEntry{label: text.OpenInBrowser, run: func() { openBrowser(app, origin(t.shell.page)) }},
-		trayEntry{label: text.CopyAddress, run: func() { app.Clipboard.SetText(t.shell.page.Scheme + "://" + t.shell.page.Host) }},
+		trayEntry{label: text.OpenInBrowser, run: func() { openBrowser(app, origin(t.shell.currentPage())) }},
+		trayEntry{label: text.CopyAddress, run: func() {
+			page := t.shell.currentPage()
+			app.Clipboard.SetText(page.Scheme + "://" + page.Host)
+		}},
 		trayEntry{},
 		trayEntry{label: autostart, checkable: true, checked: enabled, run: func() {
 			if err := setAutostart(app, !enabled); err != nil {
@@ -85,7 +88,7 @@ func (t *tray) entries() []trayEntry {
 			t.refresh()
 		}},
 		trayEntry{},
-		trayEntry{label: text.Quit, run: app.Quit},
+		trayEntry{label: text.Quit, run: t.shell.quit},
 	)
 }
 

@@ -27,6 +27,8 @@ type Model struct {
 	Feature Feature
 	// Gem 为 Gem 条目的 Gem ID，写入生成请求 19 槽
 	Gem string
+	// PredefinedGem 表示该条目是官网 CNgdBe 类型 3 的 Google 预置 Gem
+	PredefinedGem bool
 	// Variant 为模型策略中与其他模型共用 mode 的模型的变体键，这类模型的 Hash 也是该键
 	Variant string
 	// Position 是条目在官网目录中的位置键（界面与 mode、变体键或工具编号），官网改名时不变
@@ -107,7 +109,7 @@ func parseToolOptions(payload []any) map[Feature][]toolOption {
 				continue
 			}
 			label, _ := stringAt(item, 3)
-			selected, _ := valuePath(item, 2)
+			selected, _ := valueAt(item, 2)
 			options[Feature(feature)] = append(options[Feature(feature)], toolOption{id: id, group: name, label: label, selected: selected == true, source: kind == 2})
 		}
 	}
@@ -235,8 +237,8 @@ func (c ModelCatalog) Resolve(value string) (Model, error) {
 	if index, ok := c.lookup[id]; ok {
 		return c.models[index], nil
 	}
-	if current, ok := renamedModel(id); ok {
-		if index, ok := c.lookup[current]; ok {
+	if rename, ok := renamedModel(id); ok {
+		if index, ok := c.lookup[rename.Current]; ok && c.models[index].Hash == rename.Hash {
 			return c.models[index], nil
 		}
 	}
@@ -495,26 +497,26 @@ var guestClientFeatures = []int{4, 33, 22, 6, 16, 19, 20, 38}
 // fallbackTimezone 是读不到本机时区名时写入客户端扩展头的时区
 const fallbackTimezone = "UTC"
 
-// hostTimezone 是客户端扩展头计时槽末尾的本机 IANA 时区名
+// hostTimezone 是客户端扩展头计时槽末尾与第 27 槽写入的本机 IANA 时区名
 var hostTimezone = localTimezone()
 
-// buildModelHeader 构造生成会话的模型扩展头 protobuf：模型、界面语言、会话类型、功能编号、账号层级编码、思考强度、客户端标识、构建标签与请求计时，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
+// buildModelHeader 构造生成会话的模型扩展头 protobuf：模型、界面语言、会话类型、功能编号、账号层级编码、思考强度、客户端标识、构建标签、请求计时与第 27 槽本机时区，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
 func buildModelHeader(features []int, model Model, language string, chatMode any, tier int, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) []byte {
 	return buildAccountModelHeader(features, model, language, chatMode, tier, 0, thinkingLevel, clientID, buildLabel, timing)
 }
 
-// withVariant 返回在第 24 槽写了变体键的客户端头，variant 为空时原样返回
-func withVariant(header []any, variant string) []any {
-	if variant == "" {
-		return header
-	}
-	for len(header) < 24 {
+// withVariantAndTimezone 返回在第 24 槽写入变体键（非空时）并在第 27 槽写入本机 IANA 时区的客户端头
+func withVariantAndTimezone(header []any, variant string) []any {
+	for len(header) < 27 {
 		header = append(header, nil)
 	}
-	return append(header, variant)
+	if variant != "" {
+		header[24] = variant
+	}
+	return append(header, hostTimezone)
 }
 
-// buildGenericHeader 构造 batchexecute 请求使用的客户端头，止于第 17 槽构建标签，mode 与 level 为零时对应槽为空，variant 非空时写在第 24 槽
+// buildGenericHeader 构造 batchexecute 请求使用的客户端头，不含第 19 槽计时，mode 与 level 为零时对应槽为空，variant 非空时写在第 24 槽，第 27 槽写入本机时区
 func buildGenericHeader(features []int, language string, clientID string, buildLabel string, mode int, variant string, level ThinkingLevel) string {
 	var modeSlot, levelSlot any
 	if mode != 0 {
@@ -523,17 +525,17 @@ func buildGenericHeader(features []int, language string, clientID string, buildL
 	if level != 0 {
 		levelSlot = int(level)
 	}
-	header, _ := json.Marshal(withVariant([]any{1, nil, nil, nil, nil, nil, language, nil, features, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}}, variant))
+	header, _ := json.Marshal(withVariantAndTimezone([]any{1, nil, nil, nil, nil, nil, language, nil, features, nil, nil, nil, nil, nil, modeSlot, levelSlot, clientID, []string{buildLabel}}, variant))
 	return string(header)
 }
 
-// buildConversationHeader 构造会话内 batchexecute 请求的客户端头，第 7 槽为 Temporary Chat 状态，不写模型 hash 与层级，止于第 17 槽构建标签
+// buildConversationHeader 构造会话内 batchexecute 请求的客户端头，第 7 槽为 Temporary Chat 状态，不写模型 hash、层级与第 19 槽计时，第 27 槽写入本机时区
 func buildConversationHeader(features []int, language string, clientID string, buildLabel string, temporaryChat bool, mode int, variant string, level ThinkingLevel) string {
 	chatMode := 0
 	if temporaryChat {
 		chatMode = 1
 	}
-	header, _ := json.Marshal(withVariant([]any{
+	header, _ := json.Marshal(withVariantAndTimezone([]any{
 		1, nil, nil, nil, nil, nil, language, chatMode, slices.Concat(features, features),
 		nil, nil, nil, nil, nil, mode, int(level), clientID, []string{buildLabel},
 	}, variant))
@@ -560,34 +562,49 @@ func pageDuration(milliseconds float64) []any {
 	return value
 }
 
-func arrayAt(values []any, index int) ([]any, bool) {
-	if index < 0 || index >= len(values) {
-		return nil, false
+// valueAt 沿下标路径取出 JSPB 嵌套数组中的元素，某一层不是数组或下标越界时 ok 为假
+func valueAt(value any, path ...int) (any, bool) {
+	for _, index := range path {
+		values, ok := value.([]any)
+		if !ok || index < 0 || index >= len(values) {
+			return nil, false
+		}
+		value = values[index]
 	}
-	value, ok := values[index].([]any)
-	return value, ok
+	return value, true
 }
 
-func stringAt(values []any, index int) (string, bool) {
-	if index < 0 || index >= len(values) {
-		return "", false
-	}
-	value, ok := values[index].(string)
-	return value, ok
+// arrayAt 沿下标路径取出数组元素
+func arrayAt(value any, path ...int) ([]any, bool) {
+	value, _ = valueAt(value, path...)
+	result, ok := value.([]any)
+	return result, ok
 }
 
-func intAt(values []any, index int) (int, bool) {
-	if index < 0 || index >= len(values) {
-		return 0, false
-	}
-	value, ok := values[index].(float64)
-	return int(value), ok
+// stringAt 沿下标路径取出字符串元素
+func stringAt(value any, path ...int) (string, bool) {
+	value, _ = valueAt(value, path...)
+	result, ok := value.(string)
+	return result, ok
 }
 
-func boolAt(values []any, index int) (bool, bool) {
-	if index < 0 || index >= len(values) {
-		return false, false
-	}
-	value, ok := values[index].(bool)
-	return value, ok
+// intAt 沿下标路径取出数字元素并截断为整数
+func intAt(value any, path ...int) (int, bool) {
+	value, _ = valueAt(value, path...)
+	result, ok := value.(float64)
+	return int(result), ok
+}
+
+// numberAt 沿下标路径取出数字元素
+func numberAt(value any, path ...int) (float64, bool) {
+	value, _ = valueAt(value, path...)
+	result, ok := value.(float64)
+	return result, ok
+}
+
+// boolAt 沿下标路径取出布尔元素
+func boolAt(value any, path ...int) (bool, bool) {
+	value, _ = valueAt(value, path...)
+	result, ok := value.(bool)
+	return result, ok
 }

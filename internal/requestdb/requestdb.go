@@ -102,7 +102,7 @@ CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS cooldowns (
  account TEXT NOT NULL, model TEXT NOT NULL, until INTEGER NOT NULL, reason TEXT NOT NULL, PRIMARY KEY (account, model));
 CREATE TABLE IF NOT EXISTS model_catalogs (account TEXT PRIMARY KEY, catalog BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS model_renames (old TEXT PRIMARY KEY, current TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS model_renames (old TEXT PRIMARY KEY, current TEXT NOT NULL, hash TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS logs (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, level TEXT NOT NULL, request_id TEXT NOT NULL,
  text TEXT NOT NULL, data TEXT NOT NULL);
@@ -139,6 +139,8 @@ type Store struct {
 	dropped atomic.Int64
 	mu      sync.RWMutex
 	closed  bool
+	// startLog 是打开账本时已保存日志的最大序号
+	startLog int64
 }
 
 // Open 打开或创建账本数据库并启动写入协程
@@ -166,6 +168,9 @@ func Open(path string) (*Store, error) {
 	reads.SetMaxOpenConns(readConnections)
 	reads.SetMaxIdleConns(readConnections)
 	store := &Store{db: db, reads: reads, writes: make(chan write, queueLimit), done: make(chan struct{})}
+	if err := db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM logs`).Scan(&store.startLog); err != nil {
+		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), reads.Close(), db.Close())
+	}
 	if err := store.alignDays(); err != nil {
 		return nil, errors.Join(fmt.Errorf("重建本地日汇总: %w", err), reads.Close(), db.Close())
 	}

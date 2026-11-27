@@ -76,28 +76,15 @@ type videoResult struct {
 
 // runVideoJob 在独立的请求跟踪中生成视频并保存成品，update 在开始与结束时写入协议对象
 func runVideoJob(c *gin.Context, pool *balancer.AccountPool, store *requestdb.Store, job videoJob, update func(status string, result *videoResult)) {
-	trace, ctx := logging.NewRequest(context.WithoutCancel(c.Request.Context()), c.Request.Method, c.Request.URL.Path, c.ClientIP())
-	trace.Begin("videos", job.model, false, 1, 0)
-	responseJobs.Lock()
-	responseJobs.jobs[job.id] = &responseJob{cancel: trace.Cancel}
-	responseJobs.Unlock()
-	go func() {
+	startBackgroundJob(c, store, job.id, "videos", job.model, 1, 0, func(ctx context.Context, _ *gin.Context) (func(), error) {
 		update("in_progress", nil)
 		result := generateVideo(ctx, pool, store, job)
-		status := http.StatusOK
+		status := "completed"
 		if result.err != nil {
-			status = upstreamStatus(result.err)
-			trace.Fail(status, result.err.Error())
+			status = "failed"
 		}
-		if !finishResponseJob(job.id) {
-			if result.err != nil {
-				update("failed", &result)
-			} else {
-				update("completed", &result)
-			}
-		}
-		store.Record(trace.Finish(status, false), nil)
-	}()
+		return func() { update(status, &result) }, result.err
+	})
 }
 
 // generateVideo 调用 Create video 并把成品写入文件存储
@@ -282,8 +269,6 @@ func geminiOperationError(status int, message string) gin.H {
 
 // VideoCreateHandler 处理 OpenAI POST /v1/videos：立即返回 queued 视频对象，由官网 Create video 在后台生成
 func VideoCreateHandler(pool *balancer.AccountPool, store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
-	failInterruptedVideos(store)
 	return func(c *gin.Context) {
 		var request openAIVideoRequest
 		var files []gemini.FileData
@@ -655,7 +640,6 @@ func geminiVideoOperation(c *gin.Context, pool *balancer.AccountPool, store *req
 
 // GeminiOperationHandler 返回 predictLongRunning 的长时操作，路径为 models/{model}/operations/{id} 或 operations/{id}
 func GeminiOperationHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id := c.Param("operation")
 		video, err := store.Video(c.Request.Context(), id)

@@ -3,7 +3,6 @@
 package chromeauth
 
 import (
-	"crypto/ecdsa"
 	"crypto/sha256"
 	"fmt"
 	"runtime"
@@ -70,12 +69,12 @@ func openDeviceBindingKey(wrappedKey []byte) (deviceBindingKey, error) {
 	return key, nil
 }
 
-func (key *ncryptDeviceKey) PublicKey() (*ecdsa.PublicKey, []byte, error) {
+func (key *ncryptDeviceKey) PublicKey() ([]byte, error) {
 	ncryptMu.Lock()
 	defer ncryptMu.Unlock()
 	blobType, err := windows.UTF16PtrFromString("ECCPUBLICBLOB")
 	if err != nil {
-		return nil, nil, fmt.Errorf("编码 NCrypt 公钥类型: %w", err)
+		return nil, fmt.Errorf("编码 NCrypt 公钥类型: %w", err)
 	}
 	var size uint32
 	status, _, _ := ncryptExportKey.Call(
@@ -83,7 +82,7 @@ func (key *ncryptDeviceKey) PublicKey() (*ecdsa.PublicKey, []byte, error) {
 		uintptr(unsafe.Pointer(&size)), 0,
 	)
 	if uint32(status) != 0 {
-		return nil, nil, fmt.Errorf("NCryptExportKey 查询返回 %d", int32(status))
+		return nil, fmt.Errorf("NCryptExportKey 查询返回 %d", int32(status))
 	}
 	output := make([]byte, size)
 	status, _, _ = ncryptExportKey.Call(
@@ -92,9 +91,9 @@ func (key *ncryptDeviceKey) PublicKey() (*ecdsa.PublicKey, []byte, error) {
 	)
 	runtime.KeepAlive(output)
 	if uint32(status) != 0 {
-		return nil, nil, fmt.Errorf("NCryptExportKey 返回 %d", int32(status))
+		return nil, fmt.Errorf("NCryptExportKey 返回 %d", int32(status))
 	}
-	return parsePublicKeyBlob(output[:size])
+	return publicKeySPKI(output[:size])
 }
 
 func (key *ncryptDeviceKey) SignSHA256(value []byte) ([]byte, error) {

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -53,6 +52,7 @@ type ServiceConfig struct {
 	Keepalive        bool     `json:"nonstream_keepalive"`
 	FakeStream       bool     `json:"fake_stream"`
 	ModelMapping     string   `json:"model_mapping"`
+	HiddenModels     string   `json:"hidden_models"`
 	AccountCooldown  string   `json:"account_cooldown"`
 	SessionTTL       string   `json:"session_ttl"`
 	InitTimeout      string   `json:"init_timeout"`
@@ -92,6 +92,7 @@ type ConfigUpdate struct {
 	Keepalive        *bool   `json:"nonstream_keepalive"`
 	FakeStream       *bool   `json:"fake_stream"`
 	ModelMapping     *string `json:"model_mapping"`
+	HiddenModels     *string `json:"hidden_models"`
 	AccountCooldown  *string `json:"account_cooldown"`
 	SessionTTL       *string `json:"session_ttl"`
 	InitTimeout      *string `json:"init_timeout"`
@@ -122,7 +123,7 @@ func (s *Settings) View() ServiceConfig {
 	view := ServiceConfig{
 		ProxyAPIKey: cfg.ProxyAPIKey, Proxy: cfg.ProxyURL, SaveHistory: cfg.SaveHistory, ContinueSession: cfg.ContinueSession,
 		Keepalive: cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream,
-		ModelMapping: config.FormatModelMapping(cfg.ModelMapping), AccountCooldown: shortDuration(cfg.AccountCooldown),
+		ModelMapping: config.FormatModelMapping(cfg.ModelMapping), HiddenModels: config.FormatHiddenModels(cfg.HiddenModels), AccountCooldown: shortDuration(cfg.AccountCooldown),
 		SessionTTL: shortDuration(cfg.SessionTTL), InitTimeout: shortDuration(cfg.InitTimeout), LogLevel: cfg.LogLevel,
 		RequestBodyLog: cfg.RequestBodyLog, LogFile: cfg.LogFile, LogMaxTotalMB: cfg.LogMaxTotalMB, Concurrency: cfg.PerAccountConcurrency, RoutingStrategy: cfg.RoutingStrategy,
 		AdminAuthEnabled: cfg.AdminAuthEnabled, AdminUsername: cfg.AdminUsername,
@@ -184,17 +185,32 @@ func (s *Settings) Update(update ConfigUpdate) error {
 			env[key] = strconv.FormatBool(*value)
 		}
 	}
+	validate := func(key string, value string) string {
+		normalized, err := config.Validate(key, value)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("%s: %w", key, err))
+		}
+		return normalized
+	}
 	setDuration := func(value *string, key string, target *time.Duration) {
 		if value == nil {
 			return
 		}
-		duration, err := time.ParseDuration(strings.TrimSpace(*value))
-		if err != nil || duration <= 0 {
-			problems = append(problems, fmt.Errorf("%s 必须是正数时长，例如 30s 或 2m", key))
-			return
+		*target, _ = time.ParseDuration(validate(key, *value))
+		env[key] = shortDuration(*target)
+	}
+	setChecked := func(value *string, key string, target *string) {
+		if value != nil {
+			*target = validate(key, *value)
+			env[key] = *target
 		}
-		*target = duration
-		env[key] = shortDuration(duration)
+	}
+	setNumber := func(value *int, key string, target *int) {
+		if value != nil {
+			validate(key, strconv.Itoa(*value))
+			*target = *value
+			env[key] = strconv.Itoa(*value)
+		}
 	}
 
 	if update.ProxyAPIKey != nil {
@@ -224,41 +240,19 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		next.ModelMapping = mapping
 		env["MODEL_MAPPING"] = config.FormatModelMapping(mapping)
 	}
+	if update.HiddenModels != nil {
+		next.HiddenModels = config.NormalizeHiddenModels(*update.HiddenModels)
+		env["HIDDEN_MODELS"] = config.FormatHiddenModels(next.HiddenModels)
+	}
 	setDuration(update.AccountCooldown, "ACCOUNT_COOLDOWN", &next.AccountCooldown)
 	setDuration(update.SessionTTL, "SESSION_TTL", &next.SessionTTL)
 	setDuration(update.InitTimeout, "INIT_TIMEOUT", &next.InitTimeout)
-	if update.LogLevel != nil {
-		level := strings.ToLower(strings.TrimSpace(*update.LogLevel))
-		if _, err := logging.ParseLevel(level); err != nil {
-			problems = append(problems, fmt.Errorf("LOG_LEVEL 取 debug、info、warn 或 error"))
-		}
-		next.LogLevel = level
-		env["LOG_LEVEL"] = level
-	}
+	setChecked(update.LogLevel, "LOG_LEVEL", &next.LogLevel)
 	setBool(update.RequestBodyLog, "REQUEST_BODY_LOG", &next.RequestBodyLog)
 	setBool(update.LogFile, "LOG_FILE", &next.LogFile)
-	if update.LogMaxTotalMB != nil {
-		if *update.LogMaxTotalMB < config.MinLogTotalMB {
-			problems = append(problems, fmt.Errorf("LOG_MAX_TOTAL_MB 不能小于 %d", config.MinLogTotalMB))
-		}
-		next.LogMaxTotalMB = *update.LogMaxTotalMB
-		env["LOG_MAX_TOTAL_MB"] = strconv.Itoa(*update.LogMaxTotalMB)
-	}
-	if update.Concurrency != nil {
-		if *update.Concurrency < 1 {
-			problems = append(problems, errors.New("PER_ACCOUNT_CONCURRENCY 必须是正整数"))
-		}
-		next.PerAccountConcurrency = *update.Concurrency
-		env["PER_ACCOUNT_CONCURRENCY"] = strconv.Itoa(*update.Concurrency)
-	}
-	if update.RoutingStrategy != nil {
-		strategy := strings.ToLower(strings.TrimSpace(*update.RoutingStrategy))
-		if strategy != "round-robin" && strategy != "fill-first" {
-			problems = append(problems, errors.New("ROUTING_STRATEGY 取 round-robin 或 fill-first"))
-		}
-		next.RoutingStrategy = strategy
-		env["ROUTING_STRATEGY"] = strategy
-	}
+	setNumber(update.LogMaxTotalMB, "LOG_MAX_TOTAL_MB", &next.LogMaxTotalMB)
+	setNumber(update.Concurrency, "PER_ACCOUNT_CONCURRENCY", &next.PerAccountConcurrency)
+	setChecked(update.RoutingStrategy, "ROUTING_STRATEGY", &next.RoutingStrategy)
 	setBool(update.AdminAuthEnabled, "ADMIN_AUTH_ENABLED", &next.AdminAuthEnabled)
 	setString(update.AdminUsername, "ADMIN_USERNAME", &next.AdminUsername)
 	if next.AdminUsername == "" {
@@ -271,14 +265,7 @@ func (s *Settings) Update(update ConfigUpdate) error {
 	if next.AdminAuthEnabled && next.AdminPassword == "" {
 		problems = append(problems, errors.New("开启管理登录前先设置管理密码"))
 	}
-	if update.ListenAddr != nil {
-		address := strings.TrimSpace(*update.ListenAddr)
-		if _, _, err := net.SplitHostPort(address); err != nil {
-			problems = append(problems, fmt.Errorf("LISTEN_ADDR 必须是 主机:端口"))
-		}
-		next.ListenAddress = address
-		env["LISTEN_ADDR"] = address
-	}
+	setChecked(update.ListenAddr, "LISTEN_ADDR", &next.ListenAddress)
 	if update.AuthStates != nil {
 		next.AuthStatePaths = config.SplitList(*update.AuthStates)
 		if len(next.AuthStatePaths) == 0 {
@@ -286,14 +273,7 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		}
 		env["GEMINI_AUTH_STATES"] = strings.Join(next.AuthStatePaths, ",")
 	}
-	if update.LogFormat != nil {
-		format := strings.ToLower(strings.TrimSpace(*update.LogFormat))
-		if format != "text" && format != "json" {
-			problems = append(problems, errors.New("LOG_FORMAT 取 text 或 json"))
-		}
-		next.LogFormat = format
-		env["LOG_FORMAT"] = format
-	}
+	setChecked(update.LogFormat, "LOG_FORMAT", &next.LogFormat)
 	if update.APIKeyAccounts != nil || update.ProxyAPIKey != nil {
 		raw := config.FormatAccountBindings(next.APIKeyAccounts)
 		if update.APIKeyAccounts != nil {
@@ -320,14 +300,7 @@ func (s *Settings) Update(update ConfigUpdate) error {
 		next.ModelAccounts = bindings
 		env["MODEL_ACCOUNTS"] = config.FormatAccountBindings(bindings)
 	}
-	if update.FirstEventHedge != nil {
-		mode := strings.ToLower(strings.TrimSpace(*update.FirstEventHedge))
-		if err := config.ValidateFirstEventHedge(mode); err != nil {
-			problems = append(problems, fmt.Errorf("FIRST_EVENT_HEDGE %w", err))
-		}
-		next.FirstEventHedge = mode
-		env["FIRST_EVENT_HEDGE"] = mode
-	}
+	setChecked(update.FirstEventHedge, "FIRST_EVENT_HEDGE", &next.FirstEventHedge)
 	if update.HedgeModels != nil {
 		next.FirstEventHedgeModels = config.SplitList(*update.HedgeModels)
 		env["FIRST_EVENT_HEDGE_MODELS"] = strings.Join(next.FirstEventHedgeModels, ",")

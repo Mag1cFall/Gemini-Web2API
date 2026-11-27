@@ -23,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
@@ -37,14 +36,6 @@ const fileUploadLimit = 2 << 30
 
 // geminiFileTTL 是 Gemini Files API 上传文件的保留时长
 const geminiFileTTL = 48 * time.Hour
-
-// sharedStore 是文件、Responses 与视频接口共用的账本库，生成请求据此解析文件引用
-var sharedStore atomic.Pointer[requestdb.Store]
-
-// useStore 登记文件引用解析使用的账本库
-func useStore(store *requestdb.Store) {
-	sharedStore.Store(store)
-}
 
 // randomID 返回 prefix 加 n 个随机字符的标识，lower 为真时只用小写字母与数字
 func randomID(prefix string, n int, lower bool) string {
@@ -200,7 +191,6 @@ func writeStoreError(c *gin.Context, err error) {
 
 // FileUploadHandler 处理 OpenAI 与 Anthropic 文件上传，带 anthropic-version 头时返回 Anthropic 文件对象
 func FileUploadHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		anthropic := anthropicRequest(c)
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, fileUploadLimit)
@@ -306,7 +296,6 @@ func writeFileRequestError(c *gin.Context, anthropic bool, message string) {
 
 // FileListHandler 列出文件：OpenAI 按 purpose、order、after、limit 分页，未知的 after 返回空页；Anthropic 见 listAnthropicFiles
 func FileListHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		if anthropicRequest(c) {
 			listAnthropicFiles(c, store)
@@ -398,7 +387,6 @@ func listAnthropicFiles(c *gin.Context, store *requestdb.Store) {
 
 // FileRetrieveHandler 返回 OpenAI 或 Anthropic 文件元数据
 func FileRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id := c.Param("file")
 		file, err := store.File(c.Request.Context(), id)
@@ -420,7 +408,6 @@ func FileRetrieveHandler(store *requestdb.Store) gin.HandlerFunc {
 
 // FileContentHandler 返回文件内容
 func FileContentHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id := c.Param("file")
 		serveStoredFile(c, store, id, func() { writeFileNotFound(c, id) }, func(err error) { writeStoreError(c, err) })
@@ -445,7 +432,6 @@ func serveStoredFile(c *gin.Context, store *requestdb.Store, id string, notFound
 
 // FileDeleteHandler 删除文件，Anthropic 返回 file_deleted 对象
 func FileDeleteHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id := c.Param("file")
 		deleted, err := store.DeleteFile(c.Request.Context(), id)
@@ -537,10 +523,8 @@ type geminiFileMetadata struct {
 	} `json:"file"`
 }
 
-// GeminiFileUploadHandler 处理 /upload/v1beta/files 的断点续传、multipart 与单次媒体上传，创建时删除上次运行遗留的续传临时文件
+// GeminiFileUploadHandler 处理 /upload/v1beta/files 的断点续传、multipart 与单次媒体上传
 func GeminiFileUploadHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
-	removeStaleUploads(store)
 	return func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, fileUploadLimit)
 		if uploadID := c.Query("upload_id"); uploadID != "" {
@@ -786,7 +770,6 @@ func finishGeminiUpload(c *gin.Context, store *requestdb.Store, record requestdb
 
 // GeminiFileListHandler 按 pageSize 与 pageToken 列出 Gemini 文件
 func GeminiFileListHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		limit := 10
 		if raw := c.Query("pageSize"); raw != "" {
@@ -835,7 +818,6 @@ func geminiFileName(c *gin.Context) (string, bool) {
 
 // GeminiFileGetHandler 返回 Gemini 文件资源，files/{name}:download 返回内容
 func GeminiFileGetHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id, download := geminiFileName(c)
 		if download {
@@ -859,7 +841,6 @@ func GeminiFileGetHandler(store *requestdb.Store) gin.HandlerFunc {
 
 // GeminiFileDeleteHandler 删除 Gemini 文件并返回空对象
 func GeminiFileDeleteHandler(store *requestdb.Store) gin.HandlerFunc {
-	useStore(store)
 	return func(c *gin.Context) {
 		id, _ := geminiFileName(c)
 		deleted, err := store.DeleteFile(c.Request.Context(), id)

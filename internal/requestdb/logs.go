@@ -91,10 +91,10 @@ func (store *Store) Logs(ctx context.Context, query LogQuery) (LogPage, error) {
 	return page, nil
 }
 
-// ClearLogs 提交排队的写入后删除全部已保存的日志并把空闲页交还文件系统
-func (store *Store) ClearLogs(ctx context.Context) error {
+// ClearLogs 提交排队的写入后删除本次启动前保存的日志与发布序号不大于 through 的日志，并把空闲页交还文件系统
+func (store *Store) ClearLogs(ctx context.Context, through int64) error {
 	store.flush()
-	if _, err := store.db.ExecContext(ctx, `DELETE FROM logs`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM logs WHERE seq <= ? OR json_extract(data, '$.seq') <= ?`, store.startLog, through); err != nil {
 		return err
 	}
 	return reclaim(ctx, store.db)

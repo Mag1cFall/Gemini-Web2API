@@ -272,7 +272,7 @@ func (c *Client) doRotationRequest(req *http.Request, operation string) ([]byte,
 	return body, nil
 }
 
-// sendBound 以账号的客户端发出设备绑定会话刷新请求并写回响应 Cookie，返回状态码与响应头
+// sendBound 以账号的客户端发出设备绑定会话刷新请求并写回响应 Cookie，返回状态码与响应头；重定向到人机验证页时返回 ErrCaptcha
 func (c *Client) sendBound(req *http.Request) (int, http.Header, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -282,7 +282,15 @@ func (c *Client) sendBound(req *http.Request) (int, http.Header, error) {
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		return 0, nil, transportProtocolError("刷新设备绑定会话", err)
 	}
-	return resp.StatusCode, resp.Header, c.absorbResponseCookies(req.URL, resp)
+	if err := c.absorbResponseCookies(req.URL, resp); err != nil {
+		return resp.StatusCode, resp.Header, err
+	}
+	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+		if statusErr := responseStatusError(resp, "刷新设备绑定会话"); errors.Is(statusErr, ErrCaptcha) {
+			return resp.StatusCode, resp.Header, statusErr
+		}
+	}
+	return resp.StatusCode, resp.Header, nil
 }
 
 // listAccountsSignedIn 以 Chrome 浏览器进程的方式请求 ListAccounts，返回是否列出账号与 Cookie 中目标账号的会话是否有效

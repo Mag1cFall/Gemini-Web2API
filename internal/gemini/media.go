@@ -330,9 +330,9 @@ func (c *Client) FetchMediaContent(ctx context.Context, media Media) ([]byte, er
 
 // payload 按页面逐字段重建图片条目：令牌、占位链接与变体号、类别与名称与标志与生成器与思维签名、artifact ID 与图片 ID，末尾为网页来源、Temporary Chat 状态与推荐尺寸
 func (d imageDownload) payload() (string, error) {
-	token, _ := stringPath(d.entry, 0, 3, 5)
-	placeholder, _ := stringPath(d.entry, 1, 0)
-	variant, _ := intPath(d.entry, 1, 1)
+	token, _ := stringAt(d.entry, 0, 3, 5)
+	placeholder, _ := stringAt(d.entry, 1, 0)
+	variant, _ := intAt(d.entry, 1, 1)
 	source, _ := arrayAt(d.entry, 3)
 	details := make([]any, 23)
 	details[0], details[1], details[16] = 0, "", 0
@@ -342,11 +342,11 @@ func (d imageDownload) payload() (string, error) {
 	if name, ok := stringAt(source, 1); ok {
 		details[1] = name
 	}
-	if flag, _ := valuePath(source, 16); flag == true {
+	if flag, _ := valueAt(source, 16); flag == true {
 		details[16] = 1
 	}
-	details[18], _ = valuePath(source, 18)
-	signature, _ := valuePath(source, 22)
+	details[18], _ = valueAt(source, 18)
+	signature, _ := valueAt(source, 22)
 	details[22] = jspbBooleans(signature)
 	for len(details) > 0 && details[len(details)-1] == nil {
 		details = details[:len(details)-1]

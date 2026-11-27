@@ -6,20 +6,20 @@ import (
 	"github.com/Mag1cFall/Gemini-Web2API/internal/gemini"
 )
 
-// LoadModelNames 读取公开模型 ID 的改名记录与各账号最近一次读取的目录
-func (store *Store) LoadModelNames() (map[string]string, map[string]gemini.AccountCatalog, error) {
-	renames := make(map[string]string)
-	rows, err := store.reads.Query(`SELECT old,current FROM model_renames`)
+// LoadModelNames 读取带模型 hash 的公开模型 ID 改名记录与各账号最近一次读取的目录
+func (store *Store) LoadModelNames() (map[string]gemini.ModelRename, map[string]gemini.AccountCatalog, error) {
+	renames := make(map[string]gemini.ModelRename)
+	rows, err := store.reads.Query(`SELECT old,current,hash FROM model_renames WHERE hash != ''`)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var old, current string
-		if err := rows.Scan(&old, &current); err != nil {
+		var old, current, hash string
+		if err := rows.Scan(&old, &current, &hash); err != nil {
 			return nil, nil, err
 		}
-		renames[old] = current
+		renames[old] = gemini.ModelRename{Current: current, Hash: hash}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
@@ -46,7 +46,7 @@ func (store *Store) LoadModelNames() (map[string]string, map[string]gemini.Accou
 }
 
 // SaveModelNames 在一个事务中保存账号最近一次读取的目录并以 renames 替换全部改名记录
-func (store *Store) SaveModelNames(accountID string, catalog gemini.AccountCatalog, renames map[string]string) error {
+func (store *Store) SaveModelNames(accountID string, catalog gemini.AccountCatalog, renames map[string]gemini.ModelRename) error {
 	encoded, err := json.Marshal(catalog)
 	if err != nil {
 		return err
@@ -63,8 +63,11 @@ func (store *Store) SaveModelNames(accountID string, catalog gemini.AccountCatal
 		_ = tx.Rollback()
 		return err
 	}
-	for old, current := range renames {
-		if _, err := tx.Exec(`INSERT INTO model_renames(old,current) VALUES(?,?)`, old, current); err != nil {
+	for old, rename := range renames {
+		if rename.Current == "" || rename.Hash == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO model_renames(old,current,hash) VALUES(?,?,?)`, old, rename.Current, rename.Hash); err != nil {
 			_ = tx.Rollback()
 			return err
 		}

@@ -200,9 +200,7 @@ type Instance struct {
 // Start 配置日志与日志文件，取得数据目录的实例锁并监听端口，logWriter 为 nil 时写标准错误
 func Start(cfg config.Config, logWriter io.Writer, desktop bool) (*Instance, error) {
 	started := time.Now()
-	if err := logging.Setup(logging.Options{Level: cfg.LogLevel, Format: cfg.LogFormat, Writer: logWriter}); err != nil {
-		return nil, err
-	}
+	logging.Setup(logging.Options{Level: cfg.LogLevel, Format: cfg.LogFormat, Writer: logWriter})
 	if err := logging.SetFile(logFilePath, cfg.LogFile, cfg.LogMaxTotalMB); err != nil {
 		return nil, fmt.Errorf("打开日志文件: %w", err)
 	}
@@ -334,11 +332,10 @@ func (instance *Instance) Serve(ctx context.Context) error {
 	adapter.SetContinueSession(cfg.ContinueSession)
 	settings := admin.NewSettings(envPath, cfg, func(next config.Config) {
 		config.SetModelMapping(next.ModelMapping)
+		config.SetHiddenModels(next.HiddenModels)
 		pool.SetTimings(next.AccountCooldown, next.SessionTTL)
 		adapter.ConfigureSessionTTL(next.SessionTTL)
-		if level, err := logging.ParseLevel(next.LogLevel); err == nil {
-			logging.SetLevel(level)
-		}
+		logging.SetLevel(logging.Level(next.LogLevel))
 		store.SetBodyCapture(next.RequestBodyLog)
 		if err := logging.SetFile(logFilePath, next.LogFile, next.LogMaxTotalMB); err != nil {
 			logging.Error(logging.SourceService, "日志文件设置失败", "错误", err)

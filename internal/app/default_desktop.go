@@ -44,8 +44,11 @@ func desktopDataDir() (string, error) {
 	return filepath.Join(base, appName), nil
 }
 
-// runDefault 以桌面窗口与托盘运行服务，Windows 的 WebView2 数据写入 %LocalAppData%\Gemini-Web2API\WebView2
+// runDefault 以桌面窗口与托盘运行服务，Windows 的 WebView2 数据写入 %LocalAppData%\Gemini-Web2API\WebView2；带 --desktop-window 启动时只运行独立管理窗口子进程
 func runDefault(args []string) error {
+	if len(args) > 0 && args[0] == "--"+desktop.WindowFlag {
+		return desktop.RunWindow()
+	}
 	hidden := slices.Contains(args, "--"+desktop.HiddenFlag)
 	args = slices.DeleteFunc(slices.Clone(args), func(arg string) bool { return arg == "--"+desktop.HiddenFlag })
 	cfg, _, err := LoadConfig(args)

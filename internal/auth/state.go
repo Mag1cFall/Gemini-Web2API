@@ -167,9 +167,6 @@ func Load(path string) (*File, error) {
 	if strings.TrimSpace(state.Metadata.ID) == "" {
 		state.Metadata.ID = accountIDFromPath(absPath)
 	}
-	if err := validateOAuthMaterial(state.Metadata.OAuth); err != nil {
-		return nil, fmt.Errorf("认证状态 %s: %w", absPath, err)
-	}
 	file := &File{path: absPath, state: state}
 	if !gemini.IsChromeVersion(state.Metadata.Chrome) {
 		file.state.Metadata.Chrome = gemini.PickChromeVersion()
@@ -213,9 +210,6 @@ func New(path string, state StorageState) (*File, error) {
 	}
 	if state.Origins == nil {
 		state.Origins = []json.RawMessage{}
-	}
-	if err := validateOAuthMaterial(state.Metadata.OAuth); err != nil {
-		return nil, err
 	}
 	return &File{path: absPath, state: state}, nil
 }
@@ -342,16 +336,6 @@ func (f *File) writeLocked() error {
 	}
 	if err := os.Rename(tempPath, f.path); err != nil {
 		return fmt.Errorf("替换认证状态 %s: %w", f.path, err)
-	}
-	return nil
-}
-
-func validateOAuthMaterial(material *OAuthMaterial) error {
-	if material == nil {
-		return nil
-	}
-	if strings.TrimSpace(material.GaiaID) == "" || strings.TrimSpace(material.RefreshToken) == "" {
-		return fmt.Errorf("OAuth 续签材料不完整")
 	}
 	return nil
 }

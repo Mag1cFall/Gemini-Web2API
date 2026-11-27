@@ -13,8 +13,9 @@ export interface LogFieldEntry {
   value: string
 }
 
-// LogEntry 对应 internal/logging 的 Event，fields 为按顺序排列的字段，request 是请求相关事件发生时的请求快照
+// LogEntry 对应 internal/logging 的 Event，seq 为服务本次运行内递增的发布序号，fields 为按顺序排列的字段，request 是请求相关事件发生时的请求快照
 export interface LogEntry {
+  seq: number
   time: string
   level: LogLevel
   source: string

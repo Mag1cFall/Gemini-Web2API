@@ -2,8 +2,10 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CircleAlert, CircleCheck, LoaderCircle, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 
+import { appMessages } from '@/app/messages'
 import { Badge, type BadgeTone } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ClampList, ClampText } from '@/components/ui/clamp'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { importMessages, taskMessages } from '@/features/accounts/messages'
@@ -15,7 +17,7 @@ import {
 } from '@/features/accounts/queries'
 import type { AccountTask, AccountTaskItem } from '@/features/accounts/types'
 import { api } from '@/lib/api'
-import { serverText, useMessages } from '@/lib/i18n'
+import { fill, serverText, useMessages } from '@/lib/i18n'
 
 // itemTones 是任务中账号各状态的标签颜色
 const itemTones: Record<AccountTaskItem['state'], BadgeTone> = {
@@ -40,6 +42,7 @@ function TaskIcon({ state }: { state: AccountTask['state'] }) {
 export function AccountTasks() {
   const m = useMessages(taskMessages)
   const im = useMessages(importMessages)
+  const app = useMessages(appMessages)
   const client = useQueryClient()
   const tasks = useAccountTasks().data
   const running = useRef<string[]>([])
@@ -57,8 +60,13 @@ export function AccountTasks() {
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: tasksKey })
     },
-    onError: (error) => {
-      toast({ tone: 'error', title: error.message })
+    onError: (error, id) => {
+      const running = tasks?.find((task) => task.id === id)?.state === 'running'
+      toast({
+        tone: 'error',
+        title: fill(app.actionFailed, { action: running ? m.cancel : m.close }),
+        detail: error.message,
+      })
     },
   })
   if (!tasks || tasks.length === 0) return null
@@ -102,7 +110,7 @@ export function AccountTasks() {
                 </Tooltip>
               )}
             </div>
-            <ul className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
+            <ClampList className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
               {task.items.map((item) => (
                 <li key={item.label} className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <Tooltip overflow label={item.label}>
@@ -110,13 +118,15 @@ export function AccountTasks() {
                   </Tooltip>
                   <Badge tone={itemTones[item.state]}>{m[item.state]}</Badge>
                   {item.error && (
-                    <p className="w-full text-xs break-words text-error-text">
-                      {serverText(item.error)}
-                    </p>
+                    <div className="w-full">
+                      <ClampText className="text-xs break-words text-error-text">
+                        {serverText(item.error)}
+                      </ClampText>
+                    </div>
                   )}
                 </li>
               ))}
-            </ul>
+            </ClampList>
           </li>
         )
       })}

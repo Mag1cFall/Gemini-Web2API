@@ -174,7 +174,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
 				return
 			}
-			rememberHistory(pool, result, system, bridge, turns)
+			rememberHistory(pool, result, system, bridge, turns, projection)
 			content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 			if err != nil {
 				_ = processor.EmitErrorType(claudeStreamErrorType(err), streamFailure(c, err))
@@ -267,7 +267,7 @@ func ClaudeMessagesHandler(pool *balancer.AccountPool) gin.HandlerFunc {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())
 			return
 		}
-		rememberHistory(pool, result, system, bridge, turns)
+		rememberHistory(pool, result, system, bridge, turns, nil)
 		content, calls, err := bridge.truncated(result.Truncated).Parse(primary.Text)
 		if err != nil {
 			writeClaudeError(c, http.StatusBadGateway, "api_error", err.Error())

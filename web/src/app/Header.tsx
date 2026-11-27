@@ -18,7 +18,15 @@ import type { AccountsUsage } from '@/features/accounts/types'
 import { sessionKey, useSession, useStatus } from '@/features/service/queries'
 import { api, appURL } from '@/lib/api'
 import { isDesktop, maximisedEvent, nativeTitleBar, windowControl } from '@/lib/desktop'
-import { fill, type Language, languages, serverText, useI18n, useMessages } from '@/lib/i18n'
+import {
+  fill,
+  type Language,
+  languages,
+  plural,
+  serverText,
+  useI18n,
+  useMessages,
+} from '@/lib/i18n'
 import { setTheme, useTheme } from '@/lib/theme'
 
 // BrandMark 是产品标志，Gemini Advanced 渐变四角星
@@ -151,16 +159,19 @@ export function Header({ minimal = false, onMenu }: { minimal?: boolean; onMenu?
           ? { tone: 'success', title: m.refreshDone }
           : {
               tone: 'error',
-              title: fill(m.refreshFailed, {
-                message: failures
-                  .map((account) => account.account_id + ': ' + serverText(String(account.error)))
-                  .join('; '),
-              }),
+              title: fill(
+                plural(language, failures.length, m.refreshFailedCountOne, m.refreshFailedCount),
+                { count: failures.length },
+              ),
+              detail: failures.map((account) => ({
+                label: account.account_id,
+                message: serverText(String(account.error)),
+              })),
             },
       )
     },
     onError: (error) => {
-      toast({ tone: 'error', title: fill(m.refreshFailed, { message: error.message }) })
+      toast({ tone: 'error', title: m.refreshFailed, detail: error.message })
     },
   })
   const logout = useMutation({

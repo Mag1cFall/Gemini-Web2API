@@ -154,8 +154,8 @@ func validVideoReset(now, reset time.Time) bool {
 
 // videoQuotaErrorFromRichContent 从视频富内容字段中提取额度用尽状态与重置时间戳，未命中或包含成品视频地址时返回 nil
 func videoQuotaErrorFromRichContent(raw any) *ProtocolError {
-	file, _ := valuePath(raw, 0, 0, 0, 0)
-	if mediaURL, _ := stringPath(file, 7, 1); mediaURL != "" {
+	file, _ := valueAt(raw, 0, 0, 0, 0)
+	if mediaURL, _ := stringAt(file, 7, 1); mediaURL != "" {
 		return nil
 	}
 	detail, resetUnix := scanVideoQuotaRichContent(raw)
