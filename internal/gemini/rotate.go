@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -150,12 +151,14 @@ func (r *CookieRotator) scheduleNext(now time.Time, boundWait time.Duration) tim
 	return interval
 }
 
-// reload 重读首页、模型目录与偏好，并尽力重读用量，让目录、偏好与上下文窗口跟上账号变化，失败时保留原有 bootstrap。用量获取不到（企业/Workspace 账号无用量窗口）直接跳过、不算重读失败。
+// reload 重读首页、模型目录、偏好与用量，让目录、偏好与上下文窗口跟上账号变化，失败时保留原有 bootstrap
 func (c *Client) reload(ctx context.Context) error {
 	if err := c.init(ctx, false); err != nil {
 		return err
 	}
-	_, _ = c.FetchUsage(ctx)
+	if _, err := c.FetchUsage(ctx); err != nil && !errors.Is(err, ErrUsageUnavailable) {
+		return err
+	}
 	return nil
 }
 

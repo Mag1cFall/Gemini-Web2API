@@ -1037,6 +1037,10 @@ func (p *AccountPool) Usage(ctx context.Context, refresh bool) PoolUsageStatus {
 			defer wait.Done()
 			usage, err := client.FetchUsage(ctx)
 			if err != nil {
+				if errors.Is(err, gemini.ErrUsageUnavailable) {
+					accounts[index].Usage = nil
+					return
+				}
 				accounts[index].Error = logging.SanitizeError(err.Error())
 				return
 			}
@@ -1077,6 +1081,7 @@ func (e *accountEntry) status(now time.Time) AccountStatus {
 			}
 			status.ContextWindow = e.Client.ContextWindow()
 		}
+		status.Tier = e.Client.Tier()
 		if usage := e.Client.CachedUsage(); usage != nil {
 			status.Tier, status.Usage = usage.Tier, usage
 		}

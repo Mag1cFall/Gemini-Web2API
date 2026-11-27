@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -118,6 +119,10 @@ func (h *handler) refreshUsage(c *gin.Context) {
 	}
 	usage, err := client.FetchUsage(c.Request.Context())
 	if err != nil {
+		if errors.Is(err, gemini.ErrUsageUnavailable) {
+			c.JSON(http.StatusOK, gin.H{"usage": nil})
+			return
+		}
 		writeError(c, http.StatusBadGateway, "usage_failed", logging.SanitizeError(err.Error()))
 		return
 	}

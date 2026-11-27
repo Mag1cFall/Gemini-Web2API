@@ -343,16 +343,16 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 	}
 }
 
-// initialize 读取首页参数、模型目录与偏好，并尽力读取用量。
-// 用量读取失败不算初始化失败：企业/Workspace 账号官网没有用量窗口，
-// 获取不到直接跳过，账号照常就绪（登录校验在 Init 内已完成）。
+// initialize 读取首页参数、模型目录、偏好与用量
 func initialize(ctx context.Context, client *gemini.Client, timeout time.Duration) error {
 	initContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := client.Init(initContext); err != nil {
 		return err
 	}
-	_, _ = client.FetchUsage(initContext)
+	if _, err := client.FetchUsage(initContext); err != nil && !errors.Is(err, gemini.ErrUsageUnavailable) {
+		return err
+	}
 	return nil
 }
 
@@ -364,8 +364,8 @@ func rotationTooSoon(err error) bool {
 
 func logReady(account auth.LoadedAccount, client *gemini.Client, duration time.Duration) {
 	fields := []any{"模型", len(client.Models()), "窗口", client.ContextWindow()}
-	if usage := client.CachedUsage(); usage != nil {
-		fields = append([]any{"层级", usage.Tier}, fields...)
+	if tier := client.Tier(); tier != "" {
+		fields = append([]any{"层级", tier}, fields...)
 	}
 	if email := client.Email(); email != "" {
 		fields = append([]any{"邮箱", email}, fields...)
@@ -384,10 +384,7 @@ type accountCatalog struct {
 }
 
 func catalogOf(client *gemini.Client) accountCatalog {
-	var catalog accountCatalog
-	if usage := client.CachedUsage(); usage != nil {
-		catalog.tier = usage.Tier
-	}
+	catalog := accountCatalog{tier: client.Tier()}
 	for _, model := range client.Models() {
 		catalog.models = append(catalog.models, model.ID)
 	}

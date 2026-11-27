@@ -500,15 +500,7 @@ var hostTimezone = localTimezone()
 
 // buildModelHeader 构造生成会话的模型扩展头 protobuf：模型、界面语言、会话类型、功能编号、账号层级编码、思考强度、客户端标识、构建标签与请求计时，chatMode 为 Temporary Chat 1、普通会话 0，确认 Deep Research 计划时为空
 func buildModelHeader(features []int, model Model, language string, chatMode any, tier int, thinkingLevel ThinkingLevel, clientID string, buildLabel string, timing []any) []byte {
-	var levelSlot any
-	if thinkingLevel != 0 {
-		levelSlot = int(thinkingLevel)
-	}
-	return encodeJSPB(withVariant([]any{
-		1, nil, nil, nil, model.Hash, nil, language, chatMode,
-		features, nil, nil, tier, nil, nil, model.Mode, levelSlot, clientID,
-		[]string{buildLabel}, nil, timing,
-	}, model.Variant))
+	return buildAccountModelHeader(features, model, language, chatMode, tier, 0, thinkingLevel, clientID, buildLabel, timing)
 }
 
 // withVariant 返回在第 24 槽写了变体键的客户端头，variant 为空时原样返回
