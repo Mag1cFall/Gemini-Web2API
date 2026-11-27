@@ -343,15 +343,17 @@ func (m *Manager) run(ctx context.Context, account auth.LoadedAccount, client *g
 	}
 }
 
-// initialize 读取首页参数、模型目录、偏好与用量
+// initialize 读取首页参数、模型目录与偏好，并尽力读取用量。
+// 用量读取失败不算初始化失败：企业/Workspace 账号官网没有用量窗口，
+// 获取不到直接跳过，账号照常就绪（登录校验在 Init 内已完成）。
 func initialize(ctx context.Context, client *gemini.Client, timeout time.Duration) error {
 	initContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := client.Init(initContext); err != nil {
 		return err
 	}
-	_, err := client.FetchUsage(initContext)
-	return err
+	_, _ = client.FetchUsage(initContext)
+	return nil
 }
 
 // rotationTooSoon 判断轮换失败是否为距上次轮换过近的 429

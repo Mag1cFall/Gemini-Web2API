@@ -17,6 +17,24 @@ const usageRPC = "jSf9Qc"
 
 var errUsageNotSignedIn = errors.New("读取用量时官网显示未登录")
 
+// ErrUsageUnavailable 表示官网未提供该账号的用量数据。
+// 企业 / Workspace 账号的 Gemini 没有五小时与每周用量窗口，
+// 用量 RPC 会返回空数据，这并不代表账号未登录：登录状态已由
+// Init 的首页 bootstrap 校验（未登录时 bootstrap 缺少 SNlM0e）。
+// 这类账号应跳过用量读取、照常放行，而不是按未登录拒绝导入。
+var ErrUsageUnavailable = errors.New("官网未提供用量数据（企业/Workspace 账号无用量窗口，跳过）")
+
+// usageUnavailable 将用量解析类错误统一归为 ErrUsageUnavailable
+func usageUnavailable(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrUsageUnavailable) || errors.Is(err, errUsageNotSignedIn) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrUsageUnavailable, err)
+}
+
 // UsageWindow 表示官网展示的一段用量窗口
 type UsageWindow struct {
 	UsedRatio float64   `json:"used_ratio"`
@@ -34,10 +52,18 @@ type UsageInfo struct {
 	FetchedAt           time.Time    `json:"fetched_at"`
 }
 
-// FetchUsage 读取官网当前账号用量
+// FetchUsage 读取官网当前账号用量。
+// 官网未提供用量数据（企业/Workspace 账号）时不报错：返回 Tier 为
+// "unknown"、无用量窗口的空用量并视为成功，调用方直接跳过用量即可。
 func (c *Client) FetchUsage(ctx context.Context) (UsageInfo, error) {
 	usage, err := c.fetchUsage(ctx, true)
 	if err != nil {
+		if errors.Is(err, ErrUsageUnavailable) {
+			usage = UsageInfo{Tier: "unknown", FetchedAt: time.Now().UTC()}
+			c.contextSize.Store(int64(usageContextWindow(usage.Tier)))
+			c.usage.Store(&usage)
+			return usage, nil
+		}
 		return UsageInfo{}, err
 	}
 	c.contextSize.Store(int64(usageContextWindow(usage.Tier)))
@@ -104,9 +130,11 @@ func (c *Client) fetchUsage(ctx context.Context, allowRefresh bool) (UsageInfo, 
 		return UsageInfo{}, retryableProtocolError(ErrSignedOut.Error(), ErrSignedOut)
 	}
 	usage, err := decodeUsageResponse(bytes.NewReader(body))
-	if allowRefresh && errors.Is(err, errUsageNotSignedIn) && c.refresh != nil {
+	if allowRefresh && (errors.Is(err, errUsageNotSignedIn) || errors.Is(err, ErrUsageUnavailable)) && c.refresh != nil {
+		// 先按原逻辑续签重试一次，排除 Cookie 刚过期造成的假阴性；
+		// 重试后仍无用量数据则由 FetchUsage 按“无用量、跳过”处理。
 		if err := c.refreshCookies(ctx, version); err != nil {
-			return UsageInfo{}, err
+			return UsageInfo{}, ErrUsageUnavailable
 		}
 		if err := c.init(ctx, false); err != nil {
 			return UsageInfo{}, err
@@ -127,15 +155,16 @@ func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
 		}
 		encoded, _ := stringAt(record, 2)
 		if encoded == "" {
-			return errUsageNotSignedIn
+			// 企业/Workspace 账号用量 RPC 返回空串：无用量数据，非未登录
+			return ErrUsageUnavailable
 		}
 		var payload []any
 		if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
-			return fmt.Errorf("解析官网用量数据: %w", err)
+			return usageUnavailable(fmt.Errorf("解析官网用量数据: %w", err))
 		}
 		parsed, err := parseUsageInfo(payload)
 		if err != nil {
-			return err
+			return usageUnavailable(err)
 		}
 		usage = parsed
 		found = true
@@ -145,7 +174,8 @@ func decodeUsageResponse(reader io.Reader) (UsageInfo, error) {
 		return UsageInfo{}, err
 	}
 	if !found {
-		return UsageInfo{}, errUsageNotSignedIn
+		// 响应里根本没有用量 RPC 记录：企业/Workspace 账号即如此
+		return UsageInfo{}, ErrUsageUnavailable
 	}
 	return usage, nil
 }
@@ -155,11 +185,12 @@ func parseUsageInfo(payload []any) (UsageInfo, error) {
 	if !ok {
 		return UsageInfo{}, fmt.Errorf("官网用量数据缺少套餐")
 	}
+	usage := UsageInfo{Tier: usageTier(tierCode), TierCode: tierCode, FetchedAt: time.Now().UTC()}
 	rows, ok := arrayAt(payload, 1)
 	if !ok {
-		return UsageInfo{}, fmt.Errorf("官网用量数据缺少用量窗口")
+		// 有套餐、无用量窗口行：企业/Workspace 账号的常见形态，视为无用量
+		return usage, nil
 	}
-	usage := UsageInfo{Tier: usageTier(tierCode), TierCode: tierCode, FetchedAt: time.Now().UTC()}
 	usage.UseOverageAICredits, _ = boolAt(payload, 2)
 	for _, rawRow := range rows {
 		row, ok := rawRow.([]any)

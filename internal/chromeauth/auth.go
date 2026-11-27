@@ -322,7 +322,7 @@ func (c *Chrome) importAccount(ctx context.Context, account Account, options Imp
 	return pendingImport{state: state, path: path, requestProxy: requestProxy}, nil
 }
 
-// validateAndWriteImports 以首页、模型目录与用量请求验证每个账号，全部通过后写入认证状态，返回各状态文件的路径与模型数
+// validateAndWriteImports 以首页与模型目录验证每个账号，全部通过后写入认证状态，返回各状态文件的路径与模型数。用量只做尽力读取：企业/Workspace 账号官网不提供用量窗口，读取失败（或返回“未登录”假象）一律跳过、不拦导入——登录状态已由 Init 的首页 bootstrap 校验。
 func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]string, int, error) {
 	models := make(map[string]struct{})
 	for index := range pending {
@@ -342,7 +342,8 @@ func validateAndWriteImports(ctx context.Context, pending []pendingImport) ([]st
 		accountContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err = client.Init(accountContext)
 		if err == nil {
-			_, err = client.FetchUsage(accountContext)
+			// 用量为尽力读取：失败直接跳过，不作为导入校验条件
+			_, _ = client.FetchUsage(accountContext)
 		}
 		cancel()
 		client.CloseIdleConnections()
